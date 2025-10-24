@@ -1,0 +1,31 @@
+Notes for Nesting Workbench
+
+
+#TODO
+Create a grid on a sheet (gridresolution) with each point stored in a list. Each point will have a bool
+to represent if it's occupied. Since each part is represented by a box which fits evenly on our grid we can place each
+ part with the bottom left corner of the bounding box. Since we know how many grid section the rectangular box takes
+ , we can make every vert except for the top row and the right column of verts as occupied.
+
+ We then move on the next largest part and place that to the right of this part.
+
+
+ Each grid vert stores an enum of the state (empty, edge, filled). Every bounding box (The shape bounds) will 
+ be converted to a grid with a resolution to match the grid. Each part grid will have a state of edge for 
+ verts at the edge of the bounds, filled for any verts inside the bouds, and empty for all points in voids
+ or outside of the bounds.
+
+ We will convolve the shape similar to convolution in vision processing. We'll move the shape from left to right 
+ across the bottom and rotate it 90 degrees 4 times at each step (if rotation is enabled).
+
+ We will do a fitment check at each step. If every edge and filled vertex matches with an empty vertex on the grid
+ then the shape fits and we place it there. For every edge or filled vertex in the part grid, set the grid
+ vertex to edge or filled
+
+
+ Set the vertex color on the grid to white - empty, red- edge, blue - filled
+
+
+Fix annealing step in gravity
+
+ Fix Minkowski nesting small objects in voids

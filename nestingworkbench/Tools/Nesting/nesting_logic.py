@@ -1,0 +1,72 @@
+import FreeCAD
+from PySide import QtGui
+
+from .algorithms import (
+    grid_fill_nester,
+    genetic_nester,
+    gravity_nester,
+    base_nester,
+    minkowski_nester,
+    sat_nester)
+
+class NestingDependencyError(Exception):
+    """Custom exception for missing optional dependencies like Shapely."""
+    pass
+
+try:
+    from shapely.geometry import Polygon
+    from shapely.affinity import translate, rotate
+    SHAPELY_AVAILABLE = True
+except ImportError:
+    SHAPELY_AVAILABLE = False
+
+# --- Public Function ---
+def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', update_callback=None, **kwargs):
+    """Convenience function to run the nesting algorithm."""
+    steps = 0
+    sheets = []
+    unplaced = []
+
+    nester_class = {
+        'Grid Fill': grid_fill_nester.GridFillNester,
+        'Genetic': genetic_nester.GeneticNester, # Not implemented
+        'Gravity': gravity_nester.GravityNester,
+        'Minkowski': minkowski_nester.MinkowskiNester,
+        'SAT': sat_nester.SatNester
+    }.get(algorithm, grid_fill_nester.GridFillNester)
+
+    if algorithm in ['Genetic', 'Gravity', 'Minkowski', 'SAT'] and not SHAPELY_AVAILABLE:
+        show_shapely_installation_instructions()
+        raise NestingDependencyError("The selected algorithm requires the 'Shapely' library, which is not installed.")
+
+    # The controller now passes a fresh list of all parts to be nested.
+    # The nester algorithms are responsible for the full multi-sheet nesting run.
+    nester = nester_class(width, height, rotation_steps, **kwargs)
+    result = nester.nest(parts, update_callback=update_callback)
+    if len(result) == 3:
+        sheets, unplaced, steps = result
+    else:
+        sheets, unplaced = result
+
+    return sheets, unplaced, steps
+
+def show_shapely_installation_instructions():
+    msg_box = QtGui.QMessageBox()
+    msg_box.setIcon(QtGui.QMessageBox.Warning)
+    msg_box.setWindowTitle("Shapely Library Not Found")
+    msg_box.setText("The selected nesting algorithm requires the 'Shapely' library, but it is not installed.")
+    msg_box.setInformativeText(
+        "To use this algorithm, you need to install the 'shapely' library into FreeCAD's Python environment.\n\n"
+        "1. **Find FreeCAD's Python Executable:**\n"
+        "   Open the Python console in FreeCAD and run:\n"
+        "   `import sys; print(sys.executable)`\n"
+        "   Copy the path that is printed.\n\n"
+        "2. **Open a Command Prompt:**\n"
+        "   Open a Windows Command Prompt (cmd.exe).\n\n"
+        "3. **Install Shapely:**\n"
+        "   In the command prompt, use the path you copied to run the following command (don't forget the quotes):\n"
+        "   `\"<path_to_python_exe>\" -m pip install shapely`\n\n"
+        "After installation, please restart FreeCAD."
+    )
+    msg_box.setStandardButtons(QtGui.QMessageBox.Ok)
+    msg_box.exec_()
