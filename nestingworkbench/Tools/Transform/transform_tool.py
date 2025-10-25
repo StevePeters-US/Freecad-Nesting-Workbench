@@ -1,26 +1,30 @@
-# Nesting/nesting/drag_tool.py
+# Nesting/nestingworkbench/Tools/Transform/transform_tool.py
 
 """
-This module contains the DragToolObserver class, which implements a simple
-drag-and-drop functionality for manually adjusting parts in a layout.
+This module contains the TransformToolObserver class, which implements a
+simple drag-and-drop functionality for manually transforming parts in a layout.
 """
 
 import FreeCAD
 import FreeCADGui
 from PySide import QtCore
+from .ui_transform import TransformToolUI
 
 class TransformToolObserver:
     """
-    A ViewObserver that captures mouse events to allow dragging of parts
-    within a selected layout group.
+    A ViewObserver that captures mouse events to allow transforming (dragging)
+    of parts within a selected layout group.
     """
-    def __init__(self, view):
+    def __init__(self, view, panel_manager):
+        self.panel_manager = panel_manager
         self.view = view
         self.pressed = False
         self.obj_to_move = None
         self.start_pos = None
         self.start_placement = None
         self.layout_group = None
+        self.original_placements = {}
+        self.original_visibilities = {}
 
         # Get the selected layout group
         selection = FreeCADGui.Selection.getSelection()
@@ -28,6 +32,33 @@ class TransformToolObserver:
             self.layout_group = selection[0]
         else:
             FreeCAD.Console.PrintWarning("Transform Tool: Please select a Layout group first.\n")
+            return
+
+        # Store original placements and manage visibility
+        for sheet_group in self.layout_group.Group:
+            if sheet_group.isDerivedFrom("App::DocumentObjectGroup"):
+                # Ensure sheet boundary is visible
+                sheet_boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("SheetBoundary")), None)
+                if sheet_boundary and hasattr(sheet_boundary, "ViewObject"):
+                    self.original_visibilities[sheet_boundary] = sheet_boundary.ViewObject.Visibility
+                    sheet_boundary.ViewObject.Visibility = True
+
+                for sub_group in sheet_group.Group: # e.g., "Objects_1", "Bounds_1"
+                    if sub_group.isDerivedFrom("App::DocumentObjectGroup"):
+                        for obj in sub_group.Group: # e.g., "packed_Part_1"
+                            self.original_placements[obj] = obj.Placement.copy()
+                            # Manage visibility
+                            if hasattr(obj, "ViewObject"):
+                                self.original_visibilities[obj] = obj.ViewObject.Visibility
+                                # Hide packed parts, show bounds/labels
+                                if obj.Label.startswith("packed_"):
+                                    obj.ViewObject.Visibility = False
+                                elif obj.Label.startswith("bound_") or obj.isDerivedFrom("Draft::ShapeString"):
+                                    obj.ViewObject.Visibility = True
+        
+        # After changing visibilities, we need to update the GUI to reflect them.
+        FreeCADGui.updateGui()
+
 
     def eventCallback(self, event_type, event):
         """The main callback method for handling mouse events."""
@@ -50,7 +81,6 @@ class TransformToolObserver:
 
             elif event["State"] == "UP" and event["Button"] == "BUTTON1":
                 if self.pressed and self.obj_to_move:
-                    self.save_placement()
                     self.pressed = False
                     self.obj_to_move = None
                     self.start_pos = None
@@ -82,19 +112,45 @@ class TransformToolObserver:
                         return True
         return False
 
-    def save_placement(self):
-        """Saves the new placement to the layout's OriginalPlacements property."""
-        if not self.obj_to_move or not self.layout_group:
+    def save_placements(self):
+        """Saves the new placements to the layout's OriginalPlacements property."""
+        if not self.layout_group:
             return
 
-        if hasattr(self.layout_group, "OriginalPlacements"):
-            placements_dict = self.layout_group.OriginalPlacements
-            p = self.obj_to_move.Placement
-            placement_data = [p.Base.x, p.Base.y, p.Base.z, p.Rotation.Q[0], p.Rotation.Q[1], p.Rotation.Q[2], p.Rotation.Q[3]]
-            placements_dict[self.obj_to_move.Name] = str(placement_data)
-            self.layout_group.OriginalPlacements = placements_dict
-            FreeCAD.Console.PrintMessage(f"Updated placement for {self.obj_to_move.Label}\n")
-            # If sheets were stacked, this move breaks the "stacked" state
-            if self.layout_group.IsStacked:
-                self.layout_group.IsStacked = False
-                FreeCAD.Console.PrintWarning("Layout is no longer considered stacked due to manual adjustment.\n")
+        # This logic is now handled by the panel manager's accept() method.
+        # We can add properties to the layout group to store changes if needed,
+        # but for simple drag/drop, the change is already applied to the object's Placement.
+        FreeCAD.Console.PrintMessage(f"Saved new placements for transformed objects.\n")
+        # If sheets were stacked, this move breaks the "stacked" state
+        if hasattr(self.layout_group, 'IsStacked') and self.layout_group.IsStacked:
+            self.layout_group.IsStacked = False
+            FreeCAD.Console.PrintWarning("Layout is no longer considered stacked due to manual adjustment.\n")
+
+    def cancel(self):
+        """Reverts any changes made to the object placements."""
+        if self.original_placements:
+            for obj, placement in self.original_placements.items():
+                if obj: # Check if object still exists
+                    obj.Placement = placement
+            FreeCAD.Console.PrintMessage("Transformations cancelled.\n")
+
+    def cleanup(self):
+        """Removes the event callbacks from the view."""
+        try:
+            self.view.removeEventCallback("SoMouseButtonEvent", self.eventCallback)
+            self.view.removeEventCallback("SoLocation2Event", self.eventCallback)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"Could not remove transform observer callbacks: {e}\n")
+        self.original_placements = {}
+        # Restore original visibility
+        for obj, is_visible in self.original_visibilities.items():
+            try:
+                if hasattr(obj, "ViewObject"):
+                    obj.ViewObject.Visibility = is_visible
+            except Exception:
+                pass # Object may have been deleted
+        self.original_visibilities = {}
+        
+        # After restoring visibilities, update the GUI again.
+        FreeCADGui.updateGui()
+        self.layout_group = None

@@ -239,8 +239,8 @@ class NestingPanel(QtGui.QWidget):
         if hasattr(layout_group, 'PartSpacing'):
             self.part_spacing_input.setValue(layout_group.PartSpacing)
         if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
-                self.selected_font_path = layout_group.FontFile
-                self.font_label.setText(os.path.basename(font_path))
+            self.selected_font_path = layout_group.FontFile
+            self.font_label.setText(os.path.basename(layout_group.FontFile))
 
         # Get the shapes from the layout
         shapes = []
