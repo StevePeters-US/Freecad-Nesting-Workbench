@@ -96,7 +96,6 @@ class AnnealController:
         # Remove the old layout before drawing the new one
         original_layout_name = self.layout_group.Label
         self.doc.removeObject(self.layout_group.Name)
-        self.doc.recompute()
 
         # The drawing function from NestingController can now be used
         self.nesting_controller._draw_layout(

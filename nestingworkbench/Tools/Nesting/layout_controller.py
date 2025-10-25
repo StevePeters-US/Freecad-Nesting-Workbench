@@ -81,6 +81,7 @@ class LayoutController:
 
     def execute(self, fp):
         """Creates the final layout group and draws all sheets and their contents."""
+        FreeCAD.Console.PrintMessage("7. Executing LayoutController.execute()...\n")
         # fp is the feature python object (self.obj)
         parent_group = fp
 
@@ -88,6 +89,7 @@ class LayoutController:
 
         # Iterate through the sheets and delegate drawing to the Sheet object itself
         for sheet in self.sheets:
+            FreeCAD.Console.PrintMessage(f"   - Drawing sheet {sheet.id}...\n")
             # The logic is now unified: parts always exist in the 'PartsToPlace' group.
             # We need to calculate the sheet's origin before drawing.
             sheet_origin = sheet.get_origin(spacing)
@@ -98,10 +100,13 @@ class LayoutController:
                 parent_group
             )
         
+        FreeCAD.Console.PrintMessage("8. Removing 'PartsToPlace' group...\n")
         # The 'PartsToPlace' group is now empty and can be removed.
         parts_to_place_group = fp.getObject("PartsToPlace")
         if parts_to_place_group:
             fp.Document.removeObject(parts_to_place_group.Name)
+        FreeCAD.Console.PrintMessage("   - 'PartsToPlace' group removed.\n")
+        FreeCAD.Console.PrintMessage("9. LayoutController.execute() finished.\n")
 
     @property
     def doc(self):

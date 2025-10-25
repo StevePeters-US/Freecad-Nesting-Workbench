@@ -199,6 +199,9 @@ class Sheet:
                 shape_obj.Label = f"nested_{shape.id}"
                 shapes_group.addObject(shape_obj)
 
+                # CRITICAL: Apply the final calculated placement to the FreeCAD object.
+                shape_obj.Placement = final_placement
+
                 # Set initial visibility from UI params, which will also set the ShowShape property
                 shape_obj.ShowShape = True
                 shape_obj.ShowBounds = ui_params.get('show_bounds', False)
@@ -210,6 +213,8 @@ class Sheet:
                     # The ShapeObject's onChanged logic will handle visibility based on the
                     # ShowBounds property that was set a few lines above.
                     if hasattr(boundary_obj, "ViewObject"):
+                        # CRITICAL: Also apply the final placement to the boundary object.
+                        boundary_obj.Placement = final_placement
                         boundary_obj.ViewObject.Visibility = shape_obj.ShowBounds
                         
             if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
@@ -229,7 +234,7 @@ class Sheet:
 
                 # The final center of the part is the center of its bounding box after placement.
                 # We use the shape_obj which has the final placement applied.
-                final_part_center = shape_obj.Shape.BoundBox.Center.add(final_placement.Base)
+                final_part_center = shape_obj.Shape.BoundBox.transformed(shape_obj.Placement.Matrix).Center
 
                 # Add a small Z-offset to ensure the label is drawn on top of the part.
                 final_part_center.z += ui_params.get('label_height', 0.1)

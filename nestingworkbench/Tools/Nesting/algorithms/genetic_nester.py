@@ -22,7 +22,7 @@ class GeneticNester(BaseNester):
         self.mutation_rate = kwargs.get("mutation_rate", 0.1)
         self.elite_size = max(1, int(self.population_size * 0.1)) # Keep the top 10%
 
-    def nest(self, update_callback=None):
+    def nest(self, parts_to_place, update_callback=None):
         """
         Main genetic algorithm loop.
         """
@@ -47,11 +47,6 @@ class GeneticNester(BaseNester):
             # Update the best solution found so far
             if best_solution_overall is None or ranked_population[0][0] < best_solution_overall[0]:
                 best_solution_overall = ranked_population[0]
-                # If callback is provided, show the new best layout
-                if update_callback:
-                    sheets, _ = self._placer(best_solution_overall[1])
-                    preview_layouts = {s.id: [p.shape.shape_bounds for p in s.parts] for s in sheets}
-                    update_callback(preview_layouts)
             
             FreeCAD.Console.PrintMessage(f"Generation {gen+1}/{self.generations}, Best Fitness: {best_solution_overall[0]:.2f}\n")
 

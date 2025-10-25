@@ -27,7 +27,7 @@ def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs
     unplaced = []
 
     nester_class = {
-        'Genetic': genetic_nester.GeneticNester, # Not implemented
+        'Genetic': genetic_nester.GeneticNester,
         'Gravity': gravity_nester.GravityNester,
         'Minkowski': minkowski_nester.MinkowskiNester,
         'SAT': sat_nester.SatNester

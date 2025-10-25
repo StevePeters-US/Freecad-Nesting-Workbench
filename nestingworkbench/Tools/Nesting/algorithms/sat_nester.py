@@ -10,7 +10,7 @@ class SatNester(BaseNester):
     the best position along the boundary of the combined shape of already placed parts.
     """
 
-    def _try_place_part_on_sheet(self, part_to_place, sheet, update_callback):
+    def _try_place_part_on_sheet(self, part_to_place, sheet, update_callback=None):
         """
         Tries to place a single part on the given sheet using an SAT-based strategy.
         It finds the best position by "sliding" the part along existing boundaries.
@@ -31,9 +31,6 @@ class SatNester(BaseNester):
                 # For the first part, place it at the origin.
                 part_to_place.move_to(0, 0)
                 if sheet.is_placement_valid(part_to_place):
-                    if update_callback:
-                        sheet_index = sheet.id if sheet else len(self.sheets)
-                        update_callback({sheet_index: [part_to_place.shape_bounds]}, moving_part=part_to_place, current_sheet_id=sheet_index)
                     return part_to_place
                 else:
                     continue # Try next rotation if origin placement is invalid
@@ -56,10 +53,6 @@ class SatNester(BaseNester):
         if best_placement_info['x'] is not None:
             part_to_place.set_rotation(best_placement_info['angle'])
             part_to_place.move_to(best_placement_info['x'], best_placement_info['y'])
-            if update_callback:
-                sheet_index = sheet.id if sheet else len(self.sheets)
-                current_bounds = [p.shape.shape_bounds for p in sheet.parts] if sheet else []
-                update_callback({sheet_index: current_bounds + [part_to_place.shape_bounds]}, moving_part=part_to_place, current_sheet_id=sheet_index)
             return part_to_place
 
         return None

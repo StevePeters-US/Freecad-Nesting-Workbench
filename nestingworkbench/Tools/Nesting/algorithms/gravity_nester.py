@@ -1,6 +1,8 @@
 import random
 import copy
 import math
+import pdb
+from PySide import QtGui
 import FreeCAD
 from .base_nester import BaseNester
 
@@ -18,7 +20,7 @@ class GravityNester(BaseNester):
         self.max_spawn_count = kwargs.get("max_spawn_count", 100)
         self.max_nesting_steps = kwargs.get("max_nesting_steps", 500)
 
-    def _try_place_part_on_sheet(self, part_to_place, sheet):
+    def _try_place_part_on_sheet(self, part_to_place, sheet, **kwargs):
         """
         Tries to place a single part on the given sheet using gravity simulation.
         Returns the placed part on success, None on failure.
@@ -49,6 +51,8 @@ class GravityNester(BaseNester):
             # Record the last valid position's bottom-left corner
             last_valid_x, last_valid_y, _, _ = part.bounding_box()
             part.move(direction[0] * self.step_size, direction[1] * self.step_size)
+            QtGui.QApplication.processEvents() # Force UI update for animation
+            # pdb.set_trace() # DEBUG: Uncomment to pause execution here
 
             if not sheet.is_placement_valid(part, recalculate_union=False, part_to_ignore=part):
                 # Collision detected. Revert to the last valid position.

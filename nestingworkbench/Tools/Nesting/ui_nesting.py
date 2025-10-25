@@ -395,40 +395,6 @@ class NestingPanel(QtGui.QWidget):
         except Exception:
             pass
             
-    def _delete_current_temporary_preview(self):
-        """Robustly removes the current temporary preview group."""
-        doc = FreeCAD.ActiveDocument
-        if not doc: return
-        
-        # Now, clean up any leftover temporary preview groups from previous operations.
-        groups_to_delete = []
-        for obj in doc.Objects:
-            if hasattr(obj, "Label") and obj.Label.startswith(self.preview_group_name):
-                groups_to_delete.append(obj)
-        
-        for group in groups_to_delete:
-            self._recursive_delete(doc, group)
-        
-        if groups_to_delete:
-            doc.recompute()
-
-    def cleanup_preview(self):
-        """
-        Hides existing finalized layouts and deletes any old temporary preview groups.
-        This is typically called at the start of a new nesting operation.
-        """
-        doc = FreeCAD.ActiveDocument
-        if not doc: return
-        
-        # Hide existing finalized layouts
-        self.hidden_layouts.clear()
-        for obj in doc.Objects:
-            if obj.Label.startswith("Layout_"):
-                if hasattr(obj, "ViewObject"):
-                    obj.ViewObject.Visibility = False
-                self.hidden_layouts.append(obj)
-        self._delete_current_temporary_preview()
-
     def handle_accept(self):
         """Finalizes the preview layout by renaming its Label to a permanent, unique name."""
         self.accepted = True
@@ -467,7 +433,6 @@ class NestingPanel(QtGui.QWidget):
             # Simply rename the Label. This makes it "permanent" as far as our logic is concerned,
             # because the cleanup function only deletes objects with the original temporary label.
             preview_group.Label = final_name
-            doc.recompute()
             
             # Ensure the newly finalized group is visible
             if hasattr(preview_group, "ViewObject"):
@@ -480,8 +445,13 @@ class NestingPanel(QtGui.QWidget):
         if not doc: return
 
         # Restore visibility of any previously existing layouts that were hidden
-        # First, ensure the temporary preview group is deleted.
-        self._delete_current_temporary_preview()
+        # Find and delete the temporary group that was being built.
+        temp_group = None
+        for obj in doc.Objects:
+            if hasattr(obj, "Label") and obj.Label.startswith(self.preview_group_name):
+                temp_group = obj
+                break
+        if temp_group: self._recursive_delete(doc, temp_group)
 
         # Restore visibility of original shapes that were hidden
         for obj in self.hidden_originals:

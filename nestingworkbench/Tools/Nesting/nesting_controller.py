@@ -59,21 +59,10 @@ class NestingController:
 
     def execute_nesting(self):
         """Main method to run the entire nesting process."""
+        FreeCAD.Console.PrintMessage("\n--- NESTING START ---\n")
         start_time = time.time()
         if not self.doc:
             return
-
-        # Check if we are in edit mode
-        selection = FreeCADGui.Selection.getSelection()
-        edit_mode = False
-        original_layout_name = None
-        if selection:
-            first_selected = selection[0]
-            if first_selected.isDerivedFrom("App::DocumentObjectGroup") and first_selected.Label.startswith("Layout_"):
-                edit_mode = True
-                original_layout_name = first_selected.Label
-                self.doc.removeObject(first_selected.Name)
-                self.doc.recompute()
 
         # Check if a font is needed and has been selected
         font_path = getattr(self.ui, 'selected_font_path', None)
@@ -89,6 +78,7 @@ class NestingController:
         QtGui.QApplication.processEvents()
 
         # --- Create the final LayoutObject FIRST ---
+        FreeCAD.Console.PrintMessage("1. Creating LayoutObject...\n")
         base_name, i = "Layout", 0
         existing_labels = [o.Label for o in self.doc.Objects]
         while f"{base_name}_{i:03d}" in existing_labels:
@@ -98,6 +88,9 @@ class NestingController:
         layout_obj = create_layout_object(layout_name)
         layout_proxy = layout_obj.Proxy
         QtGui.QApplication.processEvents()
+        # Ensure the new layout group is visible by default.
+        if hasattr(layout_obj, "ViewObject"):
+            layout_obj.ViewObject.Visibility = True
 
         # --- Prepare Parts and Master Shapes ---
         # This creates the in-memory representations of the parts to be nested
@@ -120,10 +113,10 @@ class NestingController:
             # The shape_bounds.source_centroid contains the necessary offset to align
             # the shape with its origin-centered boundary polygon.
             shape_copy = original_obj.Shape.copy()
-            if shape_wrapper.shape_bounds and shape_wrapper.shape_bounds.source_centroid:
-                shape_copy.translate(-shape_wrapper.shape_bounds.source_centroid)
-            
+            if shape_wrapper.shape_bounds and hasattr(shape_wrapper.shape_bounds, 'source_centroid') and shape_wrapper.shape_bounds.source_centroid:
+                shape_copy.translate(-shape_wrapper.shape_bounds.source_centroid) # This is the correct alignment logic.
             master_obj.Shape = shape_copy
+
             master_shapes_group.addObject(master_obj)
 
             # Now, draw the bounds for this master shape and link them.
@@ -135,9 +128,9 @@ class NestingController:
                     # The 'BoundaryObject' and 'ShowBounds' properties are already added by the ShapeObject class.
                     # We just need to set their values.
                     master_obj.BoundaryObject = boundary_obj
-                    master_obj.ShowBounds = self.ui.show_bounds_checkbox.isChecked()
+                    master_obj.ShowBounds = False # Master shape bounds should always be off by default.
                     if hasattr(boundary_obj, "ViewObject"):
-                        boundary_obj.ViewObject.Visibility = master_obj.ShowBounds
+                        boundary_obj.ViewObject.Visibility = False
 
             # --- Create Label for Master Shape ---
             if self.ui.add_labels_checkbox.isChecked() and Draft and self.ui.selected_font_path and hasattr(shape_wrapper, 'label_text') and shape_wrapper.label_text:
@@ -190,6 +183,9 @@ class NestingController:
                     bounds_copy.Label = f"bounds_{part_instance.id}"
                     parts_to_place_group.addObject(bounds_copy)
                     part_copy.BoundaryObject = bounds_copy # Link the bound to the part copy
+                    # Make the bounds visible during the nesting process
+                    if hasattr(bounds_copy, "ViewObject"):
+                        bounds_copy.ViewObject.Visibility = True
         
         self.ui.status_label.setText("Running nesting algorithm...")
         spacing = self.ui.part_spacing_input.value()
@@ -233,8 +229,6 @@ class NestingController:
             'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
             'add_labels': self.ui.add_labels_checkbox.isChecked(),
             'label_height': self.ui.label_height_input.value(), # This widget is in NestingPanel
-            'edit_mode': edit_mode,
-            'original_layout_name': original_layout_name
         }
 
         try:
@@ -253,17 +247,20 @@ class NestingController:
         self.last_run_sheets = sheets
         self.last_run_unplaced_parts = remaining_parts_to_nest
 
-        # Final cleanup before drawing the final layout
-        self.ui.cleanup_preview()
-
-        # Now update the proxy with the results from the nesting algorithm.
-        layout_proxy.setup(
-            sheets=sheets,
-            ui_params=self.last_run_ui_params,
-            master_shapes=master_shape_wrappers, # Still needed for some logic
-            unplaced_parts=remaining_parts_to_nest,
-        )
-        self.doc.recompute()
+        # --- Draw the final layout directly, without recompute ---
+        # The LayoutController's execute method is no longer used.
+        # We perform all drawing actions imperatively here.
+        for sheet in sheets:
+            sheet_origin = sheet.get_origin(spacing)
+            sheet.draw(
+                self.doc,
+                sheet_origin,
+                self.last_run_ui_params,
+                layout_obj # The parent group is the layout object itself
+            )
+        
+        # Now that the recompute is finished and parts are moved, it is safe to remove the empty group.
+        self.doc.removeObject(parts_to_place_group.Name)
         
         placed_count = sum(len(s) for s in sheets)
         status_text = f"Placed {placed_count} shapes on {len(sheets)} sheets."
@@ -290,14 +287,13 @@ class NestingController:
         # The ShapeObject's onChanged method will handle the visibility change.
         toggled_count = 0
         for obj in self.doc.Objects:
-            # Only toggle bounds for the final nested parts, not the master shapes.
-            if obj.Label.startswith("nested_") and hasattr(obj, "Proxy") and isinstance(obj.Proxy, object) and obj.Proxy.__class__.__name__ == "ShapeObject":
-                if hasattr(obj, "ShowBounds"):
-                    obj.ShowBounds = is_visible
-                    toggled_count += 1
+            # Only toggle bounds for the final nested parts, which are prefixed with "nested_".
+            # Master shapes are prefixed with "master_" and will be ignored.
+            if obj.Label.startswith("nested_") and hasattr(obj, "ShowBounds"):
+                obj.ShowBounds = is_visible
+                toggled_count += 1
         
         self.ui.status_label.setText(f"Toggled bounds visibility for {toggled_count} shapes.")
-        self.doc.recompute()
 
     def _prepare_parts_from_ui(self, spacing, boundary_resolution):
         """Reads the UI table and creates a list of Shape objects to be nested."""

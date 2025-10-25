@@ -26,14 +26,6 @@ class NestingTaskPanel:
     def reject(self):
         """Called by FreeCAD when the dialog is closed or 'Cancel' is clicked."""
         self.form.handle_cancel()
-        if not self.form.accepted:
-            self.form.cleanup_preview()
-            for obj in self.form.hidden_originals:
-                try:
-                    if hasattr(obj, "ViewObject"): 
-                        obj.ViewObject.Visibility = True
-                except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"Could not restore visibility for {obj.Label}: {e}\n")
         
         self.cleanup()
         return True

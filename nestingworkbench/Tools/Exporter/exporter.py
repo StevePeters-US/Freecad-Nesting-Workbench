@@ -76,7 +76,6 @@ class SheetExporter:
         # If a folder with this name already exists, remove it for a clean slate
         if self.doc.getObject(views_folder_name):
             self.doc.removeObject(views_folder_name)
-            self.doc.recompute()
 
         views_folder = self.doc.addObject("App::DocumentObjectGroup", views_folder_name)
 
@@ -128,7 +127,6 @@ class SheetExporter:
             except Exception as e:
                 FreeCAD.Console.PrintError(f"An error occurred during view creation for {sheet_group.Label}: {e}\n")
 
-        self.doc.recompute()
         FreeCAD.Console.PrintMessage(f"Finished creating 2D views in folder: {views_folder.Label}\n")
 
         # Export to DXF
@@ -142,7 +140,6 @@ class SheetExporter:
         # Delete the generated 2D views if requested
         if delete_generated_objects:
             self._recursive_delete(self.doc, views_folder)
-            self.doc.recompute()
             FreeCAD.Console.PrintMessage("Deleted temporary 2D views folder.\n")
 
     def _recursive_delete(self, doc, obj_to_delete):
@@ -162,4 +159,3 @@ class SheetExporter:
             doc.removeObject(obj_to_delete.Name)
         except Exception:
             pass
-

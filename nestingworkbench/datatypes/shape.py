@@ -139,12 +139,10 @@ class Shape:
         # The final target position for the shape's source_centroid.
         target_centroid_pos = sheet_origin + nested_centroid
 
-        rotation_center = self.__shape_bounds.source_centroid if self.__shape_bounds and self.__shape_bounds.source_centroid else FreeCAD.Vector(0, 0, 0)
-
-        final_position = target_centroid_pos - rotation_center
+        final_position = target_centroid_pos
 
         # Create the final placement.
-        return FreeCAD.Placement(final_position, rotation, rotation_center)
+        return FreeCAD.Placement(final_position, rotation)
 
     def set_shape_bounds(self, shape_bounds):
         """
@@ -193,7 +191,7 @@ class Shape:
             new_placement = self.get_final_placement()
             self.fc_object.Placement = new_placement
             if hasattr(self.fc_object, 'BoundaryObject') and self.fc_object.BoundaryObject:
-                self.fc_object.BoundaryObject.Placement = new_placement
+                self.fc_object.BoundaryObject.Placement = self.fc_object.Placement.copy()
     
     def bounding_box(self):
         """

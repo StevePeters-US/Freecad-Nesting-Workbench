@@ -28,7 +28,7 @@ class MinkowskiNester(BaseNester):
         """
         return super().nest(parts_to_place, update_callback)
 
-    def _try_place_part_on_sheet(self, part_to_place, sheet, update_callback):
+    def _try_place_part_on_sheet(self, part_to_place, sheet, **kwargs):
         """
         Tries to place a single shape on a given sheet using Minkowski sums.
         Returns the placed shape on success, None on failure.
@@ -54,9 +54,7 @@ class MinkowskiNester(BaseNester):
 
                 # We must check if the part actually fits at the origin at the current rotation.
                 if sheet.is_placement_valid(part_to_place):
-                    if update_callback: # Animate the placement
-                        sheet_index = sheet.id if sheet else len(self.sheets)
-                        update_callback({sheet_index: [part_to_place.shape_bounds]}, moving_part=part_to_place, current_sheet_id=sheet_index)
+                    QtGui.QApplication.processEvents() # Animate the placement
                     return part_to_place
                 else:
                     # If it doesn't fit at the origin (e.g., a large part at a weird angle),
@@ -82,7 +80,7 @@ class MinkowskiNester(BaseNester):
                     
                     master_nfp = self._calculate_and_cache_nfp(
                         placed_part_master_poly, placed_part_angle, 
-                        part_to_place_master_poly, angle, cache_key, update_callback
+                        part_to_place_master_poly, angle, cache_key
                     )
 
                 if master_nfp:
@@ -134,11 +132,7 @@ class MinkowskiNester(BaseNester):
             dx = best_x - current_centroid.x
             dy = best_y - current_centroid.y
             part_to_place.move(dx, dy)
-
-            if update_callback:
-                sheet_index = sheet.id if sheet else len(self.sheets)
-                current_bounds = [p.shape.shape_bounds for p in sheet.parts] if sheet else []
-                update_callback({sheet_index: current_bounds + [part_to_place.shape_bounds]}, moving_part=part_to_place, current_sheet_id=sheet_index)
+            QtGui.QApplication.processEvents()
 
             return part_to_place
 
@@ -180,13 +174,10 @@ class MinkowskiNester(BaseNester):
 
         return list(MultiPoint(points).geoms) # Return unique points
 
-    def _calculate_and_cache_nfp(self, poly_A_master, angle_A, poly_B_master, angle_B, cache_key, update_callback=None):
+    def _calculate_and_cache_nfp(self, poly_A_master, angle_A, poly_B_master, angle_B, cache_key):
         """Calculates the NFP between two polygons and stores it in the cache."""
         if cache_key in self._nfp_cache:
             return self._nfp_cache[cache_key]
-
-        if update_callback:
-            QtGui.QApplication.processEvents()
 
         # --- NFP Calculation with Hole Support ---
         # The NFP exterior is the minkowski sum of A's exterior and the reflected B.
