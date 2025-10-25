@@ -112,16 +112,18 @@ class AnnealController:
         self.ui.status_label.setText(status_text)
 
     def _get_params_from_spreadsheet(self):
-        """Reads layout parameters from the spreadsheet inside the layout group."""
-        spreadsheet = self.layout_group.getObject("LayoutParameters")
-        if not spreadsheet: return None
+        """Reads layout parameters from the properties of the layout group."""
+        if not self.layout_group: return None
         try:
-            return {
-                "width": float(spreadsheet.get('B2')),
-                "height": float(spreadsheet.get('B3')),
-                "spacing": float(spreadsheet.get('B4'))
-            }
-        except: return None
+            if hasattr(self.layout_group, 'SheetWidth') and hasattr(self.layout_group, 'SheetHeight') and hasattr(self.layout_group, 'PartSpacing'):
+                return {
+                    "width": self.layout_group.SheetWidth,
+                    "height": self.layout_group.SheetHeight,
+                    "spacing": self.layout_group.PartSpacing
+                }
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"Error reading properties from layout group: {e}\n")
+        return None
 
     def _run_annealing_on_sheet(self, parts_to_anneal, fixed_parts, sheet_w, sheet_h):
         """

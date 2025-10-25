@@ -231,15 +231,15 @@ class NestingPanel(QtGui.QWidget):
         self.selected_shapes_to_process = []
         self.hidden_originals = []
 
-        # Parse the spreadsheet
-        spreadsheet = layout_group.getObject("LayoutParameters")
-        if spreadsheet:
-            self.sheet_width_input.setValue(spreadsheet.get('B2'))
-            self.sheet_height_input.setValue(spreadsheet.get('B3'))
-            self.part_spacing_input.setValue(spreadsheet.get('B4'))
-            font_path = spreadsheet.get('B5')
-            if font_path and os.path.exists(font_path):
-                self.selected_font_path = font_path
+        # Read parameters directly from the layout group's properties
+        if hasattr(layout_group, 'SheetWidth'):
+            self.sheet_width_input.setValue(layout_group.SheetWidth)
+        if hasattr(layout_group, 'SheetHeight'):
+            self.sheet_height_input.setValue(layout_group.SheetHeight)
+        if hasattr(layout_group, 'PartSpacing'):
+            self.part_spacing_input.setValue(layout_group.PartSpacing)
+        if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
+                self.selected_font_path = layout_group.FontFile
                 self.font_label.setText(os.path.basename(font_path))
 
         # Get the shapes from the layout

@@ -9,7 +9,6 @@ import FreeCAD
 import Part
 import copy
 import math
-from .spreadsheet_utils import create_layout_spreadsheet
 
 try:
     from shapely.affinity import translate
@@ -55,11 +54,18 @@ class LayoutController:
         parent_group.addProperty("App::PropertyBool", "IsStacked", "Nesting").IsStacked = False
         parent_group.addProperty("App::PropertyMap", "OriginalPlacements", "Nesting")
 
-        # Use the new helper method to get fill percentages
+        # Store parameters directly on the layout group object
+        parent_group.addProperty("App::PropertyFloat", "SheetWidth", "Nesting").SheetWidth = self.ui_params.get('sheet_w', 0)
+        parent_group.addProperty("App::PropertyFloat", "SheetHeight", "Nesting").SheetHeight = self.ui_params.get('sheet_h', 0)
+        parent_group.addProperty("App::PropertyFloat", "PartSpacing", "Nesting").PartSpacing = self.ui_params.get('spacing', 0)
+        parent_group.addProperty("App::PropertyFile", "FontFile", "Nesting").FontFile = self.ui_params.get('font_path', '')
+
+        # Store efficiencies in a PropertyMap for cleanliness
         sheet_fills = self.calculate_sheet_fills()
-        
-        # Create the spreadsheet using the utility function
-        create_layout_spreadsheet(self.doc, parent_group, self.ui_params, sheet_fills)
+        if sheet_fills:
+            parent_group.addProperty("App::PropertyMap", "SheetEfficiencies", "Nesting")
+            efficiencies_map = {f"Sheet_{i+1}": f"{eff:.2f}%" for i, eff in enumerate(sheet_fills)}
+            parent_group.SheetEfficiencies = efficiencies_map
 
         spacing = self.ui_params.get('spacing', 0)
 

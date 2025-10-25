@@ -55,25 +55,18 @@ class SheetStacker:
                 all_objects.append(obj)
         return all_objects
 
-    def _get_params_from_spreadsheet(self):
-        """Reads layout parameters from the spreadsheet inside the layout group."""
+    def _get_params_from_layout_group(self):
+        """Reads layout parameters from the properties of the layout group."""
         if not self.layout_group:
-            return None
-        
-        spreadsheet = None
-        for obj in self.layout_group.Group:
-            if obj.isDerivedFrom("Spreadsheet::Sheet"):
-                spreadsheet = obj
-                break
-        
-        if not spreadsheet:
-            FreeCAD.Console.PrintWarning("Could not find LayoutParameters spreadsheet. Stacking may be inaccurate.\n")
             return None
 
         try:
-            width = float(spreadsheet.get('B2'))
-            spacing = float(spreadsheet.get('B4'))
-            return {"width": width, "spacing": spacing}
+            # Check for properties directly on the group object
+            if hasattr(self.layout_group, 'SheetWidth') and hasattr(self.layout_group, 'PartSpacing'):
+                return {"width": self.layout_group.SheetWidth, "spacing": self.layout_group.PartSpacing}
+            else:
+                FreeCAD.Console.PrintWarning("Could not find parameter properties on the layout group. Stacking may be inaccurate.\n")
+                return None
         except Exception as e:
             FreeCAD.Console.PrintError(f"Error reading from spreadsheet: {e}\n")
             return None
@@ -93,7 +86,7 @@ class SheetStacker:
 
     def _stack(self):
         """Moves all objects in sheets 2 and higher to overlay sheet 1."""
-        params = self._get_params_from_spreadsheet()
+        params = self._get_params_from_layout_group()
         if not params:
             FreeCAD.Console.PrintError("Could not retrieve sheet parameters. Stacking aborted.\n")
             return

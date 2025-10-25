@@ -15,7 +15,6 @@ import time
 
 # Import QtGui for UI event processing
 from PySide import QtGui
-from .nesting_logic import nest, NestingDependencyError
 
 # Import other necessary modules from the workbench
 from .layout_controller import LayoutController # This is a placeholder, will be replaced by the correct import
@@ -23,6 +22,7 @@ from .algorithms import shape_processor
 from ...datatypes.shape import Shape
 
 try:
+    from .nesting_logic import nest, NestingDependencyError
     import Draft
 except ImportError:
     Draft = None
