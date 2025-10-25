@@ -31,6 +31,7 @@ class Shape:
         self.show_bounds = False # Default to false, controller will set initial state
         self.rotation_steps = 1 # The definitive number of rotation steps for this part.
         
+        self.fc_object = None # Link to the physical FreeCAD object in the 'PartsToPlace' group
         # This will be populated with the final placement after nesting.
         self.placement = None
 
@@ -51,7 +52,7 @@ class Shape:
 
         # Deepcopy the other attributes that are safe to copy (including __shape_bounds).
         for k, v in self.__dict__.items():
-            if k not in ['source_freecad_object']:
+            if k not in ['source_freecad_object', 'fc_object']: # Don't deepcopy the fc_object link
                 setattr(result, k, copy.deepcopy(v, memo))
         return result
 
@@ -73,18 +74,6 @@ class Shape:
         """Read-only access to the ShapeBounds object."""
         return self.__shape_bounds
 
-    def get_final_bounds_polygon(self, sheet_origin_vector):
-        """
-        Returns the shape_bounds polygon translated to its final position on the sheet.
-
-        :param sheet_origin_vector: A FreeCAD.Vector representing the origin of the sheet.
-        :return: A translated shapely.geometry.Polygon, or None.
-        """
-        if not self.__shape_bounds or not self.__shape_bounds.polygon or not SHAPELY_AVAILABLE:
-            return None
-        
-        return translate(self.__shape_bounds.polygon, xoff=sheet_origin_vector.x, yoff=sheet_origin_vector.y)
-
     def draw_bounds(self, doc, sheet_origin, group):
         """
         Draws the exterior and interior boundaries of the shape's final polygon in FreeCAD.
@@ -96,8 +85,11 @@ class Shape:
         Returns:
             App.DocumentObject: The created or updated boundary object, or None.
         """
-        final_polygon = self.get_final_bounds_polygon(sheet_origin)
-        if not final_polygon: return None
+        if not self.__shape_bounds or not self.__shape_bounds.polygon or not SHAPELY_AVAILABLE:
+            return None
+        
+        # The polygon in shape_bounds is already rotated. We just need to translate it.
+        final_polygon = translate(self.__shape_bounds.polygon, xoff=sheet_origin.x, yoff=sheet_origin.y)
 
         bound_obj_name = f"bound_{self.id}"
         bound_obj = doc.getObject(bound_obj_name)
@@ -123,31 +115,30 @@ class Shape:
             if FreeCAD.GuiUp: bound_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)
         return bound_obj
 
-    def get_final_placement(self, sheet_origin, nested_centroid, angle_deg):
+    def get_final_placement(self, sheet_origin=None):
         """
         Calculates the final FreeCAD.Placement for the object.
-
-        This method assumes that the shape's bounds have been normalized by the
-        shape_processor, meaning the offset_vector is zero.
+        This method uses the current state of the underlying ShapeBounds object.
 
         :param sheet_origin: FreeCAD.Vector for the sheet's bottom-left corner.
-        :param nested_centroid: FreeCAD.Vector for the part's centroid on the virtual sheet.
-        :param angle_deg: The rotation angle in degrees.
         :return: A final FreeCAD.Placement object.
         """
+        if not self.__shape_bounds or not self.__shape_bounds.polygon:
+            return FreeCAD.Placement()
+
+        if sheet_origin is None:
+            sheet_origin = FreeCAD.Vector(0,0,0)
+
+        nested_centroid_shapely = self.__shape_bounds.polygon.centroid
+        nested_centroid = FreeCAD.Vector(nested_centroid_shapely.x, nested_centroid_shapely.y, 0)
+        angle_deg = self.__shape_bounds.angle
+
         # Define the rotation.
         rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle_deg)
 
         # The final target position for the shape's source_centroid.
         target_centroid_pos = sheet_origin + nested_centroid
 
-        # The FreeCAD Placement constructor with a center argument follows the formula:
-        # final_point = Base + Center + Rotation * (point - Center) (where Center is the rotation center)
-        # We want the final position of the source_centroid to be target_centroid_pos.
-        # we must set Base = target_centroid_pos - rotation_center.
-        
-        # It is critical to check for shape_bounds and source_centroid, as this method might be
-        # called on temporary objects during preview that don't have these fully initialized.
         rotation_center = self.__shape_bounds.source_centroid if self.__shape_bounds and self.__shape_bounds.source_centroid else FreeCAD.Vector(0, 0, 0)
 
         final_position = target_centroid_pos - rotation_center
@@ -174,6 +165,7 @@ class Shape:
         """
         if self.__shape_bounds:
             self.__shape_bounds.set_rotation(angle, **kwargs)
+            self._update_fc_object_placement()
 
     def move(self, dx, dy):
         """
@@ -182,6 +174,7 @@ class Shape:
         """
         if self.__shape_bounds:
             self.__shape_bounds.move(dx, dy)
+            self._update_fc_object_placement()
 
     def move_to(self, x, y):
         """
@@ -190,7 +183,18 @@ class Shape:
         """
         if self.__shape_bounds:
             self.__shape_bounds.move_to(x, y)
+            self._update_fc_object_placement()
 
+    def _update_fc_object_placement(self):
+        """Updates the associated FreeCAD object's placement if it exists."""
+        if hasattr(self, 'fc_object') and self.fc_object:
+            # We calculate the placement on-the-fly from the current state.
+            # The sheet origin is (0,0,0) during the nesting phase.
+            new_placement = self.get_final_placement()
+            self.fc_object.Placement = new_placement
+            if hasattr(self.fc_object, 'BoundaryObject') and self.fc_object.BoundaryObject:
+                self.fc_object.BoundaryObject.Placement = new_placement
+    
     def bounding_box(self):
         """
         Returns the bounding box of the shape's bounds.

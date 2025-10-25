@@ -9,8 +9,6 @@ buffered boundaries.
 import FreeCAD
 import Part
 import math
-from ....datatypes.vert_state import VertState
-from .... import utils # Using the new utils file for helper functions
 
 def get_2d_profile_from_obj(obj):
     """

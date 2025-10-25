@@ -189,14 +189,14 @@ class Sheet:
         # Draw the parts placed on this sheet
         for placed_part in self.parts:
             shape = placed_part.shape
-            nested_centroid_on_sheet = FreeCAD.Vector(placed_part.x, placed_part.y, 0)
-            final_placement = shape.get_final_placement(sheet_origin, nested_centroid_on_sheet, placed_part.angle)
+            # The final placement is now pre-calculated by the nester and stored on the shape object.
+            # We should use this directly instead of recalculating it.
+            final_placement = shape.placement
 
-            if draw_shape:
-                shape_obj = create_shape_object(f"nested_{shape.id}")
-                
-                shape_obj.Shape = shape.source_freecad_object.Shape.copy()
-                shape_obj.Placement = final_placement
+            shape_obj = shape.fc_object
+            if shape_obj:
+                # This is the correct logic: find the existing object, rename it, and move it.
+                shape_obj.Label = f"nested_{shape.id}"
                 shapes_group.addObject(shape_obj)
 
                 # Set initial visibility from UI params, which will also set the ShowShape property
@@ -204,15 +204,11 @@ class Sheet:
                 shape_obj.ShowBounds = ui_params.get('show_bounds', False)
                 shape_obj.ShowLabel = ui_params.get('add_labels', False)
 
-            # Always create the boundary object if the data exists.
-            if shape.shape_bounds and shape.shape_bounds.polygon:
-                # The draw_bounds method now returns the created boundary object
-                boundary_obj = shape.draw_bounds(doc, sheet_origin, shapes_group)
-                if 'shape_obj' in locals() and boundary_obj:
-                    # Link the boundary to the shape object
-                    shape_obj.BoundaryObject = boundary_obj
-                    # Now that the link is established, set the boundary's visibility
-                    # based on the 'ShowBounds' property, which was set from the UI.
+                boundary_obj = shape_obj.BoundaryObject
+                if boundary_obj:
+                    shapes_group.addObject(boundary_obj)
+                    # The ShapeObject's onChanged logic will handle visibility based on the
+                    # ShowBounds property that was set a few lines above.
                     if hasattr(boundary_obj, "ViewObject"):
                         boundary_obj.ViewObject.Visibility = shape_obj.ShowBounds
                         
@@ -231,8 +227,9 @@ class Sheet:
                 shapestring_bb = label_obj.Shape.BoundBox
                 shapestring_center = shapestring_bb.Center
 
-                # The final center of the part is the sheet origin plus the nested centroid position.
-                final_part_center = sheet_origin + nested_centroid_on_sheet
+                # The final center of the part is the center of its bounding box after placement.
+                # We use the shape_obj which has the final placement applied.
+                final_part_center = shape_obj.Shape.BoundBox.Center.add(final_placement.Base)
 
                 # Add a small Z-offset to ensure the label is drawn on top of the part.
                 final_part_center.z += ui_params.get('label_height', 0.1)
@@ -243,6 +240,5 @@ class Sheet:
                 label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
                 
                 text_group.addObject(label_obj)
-                if 'shape_obj' in locals():
-                    shape_obj.LabelObject = label_obj # Link to property
-                    label_obj.ViewObject.Visibility = shape_obj.ShowLabel # Set initial visibility
+                shape_obj.LabelObject = label_obj # Link to property
+                label_obj.ViewObject.Visibility = shape_obj.ShowLabel # Set initial visibility

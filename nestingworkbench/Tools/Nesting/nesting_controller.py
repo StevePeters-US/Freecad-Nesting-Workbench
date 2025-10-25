@@ -20,6 +20,7 @@ from PySide import QtGui
 from ...datatypes.layout_object import create_layout_object
 from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
+from ...datatypes.sheet_object import create_sheet
 from ...datatypes.shape import Shape
 
 try:
@@ -80,23 +81,6 @@ class NestingController:
             self.ui.status_label.setText("Error: Could not find a valid font file for labels.")
             return
 
-        # --- Pre-emptive Cleanup -- - 
-        # Remove all existing boundary objects from any previous run to prevent clutter.
-        # This is more robust than relying on group-based cleanup.
-        for obj in list(self.doc.Objects): # Iterate over a copy
-            if obj.Label.startswith("bound_"):
-                try: self.doc.removeObject(obj.Name)
-                except Exception: pass
-        
-        # --- Robust Preview Cleanup -- - 
-        # Directly find and delete any old preview group to ensure a clean state.
-        # This is more reliable than relying on the UI's cleanup method.
-        preview_group = self.doc.getObject(self.ui.preview_group_name)
-        if preview_group:
-            self.doc.removeObject(preview_group.Name)
-            self.doc.recompute()
-        self.ui.cleanup_preview()
-
         for obj in self.ui.hidden_originals:
             if hasattr(obj, "ViewObject"):
                 obj.ViewObject.Visibility = False
@@ -104,17 +88,110 @@ class NestingController:
         self.ui.status_label.setText("Preparing shapes...")
         QtGui.QApplication.processEvents()
 
+        # --- Create the final LayoutObject FIRST ---
+        base_name, i = "Layout", 0
+        existing_labels = [o.Label for o in self.doc.Objects]
+        while f"{base_name}_{i:03d}" in existing_labels:
+            i += 1
+        layout_name = f"{base_name}_{i:03d}"
+
+        layout_obj = create_layout_object(layout_name)
+        layout_proxy = layout_obj.Proxy
+        QtGui.QApplication.processEvents()
+
+        # --- Prepare Parts and Master Shapes ---
+        # This creates the in-memory representations of the parts to be nested
+        # and the master shapes that will be drawn.
         parts_to_nest, master_shape_wrappers = self._prepare_parts_from_ui(self.ui.part_spacing_input.value(), self.ui.boundary_resolution_input.value())
 
         if not parts_to_nest:
             self.ui.status_label.setText("Error: No valid parts to nest.")
             return
 
-        self.ui.status_label.setText("Running nesting algorithm...")
-        QtGui.QApplication.processEvents()
+        # --- Create the hidden MasterShapes group directly, before nesting ---
+        master_shapes_group = self.doc.addObject("App::DocumentObjectGroup", "MasterShapes")
+        layout_obj.addObject(master_shapes_group)
+
+        for shape_wrapper in master_shape_wrappers:
+            original_obj = shape_wrapper.source_freecad_object
+            # Create a ShapeObject to store as the master, leaving the original untouched.
+            master_obj = create_shape_object(f"master_{original_obj.Label.replace('master_', '').replace('nested_', '')}")
+            
+            # The shape_bounds.source_centroid contains the necessary offset to align
+            # the shape with its origin-centered boundary polygon.
+            shape_copy = original_obj.Shape.copy()
+            if shape_wrapper.shape_bounds and shape_wrapper.shape_bounds.source_centroid:
+                shape_copy.translate(-shape_wrapper.shape_bounds.source_centroid)
+            
+            master_obj.Shape = shape_copy
+            master_shapes_group.addObject(master_obj)
+
+            # Now, draw the bounds for this master shape and link them.
+            # The bounds are drawn at the document origin (0,0,0) as they are just for reference.
+            if shape_wrapper.shape_bounds and shape_wrapper.shape_bounds.polygon:
+                # We pass the master_shapes_group to ensure the boundary object is added to it.
+                boundary_obj = shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), master_shapes_group)
+                if boundary_obj:
+                    # The 'BoundaryObject' and 'ShowBounds' properties are already added by the ShapeObject class.
+                    # We just need to set their values.
+                    master_obj.BoundaryObject = boundary_obj
+                    master_obj.ShowBounds = self.ui.show_bounds_checkbox.isChecked()
+                    if hasattr(boundary_obj, "ViewObject"):
+                        boundary_obj.ViewObject.Visibility = master_obj.ShowBounds
+
+            # --- Create Label for Master Shape ---
+            if self.ui.add_labels_checkbox.isChecked() and Draft and self.ui.selected_font_path and hasattr(shape_wrapper, 'label_text') and shape_wrapper.label_text:
+                label_obj = self.doc.addObject("Part::Feature", f"label_master_{original_obj.Label.replace('master_', '')}")
+                
+                shapestring_geom = Draft.make_shapestring(
+                    String=shape_wrapper.label_text,
+                    FontFile=self.ui.selected_font_path,
+                    Size=self.ui.part_spacing_input.value() * 0.6
+                )
+                label_obj.Shape = shapestring_geom.Shape
+                self.doc.removeObject(shapestring_geom.Name)
+
+                shapestring_bb = label_obj.Shape.BoundBox
+                shapestring_center = shapestring_bb.Center
+                master_shape_center = master_obj.Shape.BoundBox.Center
+                master_shape_center.z += self.ui.label_height_input.value()
+                label_placement_base = master_shape_center - shapestring_center
+                label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
+
+                master_shapes_group.addObject(label_obj)
+                # The 'LabelObject' property is already added by the ShapeObject class.
+                master_obj.LabelObject = label_obj
+                if hasattr(label_obj, "ViewObject"):
+                    label_obj.ViewObject.Visibility = self.ui.add_labels_checkbox.isChecked()
         
-        sheet_w = self.ui.sheet_width_input.value()
-        sheet_h = self.ui.sheet_height_input.value()
+        # Hide the group itself
+        if FreeCAD.GuiUp and hasattr(master_shapes_group, "ViewObject"):
+            master_shapes_group.ViewObject.Visibility = False
+        # self.doc.recompute() # This is not needed as we are just creating simple objects. The final recompute will handle everything.
+
+        # --- Create a temporary, visible group of the parts to be placed for debugging ---
+        parts_to_place_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
+        layout_obj.addObject(parts_to_place_group)
+        for part_instance in parts_to_nest:
+            # Find the corresponding master object in the MasterShapes group
+            master_label = f"master_{part_instance.source_freecad_object.Label.replace('master_', '').replace('nested_', '')}"
+            master_obj = master_shapes_group.getObject(master_label)
+            
+            if master_obj:
+                # Create a copy of the master shape and its boundary for this instance
+                part_copy = self.doc.copyObject(master_obj, False)
+                part_copy.Label = f"part_{part_instance.id}"
+                parts_to_place_group.addObject(part_copy)
+                # Link the physical FreeCAD object back to the in-memory Shape object.
+                part_instance.fc_object = part_copy
+                
+                if master_obj.BoundaryObject:
+                    bounds_copy = self.doc.copyObject(master_obj.BoundaryObject, False)
+                    bounds_copy.Label = f"bounds_{part_instance.id}"
+                    parts_to_place_group.addObject(bounds_copy)
+                    part_copy.BoundaryObject = bounds_copy # Link the bound to the part copy
+        
+        self.ui.status_label.setText("Running nesting algorithm...")
         spacing = self.ui.part_spacing_input.value()
         algorithm = self.ui.algorithm_dropdown.currentText()
 
@@ -149,8 +226,8 @@ class NestingController:
         # --- Prepare UI parameters for controllers ---
         global_rotation_steps = self.ui.rotation_steps_spinbox.value() # This widget is in NestingPanel
         self.last_run_ui_params = {
-            'sheet_w': sheet_w,
-            'sheet_h': sheet_h,
+            'sheet_w': self.ui.sheet_width_input.value(),
+            'sheet_h': self.ui.sheet_height_input.value(),
             'spacing': spacing,
             'font_path': self.ui.selected_font_path,
             'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
@@ -160,64 +237,11 @@ class NestingController:
             'original_layout_name': original_layout_name
         }
 
-        # --- Animation Pre-computation ---
-        # If animating, we create all the final objects upfront and just move them.
-        # This is much faster than creating/deleting objects on each frame.
-        animation_objects = {}
-        if self.ui.animate_nesting_checkbox.isChecked():
-            preview_group = self.doc.getObject(self.ui.preview_group_name)
-            if not preview_group:
-                preview_group = self.doc.addObject("App::DocumentObjectGroup", self.ui.preview_group_name)
-            
-            # Create a placeholder object for each part instance that will be nested.
-            for part_instance in parts_to_nest:
-                # Create the 3D shape object (will be hidden during animation)
-                shape_obj = create_shape_object(f"anim_shape_{part_instance.id}")
-                shape_obj.Shape = part_instance.source_freecad_object.Shape.copy()
-                shape_obj.ViewObject.Visibility = False
-                preview_group.addObject(shape_obj)
-
-                # Create the boundary object (will be visible during animation)
-                bound_obj = part_instance.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), preview_group)
-                if bound_obj:
-                    bound_obj.Label = f"anim_bound_{part_instance.id}"
-                    bound_obj.ViewObject.Visibility = True
-
-                animation_objects[part_instance.id] = {'shape': shape_obj, 'bound': bound_obj}
-
-        # --- Preview Callback ---
-        def full_layout_preview_callback(sheets, moving_part=None, current_sheet_id=None, grid_info=None):
-            """
-            This callback doesn't draw anything new. It just updates the placement
-            of the pre-created animation objects.
-            """
-            spacing = self.last_run_ui_params.get('spacing', 0)
-            for sheet in sheets:
-                sheet_origin = sheet.get_origin(spacing)
-                for placed_part in sheet.parts:
-                    part_id = placed_part.shape.id
-                    if part_id in animation_objects:
-                        nested_centroid = FreeCAD.Vector(placed_part.x, placed_part.y, 0)
-                        final_placement = placed_part.shape.get_final_placement(sheet_origin, nested_centroid, placed_part.angle)
-                        
-                        # Update placement of both the shape and its boundary
-                        anim_shape = animation_objects[part_id]['shape']
-                        anim_bound = animation_objects[part_id]['bound']
-                        if anim_shape: anim_shape.Placement = final_placement
-                        if anim_bound: anim_bound.Placement = final_placement
-            
-            self.doc.recompute()
-            if FreeCAD.GuiUp:
-                FreeCAD.Gui.updateGui()
-
-        update_callback = full_layout_preview_callback if self.ui.animate_nesting_checkbox.isChecked() else None # This widget is in NestingPanel
-
         try:
             sheets, remaining_parts_to_nest, total_steps = nest(
                 parts_to_nest,
-                sheet_w, sheet_h,
+                self.ui.sheet_width_input.value(), self.ui.sheet_height_input.value(),
                 global_rotation_steps, algorithm,
-                update_callback=update_callback,
                 **algo_kwargs
             )
         except NestingDependencyError as e:
@@ -229,34 +253,16 @@ class NestingController:
         self.last_run_sheets = sheets
         self.last_run_unplaced_parts = remaining_parts_to_nest
 
-        # Draw the final state of the preview if animation was off
-        if not self.ui.animate_nesting_checkbox.isChecked(): # This widget is in NestingPanel
-            if sheets:
-                full_layout_preview_callback(sheets)
-        QtGui.QApplication.processEvents()
-
         # Final cleanup before drawing the final layout
         self.ui.cleanup_preview()
 
-        # --- Create and execute the new LayoutObject ---
-        # Find a unique name for the new layout object
-        base_name, i = "Layout", 0
-        existing_labels = [o.Label for o in self.doc.Objects]
-        while f"{base_name}_{i:03d}" in existing_labels:
-            i += 1
-        layout_name = f"{base_name}_{i:03d}"
-
-        layout_obj = create_layout_object(layout_name)
-        
-        # The proxy is the LayoutController instance. We call setup to pass the data.
-        layout_obj.Proxy.setup(
+        # Now update the proxy with the results from the nesting algorithm.
+        layout_proxy.setup(
             sheets=sheets,
             ui_params=self.last_run_ui_params,
-            master_shapes=master_shape_wrappers,
-            unplaced_parts=remaining_parts_to_nest
+            master_shapes=master_shape_wrappers, # Still needed for some logic
+            unplaced_parts=remaining_parts_to_nest,
         )
-        
-        # Recomputing the object will trigger its execute() method, which draws the layout.
         self.doc.recompute()
         
         placed_count = sum(len(s) for s in sheets)
@@ -267,7 +273,7 @@ class NestingController:
         
         # Calculate fill percentage for the status message
         # by calling the new method on the layout_controller instance.
-        sheet_fills = layout_obj.Proxy.calculate_sheet_fills()
+        sheet_fills = layout_proxy.calculate_sheet_fills()
         
         end_time = time.time()
         duration = end_time - start_time
@@ -329,24 +335,27 @@ class NestingController:
                 FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n")
                 continue
         
+        # This list contains one unique, processed Shape object for each master part.
         unique_master_shape_wrappers = list(master_shape_map.values())
 
         # --- Step 2: Create deep copies of the master shapes for the nesting algorithm based on quantity. ---
         add_labels = self.ui.add_labels_checkbox.isChecked()
         font_path = getattr(self.ui, 'selected_font_path', None)
 
+        # Iterate through the master shapes we just created.
         for label, master_shape_instance in master_shape_map.items():
             quantity, part_rotation_steps = quantities.get(label, (0, global_rotation_steps))
             for i in range(quantity):
+                # For each quantity, create a deep copy. This is critical.
                 shape_instance = copy.deepcopy(master_shape_instance)
                 shape_instance.instance_num = i + 1
                 shape_instance.id = f"{shape_instance.source_freecad_object.Label}_{shape_instance.instance_num}"
                 shape_instance.rotation_steps = part_rotation_steps
+                shape_instance.fc_object = None # Initialize link to physical object as None
                 shape_instance.show_bounds = self.ui.show_bounds_checkbox.isChecked()
 
+                # Store the label text to be created later, not the FreeCAD object itself.
                 if add_labels and Draft and font_path:
-                    # Store the label text, not the FreeCAD object itself.
-                    # The FreeCAD object will be created during the final drawing phase.
                     shape_instance.label_text = shape_instance.id
 
                 parts_to_nest.append(shape_instance)

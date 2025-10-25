@@ -20,7 +20,7 @@ except ImportError:
     SHAPELY_AVAILABLE = False
 
 # --- Public Function ---
-def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', update_callback=None, **kwargs):
+def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs):
     """Convenience function to run the nesting algorithm."""
     steps = 0
     sheets = []
@@ -40,7 +40,7 @@ def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', update_c
     # The controller now passes a fresh list of all parts to be nested.
     # The nester algorithms are responsible for the full multi-sheet nesting run.
     nester = nester_class(width, height, rotation_steps, **kwargs)
-    result = nester.nest(parts, update_callback=update_callback)
+    result = nester.nest(parts)
     if len(result) == 3:
         sheets, unplaced, steps = result
     else:

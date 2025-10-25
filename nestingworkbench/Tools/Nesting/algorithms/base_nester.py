@@ -1,6 +1,5 @@
 import math
 import copy
-import pdb
 import random
 from shapely.geometry import Polygon
 from shapely.affinity import translate, rotate
@@ -29,12 +28,13 @@ class BaseNester(object):
         
         self._bin_polygon = Polygon([(0, 0), (width, 0), (width, height), (0, height)])
 
-    def nest(self, parts, update_callback=None):
+    def nest(self, parts):
         """
         Main nesting loop. Iterates through parts and calls the subclass's
         sheet nesting implementation until all parts are placed or no more
         can be placed.
         """
+
         self.parts_to_place = list(parts)
         self.sheets = []
         self._sort_parts_by_area() # Sorts self.parts_to_place in-place
@@ -45,14 +45,17 @@ class BaseNester(object):
             placed = False
             # Try to place on existing sheets first
             for i, sheet in enumerate(self.sheets):
-                # It is CRITICAL to pass a deepcopy of the shape to the placement
-                # function. This ensures that each placement attempt is independent.
-                part_to_try = copy.deepcopy(original_shape)
-                placed_part_shape = self._try_place_part_on_sheet(part_to_try, sheet, update_callback)
+                # The shape is already a unique copy from the controller.
+                # We can use it directly for the first placement attempt.
+                placed_part_shape = self._try_place_part_on_sheet(original_shape, sheet)
                 
                 # --- Safety Check ---
                 # Final validation to ensure the returned part is valid before accepting it.
                 if placed_part_shape and sheet.is_placement_valid(placed_part_shape, recalculate_union=False):
+                        # Set the final placement on the shape object, including the sheet's origin offset.
+                        sheet_origin = sheet.get_origin(self.parts_to_place[0].shape_bounds.polygon.buffer(0).area if self.parts_to_place else 0) # A bit of a hack to get spacing
+                        placed_part_shape.placement = placed_part_shape.get_final_placement(sheet_origin)
+
                         sheet.add_part(PlacedPart(placed_part_shape))
                         # Process UI events to keep FreeCAD responsive, especially during animation.
                         QtGui.QApplication.processEvents()
@@ -65,12 +68,16 @@ class BaseNester(object):
             if not placed:
                 # If it didn't fit on any existing sheet, try a new one
                 new_sheet_id = len(self.sheets)
-                new_sheet = Sheet(new_sheet_id, self._bin_width, self._bin_height)
-                part_to_try = copy.deepcopy(original_shape)
-                placed_part_shape = self._try_place_part_on_sheet(part_to_try, new_sheet, update_callback)
+                new_sheet = Sheet(new_sheet_id, self._bin_width, self._bin_height) # Create a new sheet
+                # The original_shape is used for the new sheet attempt.
+                placed_part_shape = self._try_place_part_on_sheet(original_shape, new_sheet)
                 
                 # --- Safety Check ---
                 if placed_part_shape and new_sheet.is_placement_valid(placed_part_shape):
+                        # Set the final placement on the shape object, including the sheet's origin offset.
+                        sheet_origin = new_sheet.get_origin(self.parts_to_place[0].shape_bounds.polygon.buffer(0).area if self.parts_to_place else 0)
+                        placed_part_shape.placement = placed_part_shape.get_final_placement(sheet_origin)
+
                         new_sheet.add_part(PlacedPart(placed_part_shape))
                         self.sheets.append(new_sheet)
                         # Process UI events to keep FreeCAD responsive, especially during animation.
@@ -91,7 +98,7 @@ class BaseNester(object):
         """Sorts the list of parts to be nested in-place, largest area first."""
         self.parts_to_place.sort(key=lambda p: p.area(), reverse=True)
 
-    def _try_spawn_part(self, shape, sheet, update_callback=None):
+    def _try_spawn_part(self, shape, sheet):
         """
         Tries to place a shape at a random location without initial collision.
         Returns the spawned shape on success, or None on failure.
@@ -113,31 +120,18 @@ class BaseNester(object):
             shape.move_to(target_x, target_y)
 
             if sheet.is_placement_valid(shape):
-                if update_callback:
-                    # On spawn, the sheet is empty. We need to construct the list of sheets
-                    # to pass to the preview drawer, including the new part.
-                    temp_placed_part = PlacedPart(shape) # Create a temporary placement record
-                    sheet.add_part(temp_placed_part) # Add it to the sheet for the preview frame
-                    
-                    # The preview function expects the full list of sheets.
-                    all_sheets_for_preview = list(self.sheets)
-                    if sheet not in all_sheets_for_preview:
-                        all_sheets_for_preview.append(sheet)
-
-                    update_callback(all_sheets_for_preview, moving_part=shape, current_sheet_id=sheet.id)
-                    sheet.parts.remove(temp_placed_part) # IMPORTANT: Remove the temporary part after the preview frame
                 return shape
 
         return None
 
-    def _try_place_part_on_sheet(self, part_to_place, sheet, update_callback):
+    def _try_place_part_on_sheet(self, part_to_place, sheet):
         """
         Subclasses must implement this. Tries to place a single shape on a given sheet.
         Returns the placed shape on success, None on failure.
         """
         raise NotImplementedError
 
-    def _anneal_part(self, part_to_shake, sheet, current_gravity_direction, update_callback=None, rotate_enabled=True, translate_enabled=True, rotate_override=None, translate_override=None):
+    def _anneal_part(self, part_to_shake, sheet, current_gravity_direction, rotate_enabled=True, translate_enabled=True, rotate_override=None, translate_override=None):
         """
         Attempts to "anneal" a shape out of a collision by trying small
         perpendicular and/or rotational movements. This is a local search
@@ -198,12 +192,6 @@ class BaseNester(object):
                 shake_dy = perp_dir_for_shake[1] * amplitude * side_direction
                 part_to_shake.move(shake_dx, shake_dy)
             
-            # Update the preview to show the current shake attempt, regardless of validity.
-            if update_callback:
-                sheet_index = sheet.id if sheet else len(self.sheets)
-                current_bounds = [p.shape.shape_bounds for p in sheet.parts] if sheet else []
-                update_callback({sheet_index: current_bounds + [part_to_shake.shape_bounds]}, moving_part=part_to_shake, current_sheet_id=sheet_index)
-
             if sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake):
                 # Found a valid position. Return its current centroid and angle.
                 new_centroid = part_to_shake.get_centroid()
@@ -215,12 +203,6 @@ class BaseNester(object):
         # Revert the part to its original state before returning the initial position.
         part_to_shake.move_to(initial_bl_x, initial_bl_y)
         part_to_shake.set_rotation(initial_angle)
-
-        # Update the preview one last time to show the part reverted to its original (valid) position.
-        if update_callback:
-            sheet_index = sheet.id if sheet else len(self.sheets)
-            current_bounds = [p.shape.shape_bounds for p in sheet.parts] if sheet else []
-            update_callback({sheet_index: current_bounds + [part_to_shake.shape_bounds]}, moving_part=part_to_shake, current_sheet_id=sheet_index)
 
         return start_pos, start_rot # Could not shake free, return original state
     

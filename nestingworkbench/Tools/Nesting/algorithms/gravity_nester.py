@@ -18,12 +18,13 @@ class GravityNester(BaseNester):
         self.max_spawn_count = kwargs.get("max_spawn_count", 100)
         self.max_nesting_steps = kwargs.get("max_nesting_steps", 500)
 
-    def _try_place_part_on_sheet(self, part_to_place, sheet, update_callback):
+    def _try_place_part_on_sheet(self, part_to_place, sheet):
         """
         Tries to place a single part on the given sheet using gravity simulation.
         Returns the placed part on success, None on failure.
         """
-        spawned_part = self._try_spawn_part(part_to_place, sheet, update_callback)
+        # Call the base class's spawn method directly. It handles finding a random, valid starting spot.
+        spawned_part = super()._try_spawn_part(part_to_place, sheet)
         
         if spawned_part:
             if self.gravity_direction is None: # None indicates random direction
@@ -32,20 +33,12 @@ class GravityNester(BaseNester):
             else:
                 part_direction = self.gravity_direction
             
-            return self._move_until_collision(spawned_part, sheet, part_direction, update_callback)
+            # The spawned part is now moved until it collides with something.
+            return self._move_until_collision(spawned_part, sheet, part_direction)
         else:
             return None
 
-    def _try_spawn_part(self, part, sheet, update_callback=None):
-        """
-        Tries to place a part at a random location without initial collision.
-        Returns the spawned part on success, or None on failure.
-        """
-        for _ in range(self.max_spawn_count):
-            return super()._try_spawn_part(part, sheet, update_callback)
-        return None
-
-    def _move_until_collision(self, part, sheet, direction, update_callback=None):
+    def _move_until_collision(self, part, sheet, direction):
         """
         Moves a part in the gravity direction step-by-step until it hits
         the bin edge or another placed part.
@@ -53,9 +46,6 @@ class GravityNester(BaseNester):
         can_shake = True # The part is allowed to shake on its first collision.
 
         for _ in range(self.max_nesting_steps):
-            if update_callback:
-                update_callback(self.sheets, moving_part=part, current_sheet_id=sheet.id)
-
             # Record the last valid position's bottom-left corner
             last_valid_x, last_valid_y, _, _ = part.bounding_box()
             part.move(direction[0] * self.step_size, direction[1] * self.step_size)
@@ -72,13 +62,13 @@ class GravityNester(BaseNester):
                     new_pos = pre_shake_pos # Start with the current position
                     
                     # --- Step 1: Try rotation-only annealing --- (Pass the callback)
-                    rot_pos, rot_rot = self._anneal_part(part, sheet, direction, update_callback=update_callback, rotate_override=True, translate_override=False)
+                    rot_pos, rot_rot = self._anneal_part(part, sheet, direction, rotate_override=True, translate_override=False)
                     
                     # Check if rotation found a valid spot. If not, try translation.
                     moved_distance_sq_rot = (rot_pos[0] - pre_shake_pos[0])**2 + (rot_pos[1] - pre_shake_pos[1])**2
                     if math.isclose(moved_distance_sq_rot, 0.0):
                         # --- Step 2: Try translation-only annealing --- (Pass the callback)
-                        new_pos, new_rot = self._anneal_part(part, sheet, direction, update_callback=update_callback, rotate_override=False, translate_override=True)
+                        new_pos, new_rot = self._anneal_part(part, sheet, direction, rotate_override=False, translate_override=True)
                     else:
                         new_pos = rot_pos
 
