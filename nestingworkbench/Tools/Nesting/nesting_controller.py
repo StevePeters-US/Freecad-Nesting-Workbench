@@ -17,7 +17,6 @@ import time
 from PySide import QtGui
 
 # Import other necessary modules from the workbench
-from ...datatypes.layout_object import create_layout_object
 from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.sheet_object import create_sheet
@@ -89,12 +88,10 @@ class NestingController:
             i += 1
         layout_name = f"{base_name}_{i:03d}"
 
-        layout_obj = create_layout_object(layout_name)
-        layout_proxy = layout_obj.Proxy
+        layout_obj = self.doc.addObject("App::DocumentObjectGroup", layout_name)
         QtGui.QApplication.processEvents()
         # Ensure the new layout group is visible by default.
-        if hasattr(layout_obj, "ViewObject"):
-            layout_obj.ViewObject.Visibility = True
+        if FreeCAD.GuiUp and hasattr(layout_obj, "ViewObject"): layout_obj.ViewObject.Visibility = True
 
         # --- Prepare Parts and Master Shapes ---
         # This creates the in-memory representations of the parts to be nested
@@ -275,8 +272,7 @@ class NestingController:
             status_text += f" Could not place {len(remaining_parts_to_nest)} shapes."
         
         # Calculate fill percentage for the status message
-        # by calling the new method on the layout_controller instance.
-        sheet_fills = layout_proxy.calculate_sheet_fills()
+        sheet_fills = [s.calculate_fill_percentage() for s in sheets]
         
         end_time = time.time()
         duration = end_time - start_time

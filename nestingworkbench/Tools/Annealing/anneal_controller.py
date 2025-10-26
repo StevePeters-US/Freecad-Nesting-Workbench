@@ -16,8 +16,6 @@ from ..Nesting.algorithms import shape_processor
 
 from ... import nesting_logic
 
-from ..Nesting.nesting_controller import NestingController # For _draw_layout and _prepare_parts_from_ui
-
 class AnnealController:
     """
     Handles the logic for reading an existing layout, running the annealing
@@ -27,7 +25,6 @@ class AnnealController:
         self.ui = ui_panel
         self.doc = FreeCAD.ActiveDocument
         self.layout_group = layout_group
-        self.nesting_controller = NestingController(self.ui) # Reuse drawing and other logic
 
     def execute_annealing(self):
         """Main method to run the annealing optimization process."""
@@ -49,7 +46,7 @@ class AnnealController:
 
         # Prepare parts from the existing layout
         try:
-            fixed_parts, mobile_parts, all_fc_shapes = self._prepare_parts_from_layout(spacing)
+            fixed_parts, mobile_parts = self._prepare_parts_from_layout(spacing)
         except ValueError as e:
             self.ui.status_label.setText(f"Error: {e}")
             return
@@ -89,20 +86,24 @@ class AnnealController:
             final_sheets_map.setdefault(part.sheet_id, []).append(part)
         final_sheets_list = [final_sheets_map[i] for i in sorted(final_sheets_map.keys())]
         
-        # Create the map of original FC shapes for the drawing function
-        shape_pool = {shape.id: shape for shape in all_fc_shapes}
-        self.nesting_controller.shape_pool = shape_pool
-
         # Remove the old layout before drawing the new one
         original_layout_name = self.layout_group.Label
         self.doc.removeObject(self.layout_group.Name)
 
-        # The drawing function from NestingController can now be used
-        self.nesting_controller._draw_layout(
-            list(shape_pool.values()), all_placed_nesting_parts, 
-            sheet_origins=[FreeCAD.Vector(i * (sheet_w + spacing), 0, 0) for i in range(len(final_sheets_list))],
-            edit_mode=True, original_layout_name=original_layout_name
-        )
+        # --- Draw the new layout ---
+        new_layout_obj = self.doc.addObject("App::DocumentObjectGroup", original_layout_name)
+        if FreeCAD.GuiUp: new_layout_obj.ViewObject.Visibility = True
+
+        from ...datatypes.sheet import Sheet
+        sheets_to_draw = []
+        for i, parts_on_sheet in enumerate(final_sheets_list):
+            sheet = Sheet(i, sheet_w, sheet_h)
+            sheet.parts = parts_on_sheet
+            sheet_origin = sheet.get_origin(spacing)
+            # Manually set final placement on each part before drawing
+            for part in sheet.parts:
+                part.shape.placement = part.shape.get_final_placement(sheet_origin)
+            sheet.draw(self.doc, sheet_origin, self.nesting_controller.last_run_ui_params, new_layout_obj)
 
         end_time = time.time()
         status_text = f"Annealing complete in {end_time - start_time:.2f}s. Placed {len(all_placed_nesting_parts)} parts on {len(final_sheets_list)} sheets."
@@ -229,95 +230,99 @@ class AnnealController:
         if not placements: return 0
 
         temp_parts = self._get_parts_from_placements(placements, source_parts)
-        all_parts = temp_parts + fixed_parts
+        all_parts_on_sheet = temp_parts + fixed_parts
 
-        # Create a temporary BasePacker to access its helper methods
-        helper = nesting_logic.pack_helpers.BasePacker([], bin_w, bin_h)
-
-        total_overlap = sum(helper._get_overlap_area(part1, part2) for i, part1 in enumerate(all_parts) for part2 in all_parts[i+1:])
-        total_outside = sum(helper._get_outside_area(part) for part in all_parts)
+        total_overlap = sum(self._get_overlap_area(part1, part2) for i, part1 in enumerate(all_parts_on_sheet) for part2 in all_parts_on_sheet[i+1:])
+        total_outside = sum(self._get_outside_area(part, bin_w, bin_h) for part in all_parts_on_sheet)
 
         return total_overlap * 10000 + total_outside * 10000
+
+    def _get_overlap_area(self, part1, part2):
+        """Calculates the overlapping area between two parts."""
+        if not part1.polygon or not part2.polygon or not part1.polygon.intersects(part2.polygon):
+            return 0.0
+        try:
+            return part1.polygon.intersection(part2.polygon).area
+        except Exception:
+            return 0.0 # Fallback if intersection fails
+
+    def _get_outside_area(self, shape, bin_w, bin_h):
+        """Calculates the area of a shape that is outside the bin."""
+        from shapely.geometry import Polygon
+        bin_polygon = Polygon([(0, 0), (bin_w, 0), (bin_w, bin_h), (0, bin_h)])
+        
+        if not shape.polygon or bin_polygon.contains(shape.polygon):
+            return 0.0
+        try:
+            return shape.polygon.difference(bin_polygon).area
+        except Exception:
+            return 0.0 # Fallback if difference fails
 
     def _prepare_parts_from_layout(self, spacing):
         """Creates ShapeBounds objects from an existing layout group."""
         import copy
-        
+        from ...datatypes.shape import Shape
+
+        # --- Step 1: Load Master Shapes ---
+        # The MasterShapes group contains the original, processed shapes.
+        master_shapes_group = self.layout_group.getObject("MasterShapes")
+        if not master_shapes_group:
+            raise ValueError("Could not find 'MasterShapes' group in the selected layout.")
+
+        master_shape_map = {}
+        for master_obj in master_shapes_group.Group:
+            if master_obj.Label.startswith("master_"):
+                try:
+                    # Re-create the in-memory Shape object from the master FreeCAD object.
+                    # This is fast as we are not re-running the expensive geometry processing.
+                    original_label = master_obj.Label.replace("master_", "")
+                    master_shape_instance = Shape(master_obj)
+                    shape_processor.create_single_nesting_part(master_shape_instance, master_obj, spacing, 75) # Resolution is not critical here
+                    master_shape_map[original_label] = master_shape_instance
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"Could not re-process master shape '{master_obj.Label}': {e}\n")
+
+        if not master_shape_map:
+            raise ValueError("No valid master shapes found in the 'MasterShapes' group.")
+
+        # --- Step 2: Recreate Placed Part Instances ---
         sheet_groups = sorted([obj for obj in self.layout_group.Group if obj.Label.startswith("Sheet_")], key=lambda g: int(g.Label.split('_')[1]))
         if not sheet_groups:
             raise ValueError("No sheets found in layout.")
 
         fixed_parts, mobile_parts = [], []
-        all_fc_shape_wrappers = []
-        
-        # A map to store master nesting parts so we don't re-process the same shape
-        master_nesting_parts = {}
-        # A map to store the original FreeCAD objects
-        original_fc_objects = {}
-
         last_sheet_index = len(sheet_groups) - 1
-        part_id_counter = 0
 
         for i, sheet_group in enumerate(sheet_groups):
-            objects_group = sheet_group.getObject(f"Objects_{i+1}")
-            if not objects_group: continue
+            shapes_group = sheet_group.getObject(f"Shapes_{i+1}")
+            if not shapes_group: continue
             
-            for obj in objects_group.Group:
-                if not obj.Label.startswith("packed_"):
+            for obj in shapes_group.Group:
+                if not obj.Label.startswith("nested_"):
                     continue
 
-                # Extract original label: "packed_{original_label}_{instance_num}"
                 try:
-                    parts = obj.Label.split('_')
-                    original_label = parts[1]
-                    instance_num = int(parts[2])
+                    # Label is "nested_{original_label}_{instance_num}"
+                    label_parts = obj.Label.split('_')
+                    original_label = label_parts[1]
+                    instance_num = int(label_parts[2])
+                    
+                    master_shape = master_shape_map.get(original_label)
+                    if not master_shape: continue
+
+                    # Create a deep copy of the master shape for this instance
+                    part_instance = copy.deepcopy(master_shape)
+                    part_instance.sheet_id = i # Store which sheet it's on
+                    part_instance.set_rotation(obj.Placement.Rotation.Angle * (180 / math.pi))
+                    part_instance.move_to(obj.Placement.Base.x, obj.Placement.Base.y)
+
+                    if self.ui.consolidate_checkbox.isChecked() and i == last_sheet_index:
+                        mobile_parts.append(part_instance)
+                    else:
+                        fixed_parts.append(part_instance)
+
                 except (IndexError, ValueError):
                     FreeCAD.Console.PrintWarning(f"Could not parse label for {obj.Label}. Skipping.\n")
                     continue
 
-                # Find the original FreeCAD object in the document
-                original_obj = self.doc.getObject(original_label)
-                if not original_obj:
-                    # If not found, it might be a compound label itself
-                    # This part of the logic might need to be more robust
-                    # For now, we assume simple labels.
-                    FreeCAD.Console.PrintWarning(f"Could not find original object '{original_label}' for {obj.Label}. Skipping.\n")
-                    continue
-
-                # Store the original object if we haven't seen it before
-                if original_label not in original_fc_objects:
-                    original_fc_objects[original_label] = original_obj
-
-                # Create the master nesting part if it doesn't exist
-                if original_label not in master_nesting_parts:
-                    try:
-                        master_nesting_parts[original_label] = shape_processor.create_single_nesting_part(original_obj, spacing)
-                    except Exception as e:
-                        raise ValueError(f"Could not process shape for '{original_label}': {e}")
-
-                # Create an instance of the nesting part
-                new_nesting_part = copy.deepcopy(master_nesting_parts[original_label])
-                new_nesting_part.id = part_id_counter
-                new_nesting_part.name = f"{original_label}_{instance_num}"
-                new_nesting_part.sheet_id = i # Store which sheet it's on
-
-                # Create a Shape wrapper for the drawing logic
-                # This was the missing piece. The shape_pool needs these wrappers.
-                shape_wrapper = self.nesting_controller.shape_pool.get(f"{original_label}_{instance_num}") or self.nesting_controller.Shape(original_obj, instance_num=instance_num)
-                shape_wrapper.id = part_id_counter # Match the nesting part ID
-                all_fc_shape_wrappers.append(shape_wrapper)
-
-                # Set its current placement from the object in the layout
-                x = obj.Placement.Base.x
-                y = obj.Placement.Base.y
-                angle = obj.Placement.Rotation.Angle * (180 / math.pi)
-                new_nesting_part.set_placement(x, y, angle)
-
-                if self.ui.consolidate_checkbox.isChecked() and i == last_sheet_index:
-                    mobile_parts.append(new_nesting_part)
-                else:
-                    fixed_parts.append(new_nesting_part)
-                
-                part_id_counter += 1
-
-        return fixed_parts, mobile_parts, all_fc_shape_wrappers
+        return fixed_parts, mobile_parts

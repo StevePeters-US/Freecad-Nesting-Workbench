@@ -96,6 +96,48 @@ class BaseNester(object):
         """
         raise NotImplementedError
 
+    def _try_rotation_shake(self, part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, side_direction, i):
+        """Helper to attempt a single rotational shake."""
+        if not (self.anneal_rotate_enabled and part_to_shake.rotation_steps > 1):
+            return False
+
+        # Reset part to its pre-shake state for this attempt
+        part_to_shake.move_to(initial_bl_x, initial_bl_y)
+        part_to_shake.set_rotation(initial_angle)
+
+        # Oscillate the rotation
+        angle_step_magnitude = (360.0 / part_to_shake.rotation_steps) * (i // 2 + 1)
+        rotation_direction = side_direction
+        new_angle = (initial_angle + angle_step_magnitude * rotation_direction) % 360.0
+        part_to_shake.set_rotation(new_angle)
+
+        return sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
+
+    def _try_translation_shake(self, part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, current_gravity_direction, side_direction, i):
+        """Helper to attempt a single translational shake."""
+        if not self.anneal_translate_enabled:
+            return False
+
+        # Reset part to its pre-shake state for this attempt
+        part_to_shake.move_to(initial_bl_x, initial_bl_y)
+        part_to_shake.set_rotation(initial_angle)
+
+        amplitude = self.step_size * (i // 2 + 1)
+
+        # Determine the perpendicular direction for this shake
+        if self.anneal_random_shake_direction:
+            random_angle_rad = random.uniform(0, 2 * math.pi)
+            temp_gravity_dir = (math.cos(random_angle_rad), math.sin(random_angle_rad))
+            perp_dir_for_shake = (-temp_gravity_dir[1], temp_gravity_dir[0])
+        else:
+            perp_dir_for_shake = (-current_gravity_direction[1], current_gravity_direction[0])
+
+        shake_dx = perp_dir_for_shake[0] * amplitude * side_direction
+        shake_dy = perp_dir_for_shake[1] * amplitude * side_direction
+        part_to_shake.move(shake_dx, shake_dy)
+
+        return sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
+
     def _anneal_part(self, part_to_shake, sheet, current_gravity_direction, rotate_enabled=True, translate_enabled=True):
         """
         Attempts to "anneal" a shape out of a collision by trying small
@@ -124,45 +166,19 @@ class BaseNester(object):
         # Randomize the initial side direction to avoid bias (e.g., always trying right first)
         initial_side_direction = random.choice([1, -1])
         for i in range(self.anneal_steps):
-            amplitude = self.step_size * (i // 2 + 1)
             side_direction = initial_side_direction if i % 2 == 0 else -initial_side_direction
-
-            # Reset the part to its initial state (before any shaking attempts in this loop)
-            part_to_shake.move_to(initial_bl_x, initial_bl_y)
-            part_to_shake.set_rotation(initial_angle) # Order matters: move then rotate
             
-            # Apply rotation if enabled
-            if self.anneal_rotate_enabled and rotate_enabled and part_to_shake.rotation_steps > 1:
-                # Oscillate the rotation similar to translation
-                angle_step_magnitude = (360.0 / part_to_shake.rotation_steps) * (i // 2 + 1)
-                
-                # Use the same side_direction logic for rotation oscillation
-                rotation_direction = side_direction 
+            is_valid = False
+            if rotate_enabled and not translate_enabled:
+                is_valid = self._try_rotation_shake(part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, side_direction, i)
+            elif not rotate_enabled and translate_enabled:
+                is_valid = self._try_translation_shake(part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, current_gravity_direction, side_direction, i)
 
-                new_angle = (initial_angle + angle_step_magnitude * rotation_direction) % 360.0
-                part_to_shake.set_rotation(new_angle)
-
-            # Determine the perpendicular direction for this specific anneal attempt
-            perp_dir_for_shake = (0, 0) # Default to no movement
-            if self.anneal_translate_enabled and translate_enabled:
-                if self.anneal_random_shake_direction:
-                    # Generate a completely random direction for this shake attempt
-                    random_angle_rad = random.uniform(0, 2 * math.pi)
-                    temp_gravity_dir = (math.cos(random_angle_rad), math.sin(random_angle_rad))
-                    perp_dir_for_shake = (-temp_gravity_dir[1], temp_gravity_dir[0])
-                else:
-                    perp_dir_for_shake = base_perp_dir # Use the perpendicular to the current gravity direction
-
-                shake_dx = perp_dir_for_shake[0] * amplitude * side_direction
-                shake_dy = perp_dir_for_shake[1] * amplitude * side_direction
-                part_to_shake.move(shake_dx, shake_dy)
-            
-            if sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake):
+            if is_valid:
                 # Found a valid position. Return its current centroid and angle.
                 new_centroid = part_to_shake.centroid
                 new_pos = (new_centroid.x, new_centroid.y) if new_centroid else (0, 0)
                 return new_pos, part_to_shake.angle
-            # If invalid, the loop will continue, and the next iteration will reset the part.
 
         # If the loop finishes, no valid shake was found.
         # Revert the part to its original state before returning the initial position.
@@ -170,27 +186,3 @@ class BaseNester(object):
         part_to_shake.set_rotation(initial_angle)
 
         return start_pos, start_rot # Could not shake free, return original state
-    
-    def _check_intersection(self, part1, part2):
-        """Checks if two parts intersect."""
-        if not part1.polygon or not part2.polygon:
-            return False
-        return part1.polygon.intersects(part2.polygon)
-
-    def _get_overlap_area(self, part1, part2):
-        """Calculates the overlapping area between two parts."""
-        if not part1.polygon or not part2.polygon or not part1.polygon.intersects(part2.polygon):
-            return 0.0
-        try:
-            return part1.polygon.intersection(part2.polygon).area
-        except Exception:
-            return 0.0 # Fallback if intersection fails
-
-    def _get_outside_area(self, shape):
-        """Calculates the area of a shape that is outside the bin."""
-        if not shape.polygon or self._bin_polygon.contains(shape.polygon):
-            return 0.0
-        try:
-            return shape.polygon.difference(self._bin_polygon).area
-        except Exception:
-            return 0.0 # Fallback if difference fails
