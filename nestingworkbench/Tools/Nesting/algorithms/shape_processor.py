@@ -15,7 +15,8 @@ def get_2d_profile_from_obj(obj):
     Extracts a usable 2D face profile from various FreeCAD object types,
     including sketches, bodies, and imported SVG geometry.
     """
-    shape = obj.Shape
+    shape = obj.Shape.copy()
+    shape.transformShape(obj.Placement.Matrix)
 
     # Case 1: PartDesign Body - Find the bottom-most planar face parallel to the XY plane
     if obj.isDerivedFrom("PartDesign::Body"):

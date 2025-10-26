@@ -139,10 +139,14 @@ class Shape:
         # The final target position for the shape's source_centroid.
         target_centroid_pos = sheet_origin + nested_centroid
 
-        final_position = target_centroid_pos
+        # The source_centroid is the pivot point for the final part placement.
+        # It's the original geometry's centroid, adjusted by any offset that occurred
+        # during buffering and re-centering. Using it as the center of rotation
+        # ensures the final part rotates around its true geometric center.
+        center = self.__shape_bounds.source_centroid or FreeCAD.Vector(0, 0, 0)
 
         # Create the final placement.
-        return FreeCAD.Placement(final_position, rotation)
+        return FreeCAD.Placement(target_centroid_pos, rotation, center)
 
     def set_shape_bounds(self, shape_bounds):
         """

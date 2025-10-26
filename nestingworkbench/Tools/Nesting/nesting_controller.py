@@ -64,6 +64,11 @@ class NestingController:
         if not self.doc:
             return
 
+        # Hide previous layouts
+        for obj in self.doc.Objects:
+            if obj.Name.startswith("Layout_") and hasattr(obj, "ViewObject"):
+                obj.ViewObject.Visibility = False
+
         # Check if a font is needed and has been selected
         font_path = getattr(self.ui, 'selected_font_path', None)
         if self.ui.add_labels_checkbox.isChecked() and not font_path:
@@ -326,6 +331,7 @@ class NestingController:
             try:
                 master_shape_instance = Shape(master_obj)
                 master_shape_instance.generate_bounds(shape_processor, spacing, boundary_resolution)
+                FreeCAD.Console.PrintMessage(f"Prepared master shape {label} with area {master_shape_instance.area()}\n") # DEBUG
                 master_shape_map[label] = master_shape_instance
             except Exception as e:
                 FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n")

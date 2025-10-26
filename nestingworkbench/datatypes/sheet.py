@@ -217,33 +217,57 @@ class Sheet:
                         boundary_obj.Placement = final_placement
                         boundary_obj.ViewObject.Visibility = shape_obj.ShowBounds
                         
-            if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
-                # Create the Draft.ShapeString object here, just before drawing.
-                label_obj = create_label_object(f"label_{shape.id}")
+                if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
+                    # Create the Draft.ShapeString object here, just before drawing.
+                    label_obj = create_label_object(f"label_{shape.id}")
 
-                # Create the underlying ShapeString geometry
-                shapestring_geom = Draft.make_shapestring(
-                    String=shape.label_text,
-                    FontFile=ui_params['font_path'],
-                    Size=ui_params.get('spacing', 0) * 0.6 # Use spacing from ui_params
-                )
-                label_obj.Shape = shapestring_geom.Shape
-                doc.removeObject(shapestring_geom.Name) # Remove the temporary Draft object
-                shapestring_bb = label_obj.Shape.BoundBox
-                shapestring_center = shapestring_bb.Center
+                    # Create the underlying ShapeString geometry
+                    shapestring_geom = Draft.make_shapestring(
+                        String=shape.label_text,
+                        FontFile=ui_params['font_path'],
+                        Size=ui_params.get('spacing', 0) * 0.6 # Use spacing from ui_params
+                    )
+                    label_obj.Shape = shapestring_geom.Shape
+                    doc.removeObject(shapestring_geom.Name) # Remove the temporary Draft object
+                    shapestring_bb = label_obj.Shape.BoundBox
+                    shapestring_center = shapestring_bb.Center
 
-                # The final center of the part is the center of its bounding box after placement.
-                # We use the shape_obj which has the final placement applied.
-                final_part_center = shape_obj.Shape.BoundBox.transformed(shape_obj.Placement.Matrix).Center
+                    # The final center of the part is the center of its bounding box after placement.
+                    # We use the shape_obj which has the final placement applied.
+                    final_part_center = shape_obj.Shape.BoundBox.transformed(shape_obj.Placement.Matrix).Center
 
-                # Add a small Z-offset to ensure the label is drawn on top of the part.
-                final_part_center.z += ui_params.get('label_height', 0.1)
+                    # Add a small Z-offset to ensure the label is drawn on top of the part.
+                    final_part_center.z += ui_params.get('label_height', 0.1)
+                    
+                    # Create a new placement for the label.
+                    # The placement should position the label's center at final_part_center.
+                    label_placement_base = final_part_center - shapestring_center
+                    label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
+                    
+                    text_group.addObject(label_obj)
+                    shape_obj.LabelObject = label_obj # Link to property
+                    label_obj.ViewObject.Visibility = shape_obj.ShowLabel # Set initial visibility
+
+            # --- DEBUG: Draw Centroids ---
+            # Draw a red dot at the boundary's centroid
+            if shape.shape_bounds and shape.shape_bounds.polygon:
+                bounds_centroid_shapely = shape.shape_bounds.polygon.centroid
+                bounds_centroid_fc = FreeCAD.Vector(bounds_centroid_shapely.x, bounds_centroid_shapely.y, 0)
                 
-                # Create a new placement for the label.
-                # The placement should position the label's center at final_part_center.
-                label_placement_base = final_part_center - shapestring_center
-                label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
-                
-                text_group.addObject(label_obj)
-                shape_obj.LabelObject = label_obj # Link to property
-                label_obj.ViewObject.Visibility = shape_obj.ShowLabel # Set initial visibility
+                red_dot_obj = doc.addObject("Part::Feature", f"debug_bounds_centroid_{shape.id}")
+                red_dot_obj.Shape = Part.Vertex(bounds_centroid_fc)
+                red_dot_obj.Placement = FreeCAD.Placement(sheet_origin, FreeCAD.Rotation())
+                shapes_group.addObject(red_dot_obj)
+                if FreeCAD.GuiUp:
+                    red_dot_obj.ViewObject.PointColor = (1.0, 0.0, 0.0) # Red
+                    red_dot_obj.ViewObject.PointSize = 8
+
+            # Draw a green dot at the final placed shape's centroid
+            if shape_obj:
+                green_dot_obj = doc.addObject("Part::Feature", f"debug_shape_centroid_{shape.id}")
+                green_dot_obj.Shape = Part.Vertex(shape_obj.Shape.CenterOfMass)
+                green_dot_obj.Placement = final_placement # Use the same final placement as the shape
+                shapes_group.addObject(green_dot_obj)
+                if FreeCAD.GuiUp:
+                    green_dot_obj.ViewObject.PointColor = (0.0, 1.0, 0.0) # Green
+                    green_dot_obj.ViewObject.PointSize = 8
