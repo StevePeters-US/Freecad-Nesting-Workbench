@@ -1,5 +1,4 @@
 import random
-import copy
 import math
 #import pdb
 from PySide import QtGui

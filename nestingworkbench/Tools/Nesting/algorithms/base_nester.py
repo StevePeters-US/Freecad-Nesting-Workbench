@@ -1,10 +1,6 @@
 import math
-import copy
 import random
 from shapely.geometry import Polygon
-from shapely.affinity import translate, rotate
-from shapely.ops import unary_union
-from PySide import QtGui
 import FreeCAD
 from ....datatypes.sheet import Sheet
 from ....datatypes.placed_part import PlacedPart

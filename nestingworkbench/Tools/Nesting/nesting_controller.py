@@ -89,6 +89,15 @@ class NestingController:
         layout_name = f"{base_name}_{i:03d}"
 
         layout_obj = self.doc.addObject("App::DocumentObjectGroup", layout_name)
+        # --- Store UI Parameters on the Layout Object ---
+        layout_obj.addProperty("App::PropertyLength", "SheetWidth", "Layout", "Width of the nested sheets").SheetWidth = self.ui.sheet_width_input.value()
+        layout_obj.addProperty("App::PropertyLength", "SheetHeight", "Layout", "Height of the nested sheets").SheetHeight = self.ui.sheet_height_input.value()
+        layout_obj.addProperty("App::PropertyLength", "PartSpacing", "Layout", "Spacing between parts").PartSpacing = self.ui.part_spacing_input.value()
+        layout_obj.addProperty("App::PropertyFile", "FontFile", "Layout", "Font file used for labels").FontFile = self.ui.selected_font_path
+        layout_obj.addProperty("App::PropertyBool", "ShowBounds", "Layout", "Visibility of part boundaries").ShowBounds = self.ui.show_bounds_checkbox.isChecked()
+        layout_obj.addProperty("App::PropertyBool", "AddLabels", "Layout", "Whether part labels are enabled").AddLabels = self.ui.add_labels_checkbox.isChecked()
+        layout_obj.addProperty("App::PropertyLength", "LabelHeight", "Layout", "Height of the part labels").LabelHeight = self.ui.label_height_input.value()
+
         QtGui.QApplication.processEvents()
         # Ensure the new layout group is visible by default.
         if FreeCAD.GuiUp and hasattr(layout_obj, "ViewObject"): layout_obj.ViewObject.Visibility = True

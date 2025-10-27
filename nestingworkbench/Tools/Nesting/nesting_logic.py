@@ -1,10 +1,8 @@
-import FreeCAD
 from PySide import QtGui
 
 from .algorithms import (
     genetic_nester,
     gravity_nester,
-    base_nester,
     minkowski_nester,
     sat_nester)
 
@@ -13,8 +11,8 @@ class NestingDependencyError(Exception):
     pass
 
 try:
-    from shapely.geometry import Polygon
-    from shapely.affinity import translate, rotate
+    # Check for shapely availability without importing specific functions
+    import shapely
     SHAPELY_AVAILABLE = True
 except ImportError:
     SHAPELY_AVAILABLE = False
@@ -33,7 +31,11 @@ def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs
         'SAT': sat_nester.SatNester
     }.get(algorithm)
 
-    if algorithm in ['Genetic', 'Gravity', 'Minkowski', 'SAT'] and not SHAPELY_AVAILABLE:
+    if nester_class is None:
+        raise NotImplementedError(f"The algorithm '{algorithm}' is not supported.")
+
+    SHAPELY_ALGORITHMS = ['Genetic', 'Gravity', 'Minkowski', 'SAT']
+    if algorithm in SHAPELY_ALGORITHMS and not SHAPELY_AVAILABLE:
         show_shapely_installation_instructions()
         raise NestingDependencyError("The selected algorithm requires the 'Shapely' library, which is not installed.")
 
@@ -41,6 +43,8 @@ def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs
     # The nester algorithms are responsible for the full multi-sheet nesting run.
     nester = nester_class(width, height, rotation_steps, **kwargs)
     result = nester.nest(parts)
+    # Some nesters may return a 3-tuple (sheets, unplaced, steps), while others
+    # may return a 2-tuple (sheets, unplaced). We handle both cases here.
     if len(result) == 3:
         sheets, unplaced, steps = result
     else:

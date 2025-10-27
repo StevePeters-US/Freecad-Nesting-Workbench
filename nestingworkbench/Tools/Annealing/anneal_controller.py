@@ -6,15 +6,21 @@ optimizing an existing layout using Simulated Annealing.
 """
 
 import FreeCAD
-import FreeCADGui
 import time
 import random
 import math
 import copy
 from PySide import QtGui
 from ..Nesting.algorithms import shape_processor
+from ...datatypes.sheet import Sheet
+from shapely.geometry import Polygon
 
-from ... import nesting_logic
+import itertools
+
+# --- Constants for Annealing ---
+OVERLAP_PENALTY = 10000
+OUTSIDE_PENALTY = 10000
+NEIGHBOR_MOVE_FACTOR = 0.2
 
 class AnnealController:
     """
@@ -94,7 +100,6 @@ class AnnealController:
         new_layout_obj = self.doc.addObject("App::DocumentObjectGroup", original_layout_name)
         if FreeCAD.GuiUp: new_layout_obj.ViewObject.Visibility = True
 
-        from ...datatypes.sheet import Sheet
         sheets_to_draw = []
         for i, parts_on_sheet in enumerate(final_sheets_list):
             sheet = Sheet(i, sheet_w, sheet_h)
@@ -103,7 +108,7 @@ class AnnealController:
             # Manually set final placement on each part before drawing
             for part in sheet.parts:
                 part.shape.placement = part.shape.get_final_placement(sheet_origin)
-            sheet.draw(self.doc, sheet_origin, self.nesting_controller.last_run_ui_params, new_layout_obj)
+            sheet.draw(self.doc, sheet_origin, params, new_layout_obj)
 
         end_time = time.time()
         status_text = f"Annealing complete in {end_time - start_time:.2f}s. Placed {len(all_placed_nesting_parts)} parts on {len(final_sheets_list)} sheets."
@@ -115,11 +120,17 @@ class AnnealController:
         """Reads layout parameters from the properties of the layout group."""
         if not self.layout_group: return None
         try:
-            if hasattr(self.layout_group, 'SheetWidth') and hasattr(self.layout_group, 'SheetHeight') and hasattr(self.layout_group, 'PartSpacing'):
+            # Check for all required properties before returning the dictionary
+            required_props = ['SheetWidth', 'SheetHeight', 'PartSpacing', 'FontFile', 'ShowBounds', 'AddLabels', 'LabelHeight']
+            if all(hasattr(self.layout_group, prop) for prop in required_props):
                 return {
                     "width": self.layout_group.SheetWidth,
                     "height": self.layout_group.SheetHeight,
-                    "spacing": self.layout_group.PartSpacing
+                    "spacing": self.layout_group.PartSpacing,
+                    "font_path": self.layout_group.FontFile,
+                    "show_bounds": self.layout_group.ShowBounds,
+                    "add_labels": self.layout_group.AddLabels,
+                    "label_height": self.layout_group.LabelHeight
                 }
         except Exception as e:
             FreeCAD.Console.PrintError(f"Error reading properties from layout group: {e}\n")
@@ -216,7 +227,7 @@ class AnnealController:
 
         idx = random.randrange(len(neighbor))
         
-        move_dist = max(bin_w, bin_h) * (temp / temp_initial) * 0.2
+        move_dist = max(bin_w, bin_h) * (temp / temp_initial) * NEIGHBOR_MOVE_FACTOR
         random_vec = FreeCAD.Vector(random.uniform(-1, 1), random.uniform(-1, 1), 0)
         if random_vec.Length > 0: random_vec.normalize()
         
@@ -232,10 +243,10 @@ class AnnealController:
         temp_parts = self._get_parts_from_placements(placements, source_parts)
         all_parts_on_sheet = temp_parts + fixed_parts
 
-        total_overlap = sum(self._get_overlap_area(part1, part2) for i, part1 in enumerate(all_parts_on_sheet) for part2 in all_parts_on_sheet[i+1:])
+        total_overlap = sum(self._get_overlap_area(part1, part2) for part1, part2 in itertools.combinations(all_parts_on_sheet, 2))
         total_outside = sum(self._get_outside_area(part, bin_w, bin_h) for part in all_parts_on_sheet)
 
-        return total_overlap * 10000 + total_outside * 10000
+        return total_overlap * OVERLAP_PENALTY + total_outside * OUTSIDE_PENALTY
 
     def _get_overlap_area(self, part1, part2):
         """Calculates the overlapping area between two parts."""
@@ -248,7 +259,6 @@ class AnnealController:
 
     def _get_outside_area(self, shape, bin_w, bin_h):
         """Calculates the area of a shape that is outside the bin."""
-        from shapely.geometry import Polygon
         bin_polygon = Polygon([(0, 0), (bin_w, 0), (bin_w, bin_h), (0, bin_h)])
         
         if not shape.polygon or bin_polygon.contains(shape.polygon):
@@ -260,8 +270,6 @@ class AnnealController:
 
     def _prepare_parts_from_layout(self, spacing):
         """Creates ShapeBounds objects from an existing layout group."""
-        import copy
-        from ...datatypes.shape import Shape
 
         # --- Step 1: Load Master Shapes ---
         # The MasterShapes group contains the original, processed shapes.

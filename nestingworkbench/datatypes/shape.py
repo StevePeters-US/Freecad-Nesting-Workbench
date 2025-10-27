@@ -144,22 +144,18 @@ class Shape:
         # Create the final placement.
         return FreeCAD.Placement(target_centroid_pos, rotation, center)
 
-    def set_rotation(self, angle, **kwargs):
+    def set_rotation(self, angle):
         """
         Sets the rotation of the shape's bounds to an absolute angle (in degrees).
-        This delegates the rotation to the underlying ShapeBounds object.
         """
-        reposition = kwargs.get('reposition', True)
         if self.original_polygon:
-            if reposition:
-                current_bl_x, current_bl_y, _, _ = self.bounding_box() # Preserve position
+            current_bl_x, current_bl_y, _, _ = self.bounding_box() # Preserve position
 
             self._angle = angle
             center = self.original_polygon.centroid
             self.polygon = rotate(self.original_polygon, angle, origin=center) # Always rotate from the true original
             
-            if reposition:
-                self.move_to(current_bl_x, current_bl_y)
+            self.move_to(current_bl_x, current_bl_y)
 
         self._update_fc_object_placement()
 
@@ -206,17 +202,6 @@ class Shape:
         Returns the area of the shape's bounds.
         """
         return self.polygon.area if self.polygon else 0.0
-
-    @property
-    def polygon(self):
-        """
-        Returns the shapely polygon of the shape's bounds.
-        """
-        return self._polygon
-
-    @polygon.setter
-    def polygon(self, value):
-        self._polygon = value
 
     @property
     def angle(self):

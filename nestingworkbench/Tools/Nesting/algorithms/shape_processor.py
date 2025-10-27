@@ -8,7 +8,6 @@ buffered boundaries.
 
 import FreeCAD
 import Part
-import math
 
 def get_2d_profile_from_obj(obj):
     """

@@ -1,5 +1,4 @@
 import math
-import copy
 import pdb
 import random
 from shapely.geometry import Polygon, MultiPolygon
@@ -200,6 +199,7 @@ class MinkowskiNester(BaseNester):
             p_new = rotate(p, angle1, origin='centroid')
             if reflect1:
                 p_new = self._reflect_polygon(p_new)
+                p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
             poly1_convex_transformed.append(p_new)
 
         poly2_convex_transformed = []
@@ -207,6 +207,7 @@ class MinkowskiNester(BaseNester):
             p_new = rotate(p, angle2, origin='centroid')
             if reflect2:
                 p_new = self._reflect_polygon(p_new)
+                p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
             poly2_convex_transformed.append(p_new)
 
         minkowski_parts = []
