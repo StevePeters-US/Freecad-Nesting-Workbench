@@ -253,8 +253,16 @@ class Sheet:
                     shape_obj.ShowLabel = ui_params.get('add_labels', False)
                 else:
                     # Simulation mode: just update the placement of the existing object
-                    shape_obj.Placement = final_placement
+                    # The shape geometry needs to be placed relative to the boundary.
+                    # We combine the final_placement with the geometry's internal offset.
+                    if shape.source_centroid:
+                        offset_placement = FreeCAD.Placement(shape.source_centroid.negative(), FreeCAD.Rotation())
+                        shape_obj.Placement = final_placement.multiply(offset_placement)
+                    else:
+                        shape_obj.Placement = final_placement
+                    
+                    # The boundary object's placement is relative to the shape object's placement.
                     if hasattr(shape_obj, 'BoundaryObject') and shape_obj.BoundaryObject:
-                        shape_obj.BoundaryObject.Placement = shape_obj.Placement.copy()
+                        shape_obj.BoundaryObject.Placement = final_placement.copy()
             else:
                 pass # FreeCAD.Console.PrintWarning(f"DEBUG:     fc_object for part '{shape.id}' was None. Skipping drawing.\n")
