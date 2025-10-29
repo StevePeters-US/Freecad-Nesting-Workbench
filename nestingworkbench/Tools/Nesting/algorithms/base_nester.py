@@ -36,7 +36,7 @@ class BaseNester(object):
         
         # Final validation to ensure the returned part is valid before accepting it.
         if placed_part_shape and sheet.is_placement_valid(placed_part_shape, recalculate_union=False):
-            sheet_origin = sheet.get_origin(self.spacing)
+            sheet_origin = sheet.get_origin()
             placed_part_shape.placement = placed_part_shape.get_final_placement(sheet_origin)
             sheet.add_part(PlacedPart(placed_part_shape))
             return True
@@ -70,7 +70,7 @@ class BaseNester(object):
             if not placed:
                 # If it didn't fit on any existing sheet, try a new one
                 new_sheet_id = len(self.sheets)
-                new_sheet = Sheet(new_sheet_id, self._bin_width, self._bin_height) # Create a new sheet
+                new_sheet = Sheet(new_sheet_id, self._bin_width, self._bin_height, spacing=self.spacing) # Create a new sheet
                 
                 if self._attempt_placement_on_sheet(original_shape, new_sheet):
                     self.sheets.append(new_sheet)
@@ -99,25 +99,25 @@ class BaseNester(object):
             return False
 
         # Reset part to its pre-shake state for this attempt
-        part_to_shake.move_to(initial_bl_x, initial_bl_y)
-        part_to_shake.set_rotation(initial_angle)
+        part_to_shake.move_to(initial_bl_x, initial_bl_y) # No UI update needed here
+        part_to_shake.set_rotation(initial_angle, reposition=False) # No UI update
 
         # Oscillate the rotation
         angle_step_magnitude = (360.0 / part_to_shake.rotation_steps) * (i // 2 + 1)
         rotation_direction = side_direction
         new_angle = (initial_angle + angle_step_magnitude * rotation_direction) % 360.0
-        part_to_shake.set_rotation(new_angle)
+        part_to_shake.set_rotation(new_angle) # No UI update
 
         return sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
 
-    def _try_translation_shake(self, part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, current_gravity_direction, side_direction, i):
+    def _try_translation_shake(self, part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, current_gravity_direction, side_direction, i, current_sheet=None):
         """Helper to attempt a single translational shake."""
         if not self.anneal_translate_enabled:
             return False
 
         # Reset part to its pre-shake state for this attempt
-        part_to_shake.move_to(initial_bl_x, initial_bl_y)
-        part_to_shake.set_rotation(initial_angle)
+        part_to_shake.move_to(initial_bl_x, initial_bl_y) # No UI update
+        part_to_shake.set_rotation(initial_angle, reposition=False) # No UI update
 
         amplitude = self.step_size * (i // 2 + 1)
 
@@ -131,7 +131,7 @@ class BaseNester(object):
 
         shake_dx = perp_dir_for_shake[0] * amplitude * side_direction
         shake_dy = perp_dir_for_shake[1] * amplitude * side_direction
-        part_to_shake.move(shake_dx, shake_dy)
+        part_to_shake.move(shake_dx, dy=shake_dy) # No UI update
 
         return sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
 
@@ -173,6 +173,8 @@ class BaseNester(object):
 
             if is_valid:
                 # Found a valid position. Return its current centroid and angle.
+                if self.update_callback:
+                    self.update_callback(part_to_shake, sheet)
                 new_centroid = part_to_shake.centroid
                 new_pos = (new_centroid.x, new_centroid.y) if new_centroid else (0, 0)
                 return new_pos, part_to_shake.angle

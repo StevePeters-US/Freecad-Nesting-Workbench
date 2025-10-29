@@ -249,10 +249,6 @@ class NestingController:
         # Add spacing to algo_kwargs so the nester can use it for sheet origin calculations
         algo_kwargs['spacing'] = spacing
 
-        # If simulation is enabled, pass a callback that processes UI events.
-        if self.ui.simulate_nesting_checkbox.isChecked():
-            algo_kwargs['update_callback'] = lambda: QtGui.QApplication.processEvents()
-
         FreeCAD.Console.PrintMessage(f"DEBUG: --- State of parts_to_nest before calling nest() --- \n")
         for part in parts_to_nest:
             FreeCAD.Console.PrintMessage(f"DEBUG:   Part '{part.id}' (id={id(part)}). fc_object is {'set' if part.fc_object else 'None'}.\n")
@@ -262,7 +258,7 @@ class NestingController:
             sheets, remaining_parts_to_nest, total_steps = nest(
                 parts_to_nest,
                 self.ui.sheet_width_input.value(), self.ui.sheet_height_input.value(),
-                global_rotation_steps, algorithm,
+                global_rotation_steps, algorithm, self.ui.simulate_nesting_checkbox.isChecked(),
                 **algo_kwargs
             )
         except NestingDependencyError as e:
@@ -278,10 +274,9 @@ class NestingController:
         # The LayoutController's execute method is no longer used.
         # We perform all drawing actions imperatively here.
         for sheet in sheets:
-            sheet_origin = sheet.get_origin(spacing)
             sheet.draw(
                 self.doc,
-                sheet_origin,
+                # sheet_origin is now calculated inside draw()
                 self.last_run_ui_params,
                 layout_obj # The parent group is the layout object itself
             )
@@ -379,6 +374,7 @@ class NestingController:
                 shape_instance = copy.deepcopy(master_shape_instance)
                 shape_instance.instance_num = i + 1
                 shape_instance.id = f"{shape_instance.source_freecad_object.Label}_{shape_instance.instance_num}"
+                shape_instance.spacing = spacing # Explicitly set spacing on each instance
                 shape_instance.rotation_steps = part_rotation_steps
                 shape_instance.fc_object = None # Initialize link to physical object as None
 

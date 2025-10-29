@@ -35,6 +35,7 @@ class Shape:
         # --- Metadata ---
         self.label_text = None # Will hold the text for the Draft.ShapeString object
         self.rotation_steps = 1 # The definitive number of rotation steps for this part.
+        self.spacing = 0 # The spacing used for the nesting operation.
         
         # --- State during/after nesting ---
         self.fc_object = None # Link to the physical FreeCAD object in the 'PartsToPlace' group
@@ -151,28 +152,28 @@ class Shape:
         # Create the final placement.
         return FreeCAD.Placement(target_centroid_pos, rotation, center)
 
-    def set_rotation(self, angle):
+    def set_rotation(self, angle, reposition=True):
         """
         Sets the rotation of the shape's bounds to an absolute angle (in degrees).
         """
         if self.original_polygon:
-            current_bl_x, current_bl_y, _, _ = self.bounding_box() # Preserve position
+            if reposition:
+                current_bl_x, current_bl_y, _, _ = self.bounding_box() # Preserve position
 
             self._angle = angle
             center = self.original_polygon.centroid
             self.polygon = rotate(self.original_polygon, angle, origin=center) # Always rotate from the true original
             
-            self.move_to(current_bl_x, current_bl_y)
-
-        self._update_fc_object_placement()
+            if reposition:
+                self.move_to(current_bl_x, current_bl_y)
 
     def move(self, dx, dy):
         """
         Moves the shape's bounds by a given delta.
         """
-        if self.polygon:
-            self.polygon = translate(self.polygon, xoff=dx, yoff=dy)
-        self._update_fc_object_placement()
+        if not self.polygon:
+            return
+        self.polygon = translate(self.polygon, xoff=dx, yoff=dy)
 
     def move_to(self, x, y):
         """
@@ -183,17 +184,6 @@ class Shape:
             dx = x - min_x
             dy = y - min_y
             self.move(dx, dy)
-        self._update_fc_object_placement()
-
-    def _update_fc_object_placement(self):
-        """Updates the associated FreeCAD object's placement if it exists."""
-        if self.fc_object:
-            # We calculate the placement on-the-fly from the current state.
-            # The sheet origin is (0,0,0) during the nesting phase.
-            new_placement = self.get_final_placement()
-            self.fc_object.Placement = new_placement
-            if hasattr(self.fc_object, 'BoundaryObject') and self.fc_object.BoundaryObject:
-                self.fc_object.BoundaryObject.Placement = self.fc_object.Placement.copy()
 
     def bounding_box(self):
         """

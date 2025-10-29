@@ -20,17 +20,15 @@ except ImportError:
     SHAPELY_AVAILABLE = False
 
 # --- Public Function ---
-def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs):
+def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', simulate=False, **kwargs):
     """Convenience function to run the nesting algorithm."""
     # If simulation is enabled, the nester needs the original list of parts
     # that are linked to the visible FreeCAD objects (fc_object).
     # If simulation is disabled, we MUST use a deepcopy to prevent the nester
     # from modifying the original part objects that the controller will use for
-    # the final drawing step. This prevents state corruption.
-    if 'update_callback' in kwargs:
-        parts_to_process = parts # Use original list for simulation
-    else:
-        parts_to_process = copy.deepcopy(parts) # Use a copy for stability
+    # the final drawing step. This prevents state corruption by ensuring the
+    # algorithm works on disposable copies.
+    parts_to_process = parts if simulate else copy.deepcopy(parts)
 
     steps = 0
     sheets = []
@@ -53,6 +51,12 @@ def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs
     # The controller now passes a fresh list of all parts to be nested.
     # The nester algorithms are responsible for the full multi-sheet nesting run.
     nester = nester_class(width, height, rotation_steps, **kwargs)
+
+    # If simulation is enabled, pass a callback that can draw the sheet state.
+    if simulate:
+        # The callback needs access to the nester's current state.
+        nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), QtGui.QApplication.processEvents())
+
     result = nester.nest(parts_to_process)
     # Some nesters may return a 3-tuple (sheets, unplaced, steps), while others
     # may return a 2-tuple (sheets, unplaced). We handle both cases here.
