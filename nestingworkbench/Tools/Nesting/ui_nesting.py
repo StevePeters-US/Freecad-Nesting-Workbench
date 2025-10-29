@@ -240,16 +240,24 @@ class NestingPanel(QtGui.QWidget):
         master_shapes_group = layout_group.getObject("MasterShapes")
         if master_shapes_group:
             # The master shapes are now copies inside this group.
-            shapes_to_load = list(master_shapes_group.Group)
-            self.load_shapes(shapes_to_load)
+            # We need to find the actual ShapeObject inside each 'master_' container,
+            # as that is what the processing logic expects.
+            shapes_to_load = []
+            for master_container in master_shapes_group.Group:
+                if master_container.isDerivedFrom("App::Part") and master_container.Label.startswith("master_"):
+                    shape_obj = next((child for child in master_container.Group if hasattr(child, "Proxy") and child.Proxy.__class__.__name__ == "ShapeObject"), None)
+                    if shape_obj:
+                        shapes_to_load.append(shape_obj)
+            self.load_shapes(shapes_to_load, is_reloading_layout=True)
         else:
             self.status_label.setText("Warning: Could not find 'MasterShapes' group in the selected layout.")
 
-    def load_shapes(self, selection):
+    def load_shapes(self, selection, is_reloading_layout=False):
         """Loads a selection of shapes into the UI."""
         self.nest_button.setEnabled(True)
         self.selected_shapes_to_process = list(dict.fromkeys(selection)) # Keep unique, preserve order
-        self.hidden_originals = list(self.selected_shapes_to_process)
+        if not is_reloading_layout:
+            self.hidden_originals = list(self.selected_shapes_to_process)
         
         self.shape_table.setRowCount(len(self.selected_shapes_to_process))
         for i, obj in enumerate(self.selected_shapes_to_process):

@@ -115,7 +115,7 @@ class Shape:
         else:
             bound_obj = doc.addObject("Part::Feature", bound_obj_name)
             bound_obj.Shape = new_shape
-            group.addObject(bound_obj)
+            if group: group.addObject(bound_obj)
             if FreeCAD.GuiUp: bound_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)
         return bound_obj
 

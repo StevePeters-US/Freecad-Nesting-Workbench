@@ -173,6 +173,12 @@ class NestingController:
 
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
 
+        # If simulating, hide the master shapes group to avoid visual clutter.
+        if is_simulating:
+            master_shapes_group = layout_obj.getObject("MasterShapes")
+            if master_shapes_group and hasattr(master_shapes_group, "ViewObject"):
+                master_shapes_group.ViewObject.Visibility = False
+
         try:
             sheets, remaining_parts_to_nest, total_steps = nest(
                 parts_to_nest,
@@ -284,43 +290,71 @@ class NestingController:
         parts_to_nest = []
         master_shape_obj_map = {} # Maps original FreeCAD object ID to the new master ShapeObject
 
+        # This list will hold tuples of (master_container, temp_shape_wrapper) to be sorted later.
+        masters_to_place = []
+
+        # --- Variables for placing master shapes in a line ---
+        master_placement_x = 0
+        max_master_height = 0
+
         # --- Step 1: Create the FreeCAD "master" objects for each unique part. ---
         for label, master_obj in master_shapes_from_ui.items():
             try:
                 # Create a temporary in-memory shape to process geometry and get the centroid.
-                temp_shape_wrapper = Shape(master_obj)
-                shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution)
+                # Check if we are reloading a layout. If so, master_obj is already a master shape object.
+                is_reloading = master_obj.Label.startswith("master_shape_")
+                
+                if is_reloading:
+                    # We are reloading. The master_obj is the ShapeObject. Its container is the master_container.
+                    master_shape_obj = master_obj
+                    master_container = master_shape_obj.InList[0]
+                    # We still need a temp wrapper for sorting and placement logic.
+                    temp_shape_wrapper = Shape(master_shape_obj)
+                    shape_processor.create_single_nesting_part(temp_shape_wrapper, master_shape_obj, spacing, boundary_resolution)
+                else:
+                    # This is a fresh run. Create new master objects.
+                    temp_shape_wrapper = Shape(master_obj)
+                    shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution)
 
-                # Create the master container and the ShapeObject that will live inside it.
-                master_container = self.doc.addObject("App::Part", f"master_{label}")
-                master_shape_obj = create_shape_object(f"master_shape_{label}")
-                master_shape_obj.Shape = master_obj.Shape.copy()
+                    master_container = self.doc.addObject("App::Part", f"master_{label}")
+                    master_shape_obj = create_shape_object(f"master_shape_{label}")
+                    master_shape_obj.Shape = master_obj.Shape.copy()
 
-                # Place the shape object inside the container, offset by its centroid.
-                if temp_shape_wrapper.source_centroid:
-                    master_shape_obj.Placement = FreeCAD.Placement(temp_shape_wrapper.source_centroid.negative(), FreeCAD.Rotation())
-                master_container.addObject(master_shape_obj)
+                    if temp_shape_wrapper.source_centroid:
+                        master_shape_obj.Placement = FreeCAD.Placement(temp_shape_wrapper.source_centroid.negative(), FreeCAD.Rotation())
+                    master_container.addObject(master_shape_obj)
 
-                # Draw the bounds and add them to the container.
-                if temp_shape_wrapper.polygon:
-                    boundary_obj = temp_shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), master_shapes_group)
-                    if boundary_obj:
-                        master_container.addObject(boundary_obj)
-                        boundary_obj.Placement = FreeCAD.Placement()
-                        master_shape_obj.BoundaryObject = boundary_obj
-                        master_shape_obj.ShowBounds = False
-                        if hasattr(boundary_obj, "ViewObject"): boundary_obj.ViewObject.Visibility = False
+                    if temp_shape_wrapper.polygon:
+                        boundary_obj = temp_shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), None)
+                        if boundary_obj:
+                            master_container.addObject(boundary_obj)
+                            boundary_obj.Placement = FreeCAD.Placement()
+                            master_shape_obj.BoundaryObject = boundary_obj
+                            master_shape_obj.ShowBounds = False
+                            if hasattr(boundary_obj, "ViewObject"): boundary_obj.ViewObject.Visibility = False
                 
                 master_shapes_group.addObject(master_container)
                 master_shape_obj_map[id(master_obj)] = master_shape_obj
+                masters_to_place.append((master_container, temp_shape_wrapper))
 
             except Exception as e:
                 FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n")
                 continue
+        
+        # --- Step 1.5: Sort masters by area (largest first) and position them in a line ---
+        masters_to_place.sort(key=lambda item: item[1].area, reverse=True)
 
-        # Hide the master shapes group itself.
-        if FreeCAD.GuiUp and hasattr(master_shapes_group, "ViewObject"):
-            master_shapes_group.ViewObject.Visibility = False
+        # Calculate max height from all sorted masters
+        if masters_to_place:
+            max_master_height = max(item[1].bounding_box()[3] for item in masters_to_place if item[1].polygon)
+
+        current_x = 0
+        y_offset = -max_master_height - spacing * 4 # Place masters below the sheets area
+        for container, shape_wrapper in masters_to_place:
+            container.Placement = FreeCAD.Placement(FreeCAD.Vector(current_x, y_offset, 0), FreeCAD.Rotation())
+            # Use the bounding box of the container's contents for the next position.
+            # This ensures even spacing regardless of the shape's internal origin.
+            current_x += container.Shape.BoundBox.XLength + spacing * 2
 
         # --- Step 2: Create in-memory Shape instances and temporary FreeCAD copies for nesting. ---
         add_labels = self.ui.add_labels_checkbox.isChecked()
@@ -346,6 +380,16 @@ class NestingController:
                 part_copy.Label = f"part_{shape_instance.id}"
                 parts_to_place_group.addObject(part_copy)
                 shape_instance.fc_object = part_copy
+
+                # Apply the master's final placement to the temporary copy.
+                # This ensures the simulation starts with parts in the correct initial positions.
+                if master_shape_obj.InList:
+                    master_container = master_shape_obj.InList[0]
+                    part_copy.Placement = master_shape_obj.getGlobalPlacement() # This is correct for the shape proxy
+                    # Also update the placement of the boundary object for correct simulation display.
+                    # The boundary's geometry is centered, so its placement should match the master container's placement.
+                    if hasattr(part_copy, 'BoundaryObject') and part_copy.BoundaryObject:
+                        part_copy.BoundaryObject.Placement = master_container.getGlobalPlacement()
 
                 # Set visibility for simulation.
                 part_copy.ShowBounds = True
