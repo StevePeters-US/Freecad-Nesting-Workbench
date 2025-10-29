@@ -311,12 +311,18 @@ class NestingController:
         toggled_count = 0
         for obj in self.doc.Objects:
             # Only toggle bounds for the final nested parts, which are prefixed with "nested_".
-            # Master shapes are prefixed with "master_" and will be ignored.
-            if obj.Label.startswith("nested_") and hasattr(obj, "ShowBounds"):
-                obj.ShowBounds = is_visible
-                toggled_count += 1
+            # The "nested_" object is an App::Part container. We need to find the
+            # ShapeObject inside it to toggle the property, as the onChanged logic
+            # is on the ShapeObject's proxy.
+            if obj.Label.startswith("nested_") and obj.isDerivedFrom("App::Part"):
+                # Find the ShapeObject within the container group
+                shape_child = next((child for child in obj.Group if hasattr(child, "Proxy") and child.Proxy.__class__.__name__ == "ShapeObject"), None)
+                if shape_child and hasattr(shape_child, "ShowBounds"):
+                    shape_child.ShowBounds = is_visible
+                    toggled_count += 1
         
-        self.ui.status_label.setText(f"Toggled bounds visibility for {toggled_count} shapes.")
+        if toggled_count > 0:
+            self.ui.status_label.setText(f"Toggled bounds visibility for {toggled_count} shapes.")
 
     def _prepare_parts_from_ui(self, spacing, boundary_resolution):
         """Reads the UI table and creates a list of Shape objects to be nested."""
