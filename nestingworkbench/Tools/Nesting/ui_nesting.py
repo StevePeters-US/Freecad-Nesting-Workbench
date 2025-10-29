@@ -245,8 +245,9 @@ class NestingPanel(QtGui.QWidget):
             shapes_to_load = []
             for master_container in master_shapes_group.Group:
                 if master_container.isDerivedFrom("App::Part") and master_container.Label.startswith("master_"):
-                    shape_obj = next((child for child in master_container.Group if hasattr(child, "Proxy") and child.Proxy.__class__.__name__ == "ShapeObject"), None)
-                    if shape_obj:
+                    # The object to load is the 'master_shape_...' object inside the 'master_...' container.
+                    shape_obj = next((child for child in master_container.Group if child.Label.startswith("master_shape_")), None)
+                    if shape_obj and hasattr(shape_obj, "Proxy"):
                         shapes_to_load.append(shape_obj)
             self.load_shapes(shapes_to_load, is_reloading_layout=True)
         else:

@@ -63,9 +63,11 @@ class NestingController:
             return
 
         # Hide previous layouts
+        # Also hide any leftover temporary groups from previous runs.
         for obj in self.doc.Objects:
-            if obj.Name.startswith("Layout_"):
-                if hasattr(obj, "ViewObject"):
+            if (obj.Name.startswith("Layout_") or 
+                obj.Name in ["PartsToPlace", "MasterShapes"]):
+                if hasattr(obj, "ViewObject") and obj.ViewObject.Visibility:
                     obj.ViewObject.Visibility = False
 
         # Check if a font is needed and has been selected
@@ -174,7 +176,7 @@ class NestingController:
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
 
         # If simulating, hide the master shapes group to avoid visual clutter.
-        if is_simulating:
+        if is_simulating or not self.ui.show_bounds_checkbox.isChecked():
             master_shapes_group = layout_obj.getObject("MasterShapes")
             if master_shapes_group and hasattr(master_shapes_group, "ViewObject"):
                 master_shapes_group.ViewObject.Visibility = False
@@ -281,7 +283,14 @@ class NestingController:
                 FreeCAD.Console.PrintWarning(f"Skipping row {row} due to invalid data.\n")
                 continue
 
-        master_shapes_from_ui = {obj.Label: obj for obj in self.ui.selected_shapes_to_process if obj.Label in quantities}
+        # Determine if we are reloading a layout. This is true if the first selected object is a master shape.
+        is_reloading = False
+        if self.ui.selected_shapes_to_process and self.ui.selected_shapes_to_process[0].Label.startswith("master_shape_"):
+            is_reloading = True
+
+        # If reloading, only use the master shapes from the selected layout.
+        # Otherwise, use the original user-selected shapes.
+        master_shapes_from_ui = {obj.Label: obj for obj in self.ui.selected_shapes_to_process if obj.Label in quantities and (not is_reloading or obj.Label.startswith("master_shape_"))}
 
         # --- Create the hidden MasterShapes group ---
         master_shapes_group = self.doc.addObject("App::DocumentObjectGroup", "MasterShapes")
@@ -300,7 +309,7 @@ class NestingController:
         # --- Step 1: Create the FreeCAD "master" objects for each unique part. ---
         for label, master_obj in master_shapes_from_ui.items():
             try:
-                # Create a temporary in-memory shape to process geometry and get the centroid.
+                # Create a temporary in-memory shape to process geometry.
                 # Check if we are reloading a layout. If so, master_obj is already a master shape object.
                 is_reloading = master_obj.Label.startswith("master_shape_")
                 
