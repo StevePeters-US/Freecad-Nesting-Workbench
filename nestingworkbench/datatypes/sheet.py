@@ -187,14 +187,17 @@ class Sheet:
             sheet_obj.ViewObject.Transparency = 75
 
         # Draw the parts placed on this sheet
+        FreeCAD.Console.PrintMessage(f"DEBUG: --- Drawing Sheet {self.id+1} --- \n")
         for placed_part in self.parts:
             shape = placed_part.shape
+            FreeCAD.Console.PrintMessage(f"DEBUG:   Attempting to draw part '{shape.id}' (id={id(shape)}). Checking for fc_object...\n")
             # The final placement is now pre-calculated by the nester and stored on the shape object.
             # We should use this directly instead of recalculating it.
             final_placement = shape.placement
 
             shape_obj = shape.fc_object
             if shape_obj:
+                FreeCAD.Console.PrintMessage(f"DEBUG:     fc_object '{shape_obj.Label}' found. Proceeding with drawing.\n")
                 # This is the correct logic: find the existing object, rename it, and move it.
                 shape_obj.Label = f"nested_{shape.id}"
                 shapes_group.addObject(shape_obj)
@@ -247,3 +250,5 @@ class Sheet:
                     text_group.addObject(label_obj)
                     shape_obj.LabelObject = label_obj # Link to property
                     label_obj.ViewObject.Visibility = shape_obj.ShowLabel # Set initial visibility
+            else:
+                FreeCAD.Console.PrintWarning(f"DEBUG:     fc_object for part '{shape.id}' was None. Skipping drawing.\n")

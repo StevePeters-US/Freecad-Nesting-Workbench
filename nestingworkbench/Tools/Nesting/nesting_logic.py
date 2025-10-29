@@ -1,4 +1,6 @@
 from PySide import QtGui
+import FreeCAD
+import copy
 
 from .algorithms import (
     genetic_nester,
@@ -20,10 +22,19 @@ except ImportError:
 # --- Public Function ---
 def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs):
     """Convenience function to run the nesting algorithm."""
+    # If simulation is enabled, the nester needs the original list of parts
+    # that are linked to the visible FreeCAD objects (fc_object).
+    # If simulation is disabled, we MUST use a deepcopy to prevent the nester
+    # from modifying the original part objects that the controller will use for
+    # the final drawing step. This prevents state corruption.
+    if 'update_callback' in kwargs:
+        parts_to_process = parts # Use original list for simulation
+    else:
+        parts_to_process = copy.deepcopy(parts) # Use a copy for stability
+
     steps = 0
     sheets = []
     unplaced = []
-
     nester_class = {
         'Genetic': genetic_nester.GeneticNester,
         'Gravity': gravity_nester.GravityNester,
@@ -42,7 +53,7 @@ def nest(parts, width, height, rotation_steps=1, algorithm='Grid Fill', **kwargs
     # The controller now passes a fresh list of all parts to be nested.
     # The nester algorithms are responsible for the full multi-sheet nesting run.
     nester = nester_class(width, height, rotation_steps, **kwargs)
-    result = nester.nest(parts)
+    result = nester.nest(parts_to_process)
     # Some nesters may return a 3-tuple (sheets, unplaced, steps), while others
     # may return a 2-tuple (sheets, unplaced). We handle both cases here.
     if len(result) == 3:

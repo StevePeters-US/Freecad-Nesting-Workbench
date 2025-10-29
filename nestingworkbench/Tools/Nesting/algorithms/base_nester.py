@@ -19,6 +19,7 @@ class BaseNester(object):
         self.anneal_rotate_enabled = kwargs.get("anneal_rotate_enabled", True)
         self.anneal_translate_enabled = kwargs.get("anneal_translate_enabled", True)
         self.anneal_random_shake_direction = kwargs.get("anneal_random_shake_direction", False)
+        self.update_callback = kwargs.get("update_callback", None)
 
         self.parts_to_place = [] # This list will hold Shape objects
         self.sheets = []

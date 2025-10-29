@@ -55,10 +55,16 @@ class Shape:
         # Copy the reference to the FreeCAD object, do NOT deepcopy it.
         result.source_freecad_object = self.source_freecad_object
 
-        # Deepcopy other attributes.
+        # CRITICAL: The fc_object is a link to a live FreeCAD object and cannot be
+        # deep-copied. We explicitly set it to None on the new copy. This is essential
+        # for creating copies for the nesting algorithm without causing pickling errors.
+        result.fc_object = None 
+
+        # Deepcopy other attributes, explicitly skipping the non-copyable ones.
         for k, v in self.__dict__.items():
-            if k in ['source_freecad_object', 'fc_object', 'area', 'centroid', 'angle']: # Don't deepcopy these links or properties
+            if k in ['source_freecad_object', 'fc_object']:
                 continue
+
             if isinstance(v, FreeCAD.Vector):
                 setattr(result, k, FreeCAD.Vector(v))
             elif isinstance(v, FreeCAD.Placement):
@@ -68,6 +74,7 @@ class Shape:
                 setattr(result, k, copy.deepcopy(v, memo))
             else:
                 setattr(result, k, copy.deepcopy(v, memo))
+
         return result
 
     def draw_bounds(self, doc, sheet_origin, group):

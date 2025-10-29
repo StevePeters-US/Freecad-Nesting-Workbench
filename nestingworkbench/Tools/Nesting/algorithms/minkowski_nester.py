@@ -174,12 +174,6 @@ class MinkowskiNester(BaseNester):
         self._nfp_cache[cache_key] = master_nfp
         return master_nfp
 
-    def _reflect_polygon(self, polygon):
-        """Reflects a shapely polygon about the origin."""
-        if not polygon: return None
-        # Using scale is a robust way to reflect
-        return scale(polygon, xfact=-1.0, yfact=-1.0, origin=(0, 0))
-
     def _minkowski_sum(self, master_poly1, angle1, reflect1, master_poly2, angle2, reflect2):
         """
         Computes the Minkowski sum of two polygons.
@@ -198,7 +192,6 @@ class MinkowskiNester(BaseNester):
         for p in poly1_convex_parts:
             p_new = rotate(p, angle1, origin='centroid')
             if reflect1:
-                p_new = self._reflect_polygon(p_new)
                 p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
             poly1_convex_transformed.append(p_new)
 
@@ -206,7 +199,6 @@ class MinkowskiNester(BaseNester):
         for p in poly2_convex_parts:
             p_new = rotate(p, angle2, origin='centroid')
             if reflect2:
-                p_new = self._reflect_polygon(p_new)
                 p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
             poly2_convex_transformed.append(p_new)
 

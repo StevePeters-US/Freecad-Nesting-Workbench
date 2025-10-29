@@ -120,6 +120,7 @@ class NestingPanel(QtGui.QWidget):
         self.add_labels_checkbox = QtGui.QCheckBox("Add Identifier Labels"); self.add_labels_checkbox.setChecked(True)
         self.label_height_input = QtGui.QDoubleSpinBox(); self.label_height_input.setRange(0, 1000); self.label_height_input.setValue(25.0)
         self.label_height_input.setToolTip("The height (Z-offset) for the identifier labels.")
+        self.simulate_nesting_checkbox = QtGui.QCheckBox("Simulate Nesting (slower)"); self.simulate_nesting_checkbox.setChecked(False)
         self.sound_checkbox = QtGui.QCheckBox("Play sound on completion"); self.sound_checkbox.setChecked(True)
         
         self.nest_button = QtGui.QPushButton("Run Nesting")
@@ -161,6 +162,7 @@ class NestingPanel(QtGui.QWidget):
         rotation_layout.addWidget(self.rotation_steps_spinbox)
         form_layout.addRow("Global Rotation Steps:", rotation_layout)
 
+        form_layout.addRow(self.simulate_nesting_checkbox)
         form_layout.addRow(self.show_bounds_checkbox) # Keep this on its own line
         form_layout.addRow(self.sound_checkbox)
         
