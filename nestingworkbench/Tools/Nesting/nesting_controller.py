@@ -121,54 +121,45 @@ class NestingController:
         master_obj_map = {}
         for shape_wrapper in master_shape_wrappers:
             original_obj = shape_wrapper.source_freecad_object
-            # Create a ShapeObject to store as the master, leaving the original untouched.
-            master_obj = create_shape_object(f"master_{original_obj.Label}")
-            master_obj_map[id(original_obj)] = master_obj
-            
-            # The shape is not translated here anymore. The alignment will be handled
-            # during the final drawing phase by setting a relative placement inside a container.
-            shape_copy = original_obj.Shape.copy()
-            master_obj.Shape = shape_copy
 
-            master_shapes_group.addObject(master_obj)
+            # Create a container for the master shape, mirroring the final nested part structure.
+            master_container = self.doc.addObject("App::Part", f"master_{original_obj.Label}")
+            master_obj_map[id(original_obj)] = master_container
+            master_shapes_group.addObject(master_container)
+
+            # Create the master ShapeObject that will live inside the container.
+            master_shape_obj = create_shape_object(f"master_shape_{original_obj.Label}")
+            shape_copy = original_obj.Shape.copy()
+            master_shape_obj.Shape = shape_copy
+            
+            # The shape object is placed inside the container, offset by its centroid.
+            # This aligns its geometry's reference point (the centroid) with the container's origin.
+            if shape_wrapper.source_centroid:
+                master_shape_obj.Placement = FreeCAD.Placement(shape_wrapper.source_centroid.negative(), FreeCAD.Rotation())
+            else:
+                master_shape_obj.Placement = FreeCAD.Placement()
+            master_container.addObject(master_shape_obj)
 
             # Now, draw the bounds for this master shape and link them.
-            # The bounds are drawn at the document origin (0,0,0) as they are just for reference.
+            # The bounds are drawn at the document origin and placed inside the container without any offset.
             if shape_wrapper.polygon:
-                # We pass the master_shapes_group to ensure the boundary object is added to it.
+                # We pass the master_container as the group to add the boundary to.
                 boundary_obj = shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), master_shapes_group)
                 if boundary_obj:
-                    # The 'BoundaryObject' and 'ShowBounds' properties are already added by the ShapeObject class.
-                    # We just need to set their values.
-                    master_obj.BoundaryObject = boundary_obj
-                    master_obj.ShowBounds = False # Master shape bounds should always be off by default.
+                    master_container.addObject(boundary_obj) # Add the bounds to the container
+                    boundary_obj.Placement = FreeCAD.Placement() # Place at container origin
+                    master_shape_obj.BoundaryObject = boundary_obj # Link it to the shape object
+                    master_shape_obj.ShowBounds = False # Master shape bounds should always be off by default.
                     if hasattr(boundary_obj, "ViewObject"):
                         boundary_obj.ViewObject.Visibility = False
 
             # --- Create Label for Master Shape ---
             if self.ui.add_labels_checkbox.isChecked() and Draft and self.ui.selected_font_path and hasattr(shape_wrapper, 'label_text') and shape_wrapper.label_text:
-                label_obj = self.doc.addObject("Part::Feature", f"label_master_{original_obj.Label}")
-                
-                shapestring_geom = Draft.make_shapestring(
-                    String=shape_wrapper.label_text,
-                    FontFile=self.ui.selected_font_path,
-                    Size=self.ui.part_spacing_input.value() * 0.6
-                )
-                label_obj.Shape = shapestring_geom.Shape
-                self.doc.removeObject(shapestring_geom.Name)
-
-                shapestring_bb = label_obj.Shape.BoundBox
-                shapestring_center = shapestring_bb.Center
-                master_shape_center = master_obj.Shape.BoundBox.Center
-                master_shape_center.z += self.ui.label_height_input.value()
-                label_placement_base = master_shape_center - shapestring_center
-                label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
-
-                master_shapes_group.addObject(label_obj)
-                # The 'LabelObject' property is already added by the ShapeObject class.
-                master_obj.LabelObject = label_obj
-                if hasattr(label_obj, "ViewObject"):
-                    label_obj.ViewObject.Visibility = self.ui.add_labels_checkbox.isChecked()
+                # The logic for creating labels for the final parts is complex and tied to final placement.
+                # Since master shapes are hidden and just templates, we can skip adding a label object
+                # to them to simplify the structure. The label text is still stored on the in-memory
+                # `shape_wrapper` and will be used when drawing the final nested parts.
+                pass
         
         # Hide the group itself
         if FreeCAD.GuiUp and hasattr(master_shapes_group, "ViewObject"):
@@ -182,26 +173,29 @@ class NestingController:
         for part_instance in parts_to_nest:
             # Find the corresponding master object using the robust map.
             original_obj_id = id(part_instance.source_freecad_object)
-            master_obj = master_obj_map.get(original_obj_id)
+            master_container = master_obj_map.get(original_obj_id)
             
-            if master_obj:
+            if master_container:
                 # Create a copy of the master shape and its boundary for this instance
-                FreeCAD.Console.PrintMessage(f"DEBUG: Creating copy for Shape '{part_instance.id}' (id={id(part_instance)}). Master object: '{master_obj.Label}'\n")
-                part_copy = self.doc.copyObject(master_obj, False)
-                part_copy.Label = f"part_{part_instance.id}"
-                parts_to_place_group.addObject(part_copy)
+                FreeCAD.Console.PrintMessage(f"DEBUG: Creating copy for Shape '{part_instance.id}' (id={id(part_instance)}). Master container: '{master_container.Label}'\n")
+                
+                # Find the actual ShapeObject inside the master container to link to the part instance.
+                master_shape_obj = next((child for child in master_container.Group if hasattr(child, "Proxy") and child.Proxy.__class__.__name__ == "ShapeObject"), None)
+                if not master_shape_obj: continue
+
+                # Create a copy of the master ShapeObject for this instance.
+                part_copy = self.doc.copyObject(master_shape_obj, True) # Deep copy to get linked objects like bounds
+                part_copy.Label = f"part_{part_instance.id}" # This is the ShapeObject
+                parts_to_place_group.addObject(part_copy) # Add the copy to the transient group
+
                 # Link the physical FreeCAD object back to the in-memory Shape object.
                 part_instance.fc_object = part_copy
                 FreeCAD.Console.PrintMessage(f"DEBUG:   Shape '{part_instance.id}' (id={id(part_instance)}) linked to FreeCAD object '{part_copy.Label}' (id={id(part_copy)}). fc_object is now {'set' if part_instance.fc_object else 'None'}.\n")
-                
-                if master_obj.BoundaryObject:
-                    bounds_copy = self.doc.copyObject(master_obj.BoundaryObject, False)
-                    bounds_copy.Label = f"bounds_{part_instance.id}"
-                    parts_to_place_group.addObject(bounds_copy)
-                    part_copy.BoundaryObject = bounds_copy # Link the bound to the part copy
-                    # Make the bounds visible during the nesting process
-                    if hasattr(bounds_copy, "ViewObject"):
-                        bounds_copy.ViewObject.Visibility = True
+
+                # For simulation, we want to see the bounds, not the shape.
+                # Set these properties on the temporary copy.
+                part_copy.ShowBounds = True
+                part_copy.ShowShape = False
         
         self.ui.status_label.setText("Running nesting algorithm...")
         spacing = self.ui.part_spacing_input.value()
