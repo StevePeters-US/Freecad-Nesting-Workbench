@@ -168,20 +168,8 @@ class NestingController:
         # Add spacing to algo_kwargs so the nester can use it for sheet origin calculations
         algo_kwargs['spacing'] = spacing
 
-        FreeCAD.Console.PrintMessage(f"DEBUG: --- State of parts_to_nest before calling nest() --- \n")
-        for part in parts_to_nest:
-            FreeCAD.Console.PrintMessage(f"DEBUG:   Part '{part.id}' (id={id(part)}). fc_object is {'set' if part.fc_object else 'None'}.\n")
-        FreeCAD.Console.PrintMessage(f"DEBUG: ---------------------------------------------------- \n")
-
-        is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
-
-        # If simulating, hide the master shapes group to avoid visual clutter.
-        if is_simulating or not self.ui.show_bounds_checkbox.isChecked():
-            master_shapes_group = layout_obj.getObject("MasterShapes")
-            if master_shapes_group and hasattr(master_shapes_group, "ViewObject"):
-                master_shapes_group.ViewObject.Visibility = False
-
         try:
+            is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
             sheets, remaining_parts_to_nest, total_steps = nest(
                 parts_to_nest,
                 self.ui.sheet_width_input.value(), self.ui.sheet_height_input.value(),
@@ -224,7 +212,6 @@ class NestingController:
         self.doc.removeObject(parts_to_place_group.Name)
         
         placed_count = sum(len(s) for s in sheets)
-        # FreeCAD.Console.PrintMessage(f"DEBUG: Successfully placed {placed_count} shapes.\n") # Revert this too
 
         status_text = f"Placed {placed_count} shapes on {len(sheets)} sheets."
 
@@ -295,6 +282,9 @@ class NestingController:
         # --- Create the hidden MasterShapes group ---
         master_shapes_group = self.doc.addObject("App::DocumentObjectGroup", "MasterShapes")
         layout_obj.addObject(master_shapes_group)
+        # The master shapes group is for internal reference and should not be visible.
+        if hasattr(master_shapes_group, "ViewObject"):
+            master_shapes_group.ViewObject.Visibility = False
 
         parts_to_nest = []
         master_shape_obj_map = {} # Maps original FreeCAD object ID to the new master ShapeObject
@@ -326,6 +316,9 @@ class NestingController:
                     shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution)
 
                     master_container = self.doc.addObject("App::Part", f"master_{label}")
+                    # Hide the master container immediately upon creation.
+                    if hasattr(master_container, "ViewObject"):
+                        master_container.ViewObject.Visibility = False
                     master_shape_obj = create_shape_object(f"master_shape_{label}")
                     master_shape_obj.Shape = master_obj.Shape.copy()
 
