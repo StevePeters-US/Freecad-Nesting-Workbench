@@ -99,7 +99,7 @@ class NestingPanel(QtGui.QWidget):
 
         self.gravity_step_size_input = QtGui.QDoubleSpinBox(); self.gravity_step_size_input.setRange(0.1, 100); self.gravity_step_size_input.setValue(5.0)
         self.gravity_max_spawn_input = QtGui.QSpinBox(); self.gravity_max_spawn_input.setRange(1, 1000); self.gravity_max_spawn_input.setValue(100)
-        self.gravity_anneal_steps_input = QtGui.QSpinBox(); self.gravity_anneal_steps_input.setRange(0, 1000); self.gravity_anneal_steps_input.setValue(100)
+        self.gravity_anneal_steps_input = QtGui.QSpinBox(); self.gravity_anneal_steps_input.setRange(0, 1000); self.gravity_anneal_steps_input.setValue(25)
         self.anneal_rotate_checkbox = QtGui.QCheckBox("Anneal Rotation"); self.anneal_rotate_checkbox.setChecked(True)
         self.anneal_translate_checkbox = QtGui.QCheckBox("Anneal Position"); self.anneal_translate_checkbox.setChecked(True)
         self.anneal_random_shake_checkbox = QtGui.QCheckBox("Random Anneal Direction"); self.anneal_random_shake_checkbox.setChecked(False)
