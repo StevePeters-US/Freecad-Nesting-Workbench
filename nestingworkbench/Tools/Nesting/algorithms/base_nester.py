@@ -1,4 +1,5 @@
 import math
+import copy
 import random
 from shapely.geometry import Polygon
 import FreeCAD
@@ -98,39 +99,38 @@ class BaseNester(object):
         if not (self.anneal_rotate_enabled and part_to_shake.rotation_steps > 1):
             return False
 
-        # Iterate through all possible rotations, skipping the current one.
-        for i in range(part_to_shake.rotation_steps):
-            new_angle = i * (360.0 / part_to_shake.rotation_steps)
-            if abs(new_angle - initial_angle) % 360 < 1e-6:
-                continue # Skip the current angle
+        # The 'i' from the main anneal loop determines which rotation to try.
+        # We try rotations alternating from the current one.
+        rotation_index_offset = (i // 2) + 1
+        # side_direction is +1 or -1, so we check rotations on either side of the current one.
+        rotation_index = (round(initial_angle / (360.0 / part_to_shake.rotation_steps)) + rotation_index_offset * side_direction) % part_to_shake.rotation_steps
+        new_angle = rotation_index * (360.0 / part_to_shake.rotation_steps)
 
-            # Reset part to its pre-shake state for this attempt
-            part_to_shake.move_to(initial_bl_x, initial_bl_y)
-            part_to_shake.set_rotation(new_angle, reposition=False)
-            part_to_shake.move_to(initial_bl_x, initial_bl_y) # Ensure it stays in place
+        if abs(new_angle - initial_angle) % 360 < 1e-6:
+            return False # Skip if it's the same angle
 
-            if self.update_callback: self.update_callback(part_to_shake, sheet)
+        # Reset part to its pre-shake state for this attempt
+        part_to_shake.move_to(initial_bl_x, initial_bl_y)
+        part_to_shake.set_rotation(new_angle, reposition=False)
+        part_to_shake.move_to(initial_bl_x, initial_bl_y) # Ensure it stays in place
 
-            is_valid_shake = sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
-            if not is_valid_shake:
-                continue # This rotation is not valid, try the next one.
+        if self.update_callback: self.update_callback(part_to_shake, sheet)
 
-            # The shake is valid. Now, check if the part can fall further from this new position.
-            gravity_dx = gravity_direction[0] * self.step_size
-            gravity_dy = gravity_direction[1] * self.step_size
-            #part_to_shake.move(gravity_dx, gravity_dy)
-            #can_fall_further = sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
-            #part_to_shake.move(-gravity_dx, -gravity_dy) # Revert the temporary move
+        is_valid_shake = sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
+        if not is_valid_shake:
+            return False # This rotation is not valid.
 
-            #if can_fall_further:
-            #    return True # Found a productive rotation, success!
+        # The shake is valid. Now, check if the part can fall further from this new position.
+        gravity_dx = gravity_direction[0] * self.step_size
+        gravity_dy = gravity_direction[1] * self.step_size
+        part_to_shake.move(gravity_dx, gravity_dy)
+        can_fall_further = sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
+        part_to_shake.move(-gravity_dx, -gravity_dy) # Revert the temporary move
 
-        # If the loop finishes, no productive rotation was found.
-        return False
+        return can_fall_further
 
     def _try_translation_shake(self, part_to_shake, sheet, initial_bl_x, initial_bl_y, initial_angle, current_gravity_direction, side_direction, step_index):
         """Helper to attempt a single translational shake."""
-        import copy
         if not self.anneal_translate_enabled:
             return False
 
@@ -159,10 +159,11 @@ class BaseNester(object):
 
         # The shake is valid. Now, check if the part can fall further from this new position.
         # This makes the anneal "smarter" by seeking productive moves.
-        gravity_part_copy = copy.deepcopy(part_to_shake)
-        gravity_part_copy.move(current_gravity_direction[0] * self.step_size, current_gravity_direction[1] * self.step_size)
-
-        can_fall_further = sheet.is_placement_valid(gravity_part_copy, recalculate_union=False, part_to_ignore=part_to_shake)
+        gravity_dx = current_gravity_direction[0] * self.step_size
+        gravity_dy = current_gravity_direction[1] * self.step_size
+        part_to_shake.move(gravity_dx, gravity_dy)
+        can_fall_further = sheet.is_placement_valid(part_to_shake, recalculate_union=False, part_to_ignore=part_to_shake)
+        part_to_shake.move(-gravity_dx, -gravity_dy) # Revert the temporary move
         
         return can_fall_further
 
@@ -171,7 +172,6 @@ class BaseNester(object):
         Helper function to finalize a successful anneal move. It logs the success,
         updates the UI via callback, and returns the new position and rotation.
         """
-        FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: SUCCESS! Found valid shake at pos ({new_pos[0]:.2f}, {new_pos[1]:.2f}).\n")
         if self.update_callback:
             self.update_callback(part_to_shake, sheet)
         # This function no longer needs to return anything.
@@ -192,10 +192,6 @@ class BaseNester(object):
         start_pos = (initial_bl_x, initial_bl_y)
         start_rot = part_to_shake.angle # This is the angle to return if shaking fails
 
-        FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: --- Entering _anneal_part for '{part_to_shake.id}' ---\n")
-        FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: Start pos: ({start_pos[0]:.2f}, {start_pos[1]:.2f}), Angle: {start_rot:.1f}\n")
-        FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: Anneal steps: {self.anneal_steps}, Rotate: {rotate_enabled}, Translate: {translate_enabled}\n")
-
         if self.anneal_steps == 0 or (not self.anneal_rotate_enabled and not self.anneal_translate_enabled) or (not rotate_enabled and not translate_enabled):
             return
 
@@ -209,15 +205,12 @@ class BaseNester(object):
             for side_dir in shake_directions: # Try both directions for each amplitude
                 # --- Try a translational shake ---
                 if translate_enabled:
-                    FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: Trying translation shake for amplitude level {i+1} (direction {side_dir}).\n")
                     # This function now only checks if the shake position is valid, not if it can fall.
                     # It returns the new position if valid, otherwise None.
                     new_pos = self._try_translation_shake(part_to_shake, sheet, initial_bl_x, initial_bl_y, start_rot, current_gravity_direction, side_direction=side_dir, step_index=i)
                     
                     if new_pos:
                         # The translation was valid. From this new position, try rotating.
-                        # The part is already at the new translated position.
-                        FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG:   -> Translation valid. Now trying rotations from this new spot.\n")
                         is_productive_rotation = self._try_rotation_from_new_pos(part_to_shake, sheet, current_gravity_direction)
                         if is_productive_rotation:
                             new_bl_x, new_bl_y, _, _ = part_to_shake.bounding_box()
@@ -225,7 +218,6 @@ class BaseNester(object):
                             return # Found a productive compound move.
 
                 # If translation is disabled or failed, try a pure rotation from the original spot.
-                FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: Trying pure rotation shake for amplitude level {i+1} (direction {side_dir}).\n")
                 if rotate_enabled and self._try_rotation_shake(part_to_shake, sheet, initial_bl_x, initial_bl_y, start_rot, side_direction=side_dir, i=i, gravity_direction=current_gravity_direction):
                     new_bl_x, new_bl_y, _, _ = part_to_shake.bounding_box()
                     self._report_anneal_success(part_to_shake, sheet, (new_bl_x, new_bl_y))
@@ -233,32 +225,10 @@ class BaseNester(object):
 
         # If the loop finishes, no valid shake was found.
         # Revert the part to its original state before returning the initial position.
-        FreeCAD.Console.PrintMessage(f"      ANNEAL_DEBUG: FAILED. No valid shake found after {self.anneal_steps} steps. Reverting part.\n")
         part_to_shake.move_to(start_pos[0], start_pos[1])
         part_to_shake.set_rotation(start_rot)
         if self.update_callback:
             self.update_callback(part_to_shake, sheet)
-
-    def _draw_debug_dot(self, position, color=(1.0, 1.0, 0.0), size=2):
-        """Helper to draw a debug point in the document."""
-        doc = FreeCAD.ActiveDocument
-        if not doc: return
-
-        group = doc.getObject("__debug_dots")
-        if not group:
-            group = doc.addObject("App::DocumentObjectGroup", "__debug_dots")
-
-        dot = doc.addObject("Part::Vertex", f"debug_dot_{len(group.Group)}")
-        dot.Placement = FreeCAD.Placement(position, FreeCAD.Rotation())
-        group.addObject(dot)
-
-        if FreeCAD.GuiUp:
-            dot.ViewObject.PointSize = size
-            dot.ViewObject.PointColor = color
-
-        doc.recompute()
-
-        return dot
 
     def _try_rotation_from_new_pos(self, part_to_shake, sheet, gravity_direction):
         """
@@ -282,11 +252,6 @@ class BaseNester(object):
             test_part.set_rotation(angle, reposition=False)
             test_part.move_to(initial_bl_x, initial_bl_y) # Keep it in the same spot
 
-            # --- DEBUG DRAWING: Yellow dot for each tested centroid ---
-            sheet_origin = sheet.get_origin()
-            centroid_pos = test_part.polygon.centroid
-            self._draw_debug_dot(sheet_origin + FreeCAD.Vector(centroid_pos.x, centroid_pos.y, 0), color=(1.0, 1.0, 0.0))
-
             if sheet.is_placement_valid(test_part, recalculate_union=False, part_to_ignore=part_to_shake):
                 # This rotation is valid. Now, measure how far it can fall.
                 fall_distance = 0
@@ -305,11 +270,6 @@ class BaseNester(object):
             # A productive rotation was found. Apply it to the actual part.
             part_to_shake.set_rotation(best_angle, reposition=False)
             part_to_shake.move_to(initial_bl_x, initial_bl_y)
-
-            # --- DEBUG DRAWING: Red dot for the chosen centroid ---
-            sheet_origin = sheet.get_origin()
-            centroid_pos = part_to_shake.polygon.centroid
-            self._draw_debug_dot(sheet_origin + FreeCAD.Vector(centroid_pos.x, centroid_pos.y, 0), color=(1.0, 0.0, 0.0), size=4)
 
             if self.update_callback: self.update_callback(part_to_shake, sheet)
             return True
