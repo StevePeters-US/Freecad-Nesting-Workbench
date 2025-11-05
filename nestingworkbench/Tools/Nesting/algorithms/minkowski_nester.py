@@ -24,12 +24,35 @@ class MinkowskiNester(BaseNester):
         Returns the placed shape on success, None on failure.
         """
         FreeCAD.Console.PrintMessage(f"MINKOWSKI: Attempting to place '{part_to_place.id}' on sheet {sheet.id}\n")
+        
+        # Ensure the part has an original_polygon to rotate from. This is critical.
+        # If it's missing, the part cannot be rotated, leading to silent failure.
+        if part_to_place.original_polygon is None and part_to_place.polygon is not None:
+            part_to_place.original_polygon = part_to_place.polygon
+
         best_placement_info = {'x': None, 'y': None, 'angle': None, 'metric': float('inf')}
         
         # Iterate through all possible rotations for the part.
         # A value of 0 or 1 means 1 step (no rotation).
+        FreeCAD.Console.PrintMessage(f"MINKOWSKI:  - Part '{part_to_place.id}' has {part_to_place.rotation_steps} rotation steps configured.\n")
+        FreeCAD.Console.PrintMessage(f"MINKOWSKI:  - Part '{part_to_place.id}' initial polygon: {part_to_place.polygon is not None}, original_polygon: {part_to_place.original_polygon is not None}\n")
+
         for i in range(part_to_place.rotation_steps):
             angle = i * (360.0 / part_to_place.rotation_steps) if part_to_place.rotation_steps > 1 else 0.0
+
+            # --- Handle the first part on an empty sheet ---
+            if not sheet.parts:
+                part_to_place.set_rotation(angle)
+                # For the first part, we try to place its bottom-left corner at the origin.
+                part_to_place.move_to(0, 0)
+                FreeCAD.Console.PrintMessage(f"MINKOWSKI:  - Sheet is empty. Testing first part at origin. Angle: {angle:.1f}, BBox: {part_to_place.bounding_box()}\n")
+                if sheet.is_placement_valid(part_to_place):
+                    FreeCAD.Console.PrintMessage(f"MINKOWSKI: Placed first part '{part_to_place.id}' at origin.\n")
+                    return part_to_place
+                else:
+                    FreeCAD.Console.PrintMessage(f"MINKOWSKI:  - Origin placement at angle {angle:.1f} is invalid.\n")
+                continue # Try next rotation if origin placement is invalid
+
             # We don't move the part itself, we just get its polygon at the target rotation
             rotated_part_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
 
@@ -78,16 +101,19 @@ class MinkowskiNester(BaseNester):
             for point in candidate_points:
                 # The candidate point is for the part's reference point (centroid).
                 # We create a temporary polygon at this position to check for validity.
-                temp_poly = translate(rotated_part_poly, xoff=point.x, yoff=point.y)
+                temp_poly = translate(rotated_part_poly, xoff=point.x, yoff=point.y) # type: ignore
 
                 # Use the sheet's robust validation method.
                 if sheet.is_placement_valid_polygon(temp_poly):
-                    # This is a valid placement. We store it if it's better than the current best.
-                    # The "best" is the one with the lowest y, then lowest x.
+                    # Since candidates are sorted by y then x, the first valid one is the best for this rotation.
                     metric = point.y * self._bin_width + point.x
                     if metric < best_placement_info['metric']:
                         best_placement_info = {'x': point.x, 'y': point.y, 'angle': angle, 'metric': metric}
                         FreeCAD.Console.PrintMessage(f"MINKOWSKI:  - Found new best candidate placement at ({point.x:.2f}, {point.y:.2f}) with angle {angle:.1f}\n")
+                    
+                    # Optimization: Since we found a valid placement for this rotation, we can stop searching.
+                    # The first one found is the best due to the sorting.
+                    break
 
         # After checking all rotations and their candidates, apply the best one found.
         if best_placement_info['x'] is not None:
@@ -98,7 +124,7 @@ class MinkowskiNester(BaseNester):
             FreeCAD.Console.PrintMessage(f"MINKOWSKI: Finalizing placement for '{part_to_place.id}' at ({best_x:.2f}, {best_y:.2f}), angle {best_angle:.1f}\n")
             
             # Apply the best found transformation to the actual part object.
-            part_to_place.set_rotation(best_angle)
+            part_to_place.set_rotation(best_angle, reposition=False)
             
             # Move the part so its centroid is at the best found (x, y) point.
             current_centroid = part_to_place.centroid
@@ -111,7 +137,7 @@ class MinkowskiNester(BaseNester):
         FreeCAD.Console.PrintWarning(f"MINKOWSKI: No valid placement found for '{part_to_place.id}' on this sheet after all checks.\n")
         return None
 
-    def _get_candidate_positions(self, nfps):
+    def _get_candidate_positions(self, nfps, part_to_place_poly=None):
         """
         Generates candidate placement points from the vertices of the No-Fit Polygon.
         These are the most likely points for an optimal, touching placement.
@@ -120,7 +146,11 @@ class MinkowskiNester(BaseNester):
         points = []
 
         # Add the sheet origin as a primary candidate.
-        points.append(Point(0, 0))
+        # This is where the part's centroid would be placed.
+        if part_to_place_poly:
+            min_x, min_y, max_x, max_y = part_to_place_poly.bounds
+            # Add the point that would place the part's bottom-left at the origin
+            points.append(Point(-min_x, -min_y))
 
         # The vertices of each individual NFP are the primary candidates for placement of the part's reference point.
         # These represent the locations where the part can touch an existing part.
@@ -144,7 +174,17 @@ class MinkowskiNester(BaseNester):
         # might be slightly less dense packing in some very specific cases, but the
         # performance gain is significant.
 
-        return list(MultiPoint(points).geoms) # Return unique points
+        # --- Pre-filter candidate points ---
+        # Remove points that are guaranteed to be outside the sheet boundaries.
+        # This is a huge performance optimization.
+        unique_points = list(MultiPoint(points).geoms)
+        valid_candidates = []
+        for p in unique_points:
+            # A simple check: if the candidate point itself is outside the bin, it's invalid.
+            if 0 <= p.x <= self._bin_width and 0 <= p.y <= self._bin_height:
+                valid_candidates.append(p)
+
+        return valid_candidates
 
     def _calculate_and_cache_nfp(self, poly_A_master, angle_A, poly_B_master, angle_B, cache_key):
         """Calculates the NFP between two polygons and stores it in the cache."""

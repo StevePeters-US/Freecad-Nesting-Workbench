@@ -44,11 +44,11 @@ class NestingPanel(QtGui.QWidget):
 
         # --- Global Rotation Slider ---
         self.rotation_steps_slider = QtGui.QSlider(QtCore.Qt.Horizontal)
-        self.rotation_steps_slider.setRange(0, 360)
-        self.rotation_steps_slider.setValue(0)
+        self.rotation_steps_slider.setRange(1, 360) # Minimum 1 rotation step
+        self.rotation_steps_slider.setValue(1)     # Default to 1 rotation step
         self.rotation_steps_spinbox = QtGui.QSpinBox()
-        self.rotation_steps_spinbox.setRange(0, 360)
-        self.rotation_steps_spinbox.setValue(0)
+        self.rotation_steps_spinbox.setRange(1, 360) # Minimum 1 rotation step
+        self.rotation_steps_spinbox.setValue(1)     # Default to 1 rotation step
         self.rotation_steps_slider.valueChanged.connect(self.rotation_steps_spinbox.setValue)
         self.rotation_steps_spinbox.valueChanged.connect(self.rotation_steps_slider.setValue)
 
