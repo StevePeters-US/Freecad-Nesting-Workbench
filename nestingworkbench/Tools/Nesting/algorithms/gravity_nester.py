@@ -75,10 +75,8 @@ class GravityNester(BaseNester):
 
             # Check if the new position is valid.
             is_valid = sheet.is_placement_valid(part, recalculate_union=False, part_to_ignore=part)
-            FreeCAD.Console.PrintMessage(f"      GRAVITY_DEBUG: Pos ({part.bounding_box()[0]:.2f}, {part.bounding_box()[1]:.2f}) valid? {is_valid}\n")
             if not is_valid:
                 # Collision detected. Move the part back to its last valid position.
-                FreeCAD.Console.PrintMessage(f"      GRAVITY_DEBUG: Collision detected. Reverting move.\n")
                 part.move(-dx, -dy)
                 # Update the UI again to show the reverted position.
                 if self.update_callback:
@@ -95,50 +93,36 @@ class GravityNester(BaseNester):
         the bin edge or another placed part.
         If a collision occurs, it attempts to "shake" the part free once.
         """
-        FreeCAD.Console.PrintMessage(f"\n--- Settling part {part.id} ---\n")
         cycle = 0
         # Loop until the part is fully settled (cannot move via gravity or annealing).
         while cycle < self.max_nesting_steps: # Use max_nesting_steps as a safeguard
             cycle += 1
-            FreeCAD.Console.PrintMessage(f"  [Cycle {cycle}] Starting for part {part.id}.\n")
 
             # --- 1. Apply Gravity ---
             pre_gravity_x, pre_gravity_y, _, _ = part.bounding_box()
-            FreeCAD.Console.PrintMessage(f"    Phase 1 (Gravity): Applying gravity. Start pos ({pre_gravity_x:.2f}, {pre_gravity_y:.2f}).\n")
             self._apply_gravity_to_part(part, sheet, direction)
             post_gravity_x, post_gravity_y, _, _ = part.bounding_box()
             gravity_moved = abs(post_gravity_x - pre_gravity_x) > 1e-6 or abs(post_gravity_y - pre_gravity_y) > 1e-6
-            FreeCAD.Console.PrintMessage(f"    Phase 1 (Gravity): Finished. End pos ({post_gravity_x:.2f}, {post_gravity_y:.2f}). Moved: {gravity_moved}\n")
-
 
             if gravity_moved:
-                FreeCAD.Console.PrintMessage(f"    -> Gravity moved part to ({post_gravity_x:.2f}, {post_gravity_y:.2f}). Continuing.\n")
                 continue # Part is still falling, loop again.
 
             # --- 2. Anneal (if gravity failed) ---
-            FreeCAD.Console.PrintMessage(f"    Phase 2 (Anneal): Gravity stopped. Attempting to anneal.\n")
             pre_anneal_x, pre_anneal_y, _, _ = part.bounding_box()
-            FreeCAD.Console.PrintMessage(f"    Phase 2 (Anneal): Before anneal pos: ({pre_anneal_x:.2f}, {pre_anneal_y:.2f}).\n")
             self._anneal_part(part, sheet, direction, rotate_enabled=self.anneal_rotate_enabled, translate_enabled=self.anneal_translate_enabled)
             post_anneal_x, post_anneal_y, _, _ = part.bounding_box()
             shake_moved = abs(post_anneal_x - pre_anneal_x) > 1e-6 or abs(post_anneal_y - pre_anneal_y) > 1e-6
-            FreeCAD.Console.PrintMessage(f"    Phase 2 (Anneal): After anneal pos: ({post_anneal_x:.2f}, {post_anneal_y:.2f}). Moved: {shake_moved}\n")
 
             if shake_moved:
                 # The part was shaken into a new position. We must immediately check
                 # if it can now fall further under gravity from this new spot.
                 # A successful shake now guarantees that a gravity move is possible, so we just continue the loop.
-                FreeCAD.Console.PrintMessage(f"    -> Shake found a productive new position. Continuing settlement.\n")
                 continue
 
             # If we reach here, it means either:
             # 1. The shake failed to move the part.
             # 2. The shake succeeded, but the part could not fall any further from its new position.
             # In either case, the part is now considered fully settled.
-            if not shake_moved:
-                FreeCAD.Console.PrintMessage(f"    -> Anneal failed to move part. Part is settled.\n")
-            else:
-                FreeCAD.Console.PrintMessage(f"    -> Shake moved part, but it could not fall further. Part is settled.\n")
             break # Exit the loop.
 
         return part

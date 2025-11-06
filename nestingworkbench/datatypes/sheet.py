@@ -116,26 +116,18 @@ class Sheet:
         if not SHAPELY_AVAILABLE: return False
         if not shape_to_check.polygon: return False
 
-        FreeCAD.Console.PrintMessage(f"SHEET_VALIDATION for '{shape_to_check.id}':\n")
-
         # 1. Check containment within sheet boundaries
         bin_polygon = Polygon([(0, 0), (self.width, 0), (self.width, self.height), (0, self.height)])
-        FreeCAD.Console.PrintMessage(f"  - Checking containment... Part bounds: {shape_to_check.polygon.bounds}\n")
         if not bin_polygon.contains(shape_to_check.polygon):
-            FreeCAD.Console.PrintMessage(f"  - FAILED: Part is outside sheet boundaries (Sheet is 0,0 to {self.width},{self.height}).\n")
             return False
-        FreeCAD.Console.PrintMessage(f"  - PASSED: Part is within sheet boundaries.\n")
 
         union_of_placed_parts = self.get_union_of_placed_parts(force_recalculate=False, part_to_ignore=part_to_ignore)
 
         # 2. Check for collision with other parts
         if union_of_placed_parts is None or union_of_placed_parts.is_empty:
-            FreeCAD.Console.PrintMessage(f"  - PASSED: No other parts on sheet to collide with.\n")
             return True # No parts to collide with
 
-        FreeCAD.Console.PrintMessage(f"  - Checking collision with {len(self.parts)} other part(s)...\n")
         collides = shape_to_check.polygon.intersects(union_of_placed_parts)
-        FreeCAD.Console.PrintMessage(f"  - {'FAILED' if collides else 'PASSED'}: {'Collision detected.' if collides else 'No collision.'}\n")
         return not collides
 
     def is_placement_valid_polygon(self, polygon_to_check, recalculate_union=False, part_to_ignore=None):
