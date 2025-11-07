@@ -55,6 +55,25 @@ class MinkowskiNester(BaseNester):
         self._debug_group = None # Reset the handle
         return super().nest(parts)
 
+    def _attempt_placement_on_sheet(self, part, sheet):
+        """
+        Overrides the base class method to use the Minkowski-specific validation
+        that correctly handles placements within holes.
+        """
+        placed_part_shape = self._try_place_part_on_sheet(part, sheet)
+
+        # Final validation using the Minkowski-aware checker.
+        if placed_part_shape and self._is_placement_valid_with_holes(
+            placed_part_shape.polygon, sheet, part_to_ignore=placed_part_shape
+        ):
+            sheet_origin = sheet.get_origin()
+            placed_part_shape.placement = placed_part_shape.get_final_placement(sheet_origin)
+            sheet.add_part(PlacedPart(placed_part_shape))
+            return True
+        elif placed_part_shape:
+            FreeCAD.Console.PrintWarning(f"Minkowski nester returned an invalid placement for {part.id}. Discarding.\n")
+        return False
+
     def _draw_debug_poly(self, poly, name):
         """Helper to draw a shapely polygon for debugging."""
         if not self._debug_group:
