@@ -468,14 +468,54 @@ class MinkowskiNester(BaseNester):
                 if (poly_B_rotated.bounds[2] - poly_B_rotated.bounds[0] < hole_poly_rotated.bounds[2] - hole_poly_rotated.bounds[0] and
                     poly_B_rotated.bounds[3] - poly_B_rotated.bounds[1] < hole_poly_rotated.bounds[3] - hole_poly_rotated.bounds[1]):
                     
-                    # Use the interior bounds of the buffered shape directly as the go-space.
-                    # This does not account for the moving part's size, but establishes the correct boundary.
-                    if hole_poly_rotated and hole_poly_rotated.area > 0:
-                        nfp_interiors.append(hole_poly_rotated.exterior)
+                    # --- Correct IFP Calculation using Minkowski Difference ---
+                    ifp_raw = self._minkowski_difference(hole_poly_rotated, 0, poly_B_master, angle_B)
+                    if ifp_raw and ifp_raw.area > 0:
+                        # The result might be a MultiPolygon if the IFP is disjointed.
+                        if ifp_raw.geom_type == 'Polygon':
+                            nfp_interiors.append(ifp_raw.exterior)
+                        elif ifp_raw.geom_type == 'MultiPolygon':
+                            for p in ifp_raw.geoms:
+                                nfp_interiors.append(p.exterior)
         
         master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
         self._cache.set_nfp(cache_key, master_nfp)
         return master_nfp
+
+    def _minkowski_difference(self, master_poly1, angle1, master_poly2, angle2):
+        """
+        Computes the Inner-Fit Polygon for master_poly2 inside master_poly1.
+        This is done by calculating the No-Fit Polygon (NFP) of the two shapes,
+        and then extracting the INTERIORS (holes) of that NFP.
+        This is A + (-B). If B is not convex, this is (A - B1) INTERSECT (A - B2) ...
+        """
+        if not master_poly1 or master_poly1.is_empty or not master_poly2 or master_poly2.is_empty:
+            return None
+        
+        # The hole (master_poly1) is assumed to be convex.
+        poly1_transformed = rotate(master_poly1, angle1, origin='centroid')
+        
+        # The moving part (master_poly2) may be non-convex and needs decomposition.
+        poly2_convex_parts = self._decompose_if_needed(master_poly2)
+        
+        # CRITICAL: Order matters! First rotate, THEN reflect around origin.
+        poly2_convex_transformed = [
+            scale(rotate(p, angle2, origin='centroid'), xfact=-1.0, yfact=-1.0, origin=(0, 0))
+            for p in poly2_convex_parts
+        ]
+        
+        # Calculate the pairwise Minkowski sum (A + (-Bi)) for each piece of the reflected moving part.
+        pairwise_sums = [self._minkowski_sum_convex(poly1_transformed, p2) for p2 in poly2_convex_transformed]
+        
+        # The final difference is the INTERSECTION of all these pairwise sums.
+        if not pairwise_sums:
+            return None
+        
+        final_difference = pairwise_sums[0]
+        for i in range(1, len(pairwise_sums)):
+            final_difference = final_difference.intersection(pairwise_sums[i])
+        
+        return final_difference
 
     def _minkowski_sum(self, master_poly1, angle1, reflect1, master_poly2, angle2, reflect2, rot_origin1=None, rot_origin2=None):
         """
