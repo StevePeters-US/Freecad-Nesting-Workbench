@@ -105,15 +105,15 @@ class MinkowskiNester(BaseNester):
                     debug_obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0) # Green
                     debug_obj.ViewObject.Transparency = 50
 
-    def _draw_debug_point(self, x, y, name, color=None):
+    def _draw_debug_point(self, x, y, z, name, color=None):
         """Helper to draw a point for debugging."""
         if not self._debug_group:
             doc = FreeCAD.ActiveDocument
             if doc.getObject("MinkowskiDebug") is None:
                 self._debug_group = doc.addObject("App::DocumentObjectGroup", "MinkowskiDebug")
         
-        circle_obj = self._debug_group.newObject("Part::Feature", name) # type: ignore
-        circle_edge = Part.makeCircle(1, FreeCAD.Vector(x, y, 0))
+        circle_obj = self._debug_group.newObject("Part::Feature", name)
+        circle_edge = Part.makeCircle(1, FreeCAD.Vector(x, y, z))
         wire = Part.Wire(circle_edge)
         circle_obj.Shape = Part.Face(wire)
         if FreeCAD.GuiUp and color:
@@ -190,7 +190,7 @@ class MinkowskiNester(BaseNester):
                         rand_y = random.uniform(min_y, max_y)
                         if translated_ifp.contains(Point(rand_x, rand_y)):
                             self._draw_debug_point(
-                                rand_x, rand_y, 
+                                rand_x, rand_y, 0,
                                 f"ifp_dot_{placed_part.shape.id}_{i}_{points_drawn}",
                                 color=(0.0, 1.0, 0.0) # Bright Green
                             )
@@ -237,6 +237,12 @@ class MinkowskiNester(BaseNester):
 
             self._draw_debug_poly(
                 test_polygon, f"hole_test_{part_to_place.id}_{angle:.0f}_{i}"
+            )
+
+            # Draw a debug dot at the centroid of the test placement
+            test_centroid = test_polygon.centroid
+            self._draw_debug_point(
+                test_centroid.x, test_centroid.y, -1.0, f"centroid_test_{part_to_place.id}_{angle:.0f}_{i}"
             )
 
             is_valid = self._is_placement_valid_with_holes(
@@ -402,24 +408,21 @@ class MinkowskiNester(BaseNester):
         # The vertices of each individual NFP are the primary candidates for placement of the part's reference point.
         # These represent the locations where the part can touch an existing part.
         for nfp in nfps:
-            if nfp.geom_type == 'Polygon':
-                external_points.extend([Point(c) for c in nfp.exterior.coords])
-                # Also add points from the holes in the NFP, which correspond to
-                # valid placements inside the holes of the original parts.
-                for interior in nfp.interiors:
-                    hole_points.extend([Point(c) for c in interior.coords])
-            elif nfp.geom_type == 'MultiPolygon':
-                for poly in nfp.geoms:
-                    external_points.extend([Point(c) for c in poly.exterior.coords])
-                    for interior in poly.interiors:
-                        hole_points.extend([Point(c) for c in interior.coords])
+            # Helper to discretize a line string (an edge of the polygon)
+            def discretize_edge(line):
+                points = [Point(line.coords[0])]
+                length = line.length
+                if length > self.step_size:
+                    num_segments = int(length / self.step_size)
+                    for i in range(1, num_segments):
+                        points.append(line.interpolate(float(i) / num_segments, normalized=True))
+                points.append(Point(line.coords[-1]))
+                return points
 
-        # The old implementation also tried to match every vertex of the new part
-        # with every vertex of the NFP. This created a massive number of candidates
-        # (e.g., 26,000+) and was a major performance bottleneck.
-        # By removing it, we drastically speed up the nesting process. The trade-off
-        # might be slightly less dense packing in some very specific cases, but the
-        # performance gain is significant.
+            if nfp.geom_type == 'Polygon':
+                external_points.extend(discretize_edge(nfp.exterior))
+                for interior in nfp.interiors:
+                    hole_points.extend(discretize_edge(interior))
 
         # --- Pre-filter candidate points ---
         # Remove points that are guaranteed to be outside the sheet boundaries.
@@ -465,7 +468,8 @@ class MinkowskiNester(BaseNester):
                 if (poly_B_rotated.bounds[2] - poly_B_rotated.bounds[0] < hole_poly_rotated.bounds[2] - hole_poly_rotated.bounds[0] and
                     poly_B_rotated.bounds[3] - poly_B_rotated.bounds[1] < hole_poly_rotated.bounds[3] - hole_poly_rotated.bounds[1]):
                     
-                    # For now, just use the interior bounds directly as the go-space.
+                    # Use the interior bounds of the buffered shape directly as the go-space.
+                    # This does not account for the moving part's size, but establishes the correct boundary.
                     if hole_poly_rotated and hole_poly_rotated.area > 0:
                         nfp_interiors.append(hole_poly_rotated.exterior)
         
