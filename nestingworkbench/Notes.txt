@@ -2,7 +2,8 @@ Notes for Nesting Workbench
 
 
 #TODO
-
+Place labels on upper bounds of shapes instead of at a fixed position. Leave the input
+as a default (1mm)
 
 Need a way to cancel simulation. If nest button pressed twice, first instance continues to run.
 

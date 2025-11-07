@@ -1,6 +1,6 @@
 import math
 import random
-from shapely.geometry import Polygon, MultiPolygon
+from shapely.geometry import Polygon, MultiPolygon, Point
 from shapely.affinity import translate, rotate, scale
 from shapely.ops import unary_union
 from PySide import QtGui
@@ -85,9 +85,40 @@ class MinkowskiNester(BaseNester):
 
         if poly and not poly.is_empty:
             wires = [Part.makePolygon([(v[0], v[1], 0) for v in poly.exterior.coords])]
-            # debug_obj = self._debug_group.newObject("Part::Feature", name)
-            # debug_obj.Shape = Part.makeCompound(wires)
-            
+            for interior in poly.interiors:
+                wires.append(Part.makePolygon([(v[0], v[1], 0) for v in interior.coords]))
+            debug_obj = self._debug_group.newObject("Part::Feature", name)
+            debug_obj.Shape = Part.makeCompound(wires)
+            # If this is the boundary, move it up slightly in Z for visibility
+            if "IFP_boundary" in name:
+                debug_obj.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0.1), FreeCAD.Rotation())
+
+            if FreeCAD.GuiUp:
+                if "NFP" in name:
+                    debug_obj.ViewObject.ShapeColor = (1.0, 0.0, 0.0) # Red
+                    debug_obj.ViewObject.Transparency = 50
+                elif "IFP_boundary" in name:
+                    debug_obj.ViewObject.LineColor = (0.0, 0.2, 1.0) # Blue
+                    debug_obj.ViewObject.LineWidth = 3.0
+                    debug_obj.ViewObject.DisplayMode = "Wireframe"
+                elif "IFP" in name:
+                    debug_obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0) # Green
+                    debug_obj.ViewObject.Transparency = 50
+
+    def _draw_debug_point(self, x, y, name, color=None):
+        """Helper to draw a point for debugging."""
+        if not self._debug_group:
+            doc = FreeCAD.ActiveDocument
+            if doc.getObject("MinkowskiDebug") is None:
+                self._debug_group = doc.addObject("App::DocumentObjectGroup", "MinkowskiDebug")
+        
+        circle_obj = self._debug_group.newObject("Part::Feature", name) # type: ignore
+        circle_edge = Part.makeCircle(1, FreeCAD.Vector(x, y, 0))
+        wire = Part.Wire(circle_edge)
+        circle_obj.Shape = Part.Face(wire)
+        if FreeCAD.GuiUp and color:
+            circle_obj.ViewObject.ShapeColor = color
+
     def _handle_first_part(self, part_to_place, sheet, angle):
         """Handles the placement of the first part on an empty sheet."""
         part_to_place.set_rotation(angle)
@@ -115,13 +146,10 @@ class MinkowskiNester(BaseNester):
 
             if master_nfp is None:
                 # Cache miss. Calculate the NFP now and store it.
-                placed_part_master_poly = placed_part.shape.original_polygon
-                part_to_place_master_poly = part_to_place.original_polygon
-
                 master_nfp = self._calculate_and_cache_nfp(
-                    placed_part_master_poly,
+                    placed_part.shape, # Pass the full Shape object
                     placed_part_angle,
-                    part_to_place_master_poly,
+                    part_to_place,
                     angle,
                     cache_key,
                 )
@@ -137,19 +165,37 @@ class MinkowskiNester(BaseNester):
                     xoff=placed_part_centroid.x,
                     yoff=placed_part_centroid.y,
                 )
-
+                self._draw_debug_poly(translated_exterior, f"NFP_{placed_part.shape.id}_{part_to_place.id}_{angle:.0f}")
+                
                 # The interiors represent the "go-zones" (holes). These are already in the correct
                 # coordinate space relative to the placed part's centroid, so they do NOT need to be translated again.
                 # We must, however, translate them to the final position of the placed part on the sheet.
-                translated_interiors = [
-                    translate(
-                        Polygon(interior),
-                        xoff=placed_part_centroid.x,
-                        yoff=placed_part_centroid.y,
-                    )
-                    for interior in master_nfp.interiors
-                ]
+                translated_interiors = []
+                for i, interior in enumerate(master_nfp.interiors):
+                    ifp = Polygon(interior)
+                    translated_ifp = translate(ifp, xoff=placed_part_centroid.x, yoff=placed_part_centroid.y)
+                    translated_interiors.append(translated_ifp)
+                    
+                    # --- New Debugging: Draw the IFP boundary ---
+                    if not translated_ifp.is_empty:
+                        self._draw_debug_poly(translated_ifp, f"IFP_boundary_{placed_part.shape.id}_{i}")
 
+                    # --- New Debugging: Scatter points inside the IFP ---
+                    min_x, min_y, max_x, max_y = translated_ifp.bounds
+                    points_drawn = 0
+                    attempts = 0
+                    # Increased number of circles for better visualization
+                    while points_drawn < 500 and attempts < 10000:
+                        rand_x = random.uniform(min_x, max_x)
+                        rand_y = random.uniform(min_y, max_y)
+                        if translated_ifp.contains(Point(rand_x, rand_y)):
+                            self._draw_debug_point(
+                                rand_x, rand_y, 
+                                f"ifp_dot_{placed_part.shape.id}_{i}_{points_drawn}",
+                                color=(0.0, 1.0, 0.0) # Bright Green
+                            )
+                            points_drawn += 1
+                        attempts += 1
                 individual_nfps.append(
                     Polygon(
                         translated_exterior.exterior, [p.exterior for p in translated_interiors]
@@ -178,18 +224,20 @@ class MinkowskiNester(BaseNester):
 
         # --- Stage 1: Check holes first ---
         hole_candidates.sort(key=lambda p: (p.y, p.x))
-        for point in hole_candidates:
+        for i, point in enumerate(hole_candidates):
+
             # Temporarily move the part to the candidate position for validation.
             original_part_polygon = part_to_place.polygon
 
             # The 'point' is where the centroid should be.
             dx = point.x - rotated_poly_centroid.x
             dy = point.y - rotated_poly_centroid.y
-            part_to_place.polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
+            test_polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
+            part_to_place.polygon = test_polygon
 
-            # self._draw_debug_poly(
-            #     part_to_place.polygon, f"hole_test_{point.x:.0f}_{point.y:.0f}"
-            # )
+            self._draw_debug_poly(
+                test_polygon, f"hole_test_{part_to_place.id}_{angle:.0f}_{i}"
+            )
 
             is_valid = self._is_placement_valid_with_holes(
                 part_to_place.polygon, sheet, part_to_place
@@ -209,17 +257,18 @@ class MinkowskiNester(BaseNester):
 
         # --- Stage 2: If no hole fit, check external positions ---
         external_candidates.sort(key=lambda p: (p.y, p.x))
-        for point in external_candidates:
+        for i, point in enumerate(external_candidates):
             original_part_polygon = part_to_place.polygon
 
             # The 'point' is where the centroid should be.
             dx = point.x - rotated_poly_centroid.x
             dy = point.y - rotated_poly_centroid.y
-            part_to_place.polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
+            test_polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
+            part_to_place.polygon = test_polygon
 
-            # self._draw_debug_poly(
-            #     part_to_place.polygon, f"ext_test_{point.x:.0f}_{point.y:.0f}"
-            # )
+            self._draw_debug_poly(
+                test_polygon, f"ext_test_{part_to_place.id}_{angle:.0f}_{i}"
+            )
 
             is_valid = self._is_placement_valid_with_holes(
                 part_to_place.polygon, sheet, part_to_place
@@ -390,22 +439,25 @@ class MinkowskiNester(BaseNester):
 
         return valid_hole_candidates, valid_external_candidates
 
-    def _calculate_and_cache_nfp(self, poly_A_master, angle_A, poly_B_master, angle_B, cache_key):
+    def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
         """Calculates the NFP between two polygons and stores it in the cache."""
         if self._cache.get_nfp(cache_key):
             return self._cache.get_nfp(cache_key)
 
+        poly_A_master = shape_A.original_polygon
         # --- NFP Calculation with Hole Support ---
+        poly_B_master = part_to_place.original_polygon
         # The NFP exterior is the minkowski sum of A's exterior and the reflected B.
         # We pass the master polygons and their transformations directly.
         nfp_exterior = self._minkowski_sum(poly_A_master, angle_A, False, poly_B_master, angle_B, True)
         
         nfp_interiors = []
         # If A has holes, they become valid placement areas for B.
-        if poly_A_master.interiors:
+        # We must use the hole from the BUFFERED polygon, as this is the actual boundary for placement.
+        if poly_A_master and poly_A_master.interiors:
             poly_B_rotated = rotate(poly_B_master, angle_B, origin='centroid')
             for hole in poly_A_master.interiors:
-                hole_poly_unrotated = Polygon(hole)
+                hole_poly_unrotated = Polygon(hole.coords)
                 hole_poly_rotated = rotate(hole_poly_unrotated, angle_A, origin=poly_A_master.centroid)
                 
                 # Check if the bounding box of the part to place can even fit inside the hole's bounding box.
@@ -413,12 +465,9 @@ class MinkowskiNester(BaseNester):
                 if (poly_B_rotated.bounds[2] - poly_B_rotated.bounds[0] < hole_poly_rotated.bounds[2] - hole_poly_rotated.bounds[0] and
                     poly_B_rotated.bounds[3] - poly_B_rotated.bounds[1] < hole_poly_rotated.bounds[3] - hole_poly_rotated.bounds[1]):
                     
-                    # To find where B can fit inside the hole, we calculate the Minkowski DIFFERENCE.
-                    # This is equivalent to Hole + (-Part), where -Part is reflected.
-                    ifp_raw = self._minkowski_sum(hole_poly_unrotated, angle_A, False, poly_B_master, angle_B, True, rot_origin1=poly_A_master.centroid)
-                    
-                    if ifp_raw and ifp_raw.area > 0 and ifp_raw.geom_type == 'Polygon':
-                        nfp_interiors.append(ifp_raw.exterior)
+                    # For now, just use the interior bounds directly as the go-space.
+                    if hole_poly_rotated and hole_poly_rotated.area > 0:
+                        nfp_interiors.append(hole_poly_rotated.exterior)
         
         master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
         self._cache.set_nfp(cache_key, master_nfp)
