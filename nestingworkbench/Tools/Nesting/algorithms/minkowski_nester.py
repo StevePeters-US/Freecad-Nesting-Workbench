@@ -12,28 +12,10 @@ from ....datatypes.placed_part import PlacedPart
 import Part
 
 
-class NfpCache:
-    """Caches No-Fit Polygons and polygon decompositions."""
-
-    def __init__(self):
-        self._nfp_cache = {}
-        self._decomposition_cache = {}
-
-    def get_nfp(self, key):
-        """Gets a No-Fit Polygon from the cache."""
-        return self._nfp_cache.get(key)
-
-    def set_nfp(self, key, nfp):
-        """Sets a No-Fit Polygon in the cache."""
-        self._nfp_cache[key] = nfp
-
-    def get_decomposition(self, key):
-        """Gets a polygon decomposition from the cache."""
-        return self._decomposition_cache.get(key)
-
-    def set_decomposition(self, key, decomposition):
-        """Sets a polygon decomposition in the cache."""
-        self._decomposition_cache[key] = decomposition
+# Global cache for NFPs and decompositions.
+# This allows reusing calculations across multiple nesting operations.
+NFP_CACHE = {}
+DECOMPOSITION_CACHE = {}
 
 
 class MinkowskiNester(BaseNester):
@@ -41,7 +23,6 @@ class MinkowskiNester(BaseNester):
     def __init__(self, width, height, rotation_steps=1, **kwargs):
         super().__init__(width, height, rotation_steps, **kwargs)
         self._debug_group = None
-        self._cache = NfpCache()
         self.log_callback = kwargs.get("log_callback")
 
     def nest(self, parts):
@@ -117,7 +98,7 @@ class MinkowskiNester(BaseNester):
                 part_to_place_master_label,
                 angle,
             )
-            master_nfp = self._cache.get_nfp(cache_key)
+            master_nfp = NFP_CACHE.get(cache_key)
 
             if master_nfp is None:
                 # Cache miss. Calculate the NFP now and store it.
@@ -384,8 +365,8 @@ class MinkowskiNester(BaseNester):
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
         """Calculates the NFP between two polygons and stores it in the cache."""
-        if self._cache.get_nfp(cache_key):
-            return self._cache.get_nfp(cache_key)
+        if NFP_CACHE.get(cache_key):
+            return NFP_CACHE.get(cache_key)
 
         poly_A_master = shape_A.original_polygon
         # --- NFP Calculation with Hole Support ---
@@ -419,7 +400,7 @@ class MinkowskiNester(BaseNester):
                                 nfp_interiors.append(p.exterior)
         
         master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
-        self._cache.set_nfp(cache_key, master_nfp)
+        NFP_CACHE[cache_key] = master_nfp
         return master_nfp
 
     def _minkowski_difference(self, master_poly1, angle1, master_poly2, angle2):
@@ -508,8 +489,8 @@ class MinkowskiNester(BaseNester):
             return []
         
         cache_key = polygon.wkt
-        if self._cache.get_decomposition(cache_key):
-            return self._cache.get_decomposition(cache_key)
+        if DECOMPOSITION_CACHE.get(cache_key):
+            return DECOMPOSITION_CACHE.get(cache_key)
 
         if polygon.geom_type == 'MultiPolygon':
             all_decomposed_parts = []
@@ -524,13 +505,13 @@ class MinkowskiNester(BaseNester):
             from shapely.ops import triangulate
             triangles = triangulate(polygon)
             decomposed = [tri for tri in triangles if polygon.contains(tri.representative_point())]
-            self._cache.set_decomposition(cache_key, decomposed)
+            DECOMPOSITION_CACHE[cache_key] = decomposed
             return decomposed
         except Exception as e:
             self.log(f"      - Shapely triangulation not available or failed: {e}. Falling back to convex hull.", level="warning")
 
         result = [polygon.convex_hull]
-        self._cache.set_decomposition(cache_key, result)
+        DECOMPOSITION_CACHE[cache_key] = result
         return result
 
     def _minkowski_sum_convex(self, poly1, poly2):
