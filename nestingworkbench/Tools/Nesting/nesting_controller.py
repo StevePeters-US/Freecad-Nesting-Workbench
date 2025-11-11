@@ -168,6 +168,10 @@ class NestingController:
         # Add spacing to algo_kwargs so the nester can use it for sheet origin calculations
         algo_kwargs['spacing'] = spacing
 
+        # Add the UI logger callback
+        if hasattr(self.ui, 'log_message'):
+            algo_kwargs['log_callback'] = self.ui.log_message
+
         try:
             is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
             sheets, remaining_parts_to_nest, total_steps = nest(

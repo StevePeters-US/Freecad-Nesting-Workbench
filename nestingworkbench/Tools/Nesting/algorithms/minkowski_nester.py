@@ -42,6 +42,7 @@ class MinkowskiNester(BaseNester):
         super().__init__(width, height, rotation_steps, **kwargs)
         self._debug_group = None
         self._cache = NfpCache()
+        self.log_callback = kwargs.get("log_callback")
 
     def nest(self, parts):
         """Overrides the base nester to add Minkowski-specific cleanup."""
@@ -71,53 +72,27 @@ class MinkowskiNester(BaseNester):
             sheet.add_part(PlacedPart(placed_part_shape))
             return True
         elif placed_part_shape:
-            FreeCAD.Console.PrintWarning(f"Minkowski nester returned an invalid placement for {part.id}. Discarding.\n")
+            self.log(f"Nester returned an invalid placement for {part.id}. Discarding.", level="warning")
         return False
 
     def _draw_debug_poly(self, poly, name):
         """Helper to draw a shapely polygon for debugging."""
-        if not self._debug_group:
-            # The debug group is now created and cleaned up by this nester's nest() method.
-            # This prevents interference with the nesting logic.
-            doc = FreeCAD.ActiveDocument
-            if doc.getObject("MinkowskiDebug") is None:
-                self._debug_group = doc.addObject("App::DocumentObjectGroup", "MinkowskiDebug")
-
-        if poly and not poly.is_empty:
-            wires = [Part.makePolygon([(v[0], v[1], 0) for v in poly.exterior.coords])]
-            for interior in poly.interiors:
-                wires.append(Part.makePolygon([(v[0], v[1], 0) for v in interior.coords]))
-            debug_obj = self._debug_group.newObject("Part::Feature", name)
-            debug_obj.Shape = Part.makeCompound(wires)
-            # If this is the boundary, move it up slightly in Z for visibility
-            if "IFP_boundary" in name:
-                debug_obj.Placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0.1), FreeCAD.Rotation())
-
-            if FreeCAD.GuiUp:
-                if "NFP" in name:
-                    debug_obj.ViewObject.ShapeColor = (1.0, 0.0, 0.0) # Red
-                    debug_obj.ViewObject.Transparency = 50
-                elif "IFP_boundary" in name:
-                    debug_obj.ViewObject.LineColor = (0.0, 0.2, 1.0) # Blue
-                    debug_obj.ViewObject.LineWidth = 3.0
-                    debug_obj.ViewObject.DisplayMode = "Wireframe"
-                elif "IFP" in name:
-                    debug_obj.ViewObject.ShapeColor = (0.0, 1.0, 0.0) # Green
-                    debug_obj.ViewObject.Transparency = 50
+        pass
 
     def _draw_debug_point(self, x, y, z, name, color=None):
         """Helper to draw a point for debugging."""
-        if not self._debug_group:
-            doc = FreeCAD.ActiveDocument
-            if doc.getObject("MinkowskiDebug") is None:
-                self._debug_group = doc.addObject("App::DocumentObjectGroup", "MinkowskiDebug")
-        
-        circle_obj = self._debug_group.newObject("Part::Feature", name)
-        circle_edge = Part.makeCircle(1, FreeCAD.Vector(x, y, z))
-        wire = Part.Wire(circle_edge)
-        circle_obj.Shape = Part.Face(wire)
-        if FreeCAD.GuiUp and color:
-            circle_obj.ViewObject.ShapeColor = color
+        pass
+
+    def log(self, message, level="message"):
+        """Logs a message to the console or a UI callback if available."""
+        log_message = f"MINKOWSKI: {message}"
+        if self.log_callback:
+            self.log_callback(log_message)
+        else:
+            if level == "warning":
+                FreeCAD.Console.PrintWarning(log_message + "\n")
+            else:
+                FreeCAD.Console.PrintMessage(log_message + "\n")
 
     def _handle_first_part(self, part_to_place, sheet, angle):
         """Handles the placement of the first part on an empty sheet."""
@@ -165,7 +140,6 @@ class MinkowskiNester(BaseNester):
                     xoff=placed_part_centroid.x,
                     yoff=placed_part_centroid.y,
                 )
-                self._draw_debug_poly(translated_exterior, f"NFP_{placed_part.shape.id}_{part_to_place.id}_{angle:.0f}")
                 
                 # The interiors represent the "go-zones" (holes). These are already in the correct
                 # coordinate space relative to the placed part's centroid, so they do NOT need to be translated again.
@@ -176,26 +150,6 @@ class MinkowskiNester(BaseNester):
                     translated_ifp = translate(ifp, xoff=placed_part_centroid.x, yoff=placed_part_centroid.y)
                     translated_interiors.append(translated_ifp)
                     
-                    # --- New Debugging: Draw the IFP boundary ---
-                    if not translated_ifp.is_empty:
-                        self._draw_debug_poly(translated_ifp, f"IFP_boundary_{placed_part.shape.id}_{i}")
-
-                    # --- New Debugging: Scatter points inside the IFP ---
-                    min_x, min_y, max_x, max_y = translated_ifp.bounds
-                    points_drawn = 0
-                    attempts = 0
-                    # Increased number of circles for better visualization
-                    while points_drawn < 500 and attempts < 10000:
-                        rand_x = random.uniform(min_x, max_x)
-                        rand_y = random.uniform(min_y, max_y)
-                        if translated_ifp.contains(Point(rand_x, rand_y)):
-                            self._draw_debug_point(
-                                rand_x, rand_y, 0,
-                                f"ifp_dot_{placed_part.shape.id}_{i}_{points_drawn}",
-                                color=(0.0, 1.0, 0.0) # Bright Green
-                            )
-                            points_drawn += 1
-                        attempts += 1
                 individual_nfps.append(
                     Polygon(
                         translated_exterior.exterior, [p.exterior for p in translated_interiors]
@@ -235,16 +189,6 @@ class MinkowskiNester(BaseNester):
             test_polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
             part_to_place.polygon = test_polygon
 
-            self._draw_debug_poly(
-                test_polygon, f"hole_test_{part_to_place.id}_{angle:.0f}_{i}"
-            )
-
-            # Draw a debug dot at the centroid of the test placement
-            test_centroid = test_polygon.centroid
-            self._draw_debug_point(
-                test_centroid.x, test_centroid.y, -1.0, f"centroid_test_{part_to_place.id}_{angle:.0f}_{i}"
-            )
-
             is_valid = self._is_placement_valid_with_holes(
                 part_to_place.polygon, sheet, part_to_place
             )
@@ -271,10 +215,6 @@ class MinkowskiNester(BaseNester):
             dy = point.y - rotated_poly_centroid.y
             test_polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
             part_to_place.polygon = test_polygon
-
-            self._draw_debug_poly(
-                test_polygon, f"ext_test_{part_to_place.id}_{angle:.0f}_{i}"
-            )
 
             is_valid = self._is_placement_valid_with_holes(
                 part_to_place.polygon, sheet, part_to_place
@@ -321,7 +261,7 @@ class MinkowskiNester(BaseNester):
             # We don't move the part itself, we just get its polygon at the target rotation
             rotated_part_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
 
-            FreeCAD.Console.PrintMessage(f"MINKOWSKI:  - Trying rotation {angle:.1f} degrees.\n")
+            self.log(f"  - Trying rotation {angle:.1f} degrees.")
 
             # 1. Compute the individual No-Fit Polygons (NFPs).
             individual_nfps = self._generate_nfps(part_to_place, sheet, angle)
@@ -513,8 +453,6 @@ class MinkowskiNester(BaseNester):
             
             # Compute Minkowski difference
             diff = self._minkowski_difference_convex(poly1_exterior_only, p2_at_origin)
-            if diff:
-                self._draw_debug_poly(diff, f"pairwise_diff_{i}")
             pairwise_diffs.append(diff)
         
         if not pairwise_diffs:
@@ -589,7 +527,7 @@ class MinkowskiNester(BaseNester):
             self._cache.set_decomposition(cache_key, decomposed)
             return decomposed
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"MINKOWSKI:      - Shapely triangulation not available or failed: {e}. Falling back to convex hull.\n")
+            self.log(f"      - Shapely triangulation not available or failed: {e}. Falling back to convex hull.", level="warning")
 
         result = [polygon.convex_hull]
         self._cache.set_decomposition(cache_key, result)

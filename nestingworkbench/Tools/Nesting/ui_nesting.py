@@ -384,3 +384,14 @@ class NestingPanel(QtGui.QWidget):
         except Exception:
             # Silently fail, no default will be set.
             pass
+
+    def log_message(self, message, level="message"):
+        """Displays a message in the status label and logs to the console."""
+        self.status_label.setText(message)
+        if level == "warning":
+            FreeCAD.Console.PrintWarning(message + "\n")
+        else:
+            FreeCAD.Console.PrintMessage(message + "\n")
+        
+        # Process UI events to make sure the label updates immediately
+        QtGui.QApplication.processEvents()
