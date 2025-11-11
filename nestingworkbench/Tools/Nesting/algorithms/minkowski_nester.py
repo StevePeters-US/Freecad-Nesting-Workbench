@@ -261,7 +261,7 @@ class MinkowskiNester(BaseNester):
             # We don't move the part itself, we just get its polygon at the target rotation
             rotated_part_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
 
-            self.log(f"  - Trying rotation {angle:.1f} degrees.")
+            self.log(f"  - Trying part '{part_to_place.id}' at rotation {angle:.1f} degrees.")
 
             # 1. Compute the individual No-Fit Polygons (NFPs).
             individual_nfps = self._generate_nfps(part_to_place, sheet, angle)
