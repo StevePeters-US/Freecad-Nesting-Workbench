@@ -20,6 +20,9 @@ class Shape:
     its geometric boundary (as a shapely Polygon), and its placement state
     during and after the nesting process.
     """
+    nfp_cache = {}
+    decomposition_cache = {}
+    
     def __init__(self, source_freecad_object):
         self.source_freecad_object = source_freecad_object
         self.instance_num = 1 # Default, will be overridden on copies
