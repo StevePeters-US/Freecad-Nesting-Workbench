@@ -40,14 +40,18 @@ class MinkowskiNester(BaseNester):
         placed_part_shape = self._try_place_part_on_sheet(part, sheet)
 
         # Final validation using the Minkowski-aware checker.
-        if placed_part_shape and self._is_placement_valid_with_holes(
-            placed_part_shape.polygon, sheet, part_to_ignore=placed_part_shape
-        ):
-            sheet_origin = sheet.get_origin()
-            placed_part_shape.placement = placed_part_shape.get_final_placement(sheet_origin)
-            sheet.add_part(PlacedPart(placed_part_shape))
-            return True
-        elif placed_part_shape:
+        if placed_part_shape:
+            other_parts_polygons = [p.shape.polygon for p in sheet.parts if p.shape is not placed_part_shape and p.shape.polygon]
+            union_of_other_parts = unary_union(other_parts_polygons) if other_parts_polygons else None
+            if self._is_placement_valid_with_holes(
+                placed_part_shape.polygon, sheet, union_of_other_parts
+            ):
+                sheet_origin = sheet.get_origin()
+                placed_part_shape.placement = placed_part_shape.get_final_placement(sheet_origin)
+                sheet.add_part(PlacedPart(placed_part_shape))
+                return True
+        
+        if placed_part_shape:
             self.log(f"Nester returned an invalid placement for {part.id}. Discarding.", level="warning")
         return False
 
@@ -148,6 +152,10 @@ class MinkowskiNester(BaseNester):
         if not rotated_part_poly:
             return best_placement_info
 
+        # OPTIMIZATION: Pre-calculate the union of parts on the sheet once.
+        other_parts_polygons = [p.shape.polygon for p in sheet.parts if p.shape is not part_to_place and p.shape.polygon]
+        union_of_other_parts = unary_union(other_parts_polygons) if other_parts_polygons else None
+
         # 2. Find the best valid placement for this rotation, prioritizing holes.
         # The candidate points are for the centroid, so we need the centroid of the rotated part poly
         rotated_poly_centroid = rotated_part_poly.centroid
@@ -166,7 +174,7 @@ class MinkowskiNester(BaseNester):
             part_to_place.polygon = test_polygon
 
             is_valid = self._is_placement_valid_with_holes(
-                part_to_place.polygon, sheet, part_to_place
+                part_to_place.polygon, sheet, union_of_other_parts
             )
 
             part_to_place.polygon = original_part_polygon  # Restore the polygon immediately.
@@ -193,7 +201,7 @@ class MinkowskiNester(BaseNester):
             part_to_place.polygon = test_polygon
 
             is_valid = self._is_placement_valid_with_holes(
-                part_to_place.polygon, sheet, part_to_place
+                part_to_place.polygon, sheet, union_of_other_parts
             )
 
             part_to_place.polygon = original_part_polygon  # Restore the polygon immediately.
@@ -268,7 +276,7 @@ class MinkowskiNester(BaseNester):
 
         return None
 
-    def _is_placement_valid_with_holes(self, polygon_to_check, sheet, part_to_ignore):
+    def _is_placement_valid_with_holes(self, polygon_to_check, sheet, union_of_other_parts):
         """
         Custom validation function for Minkowski that correctly handles holes.
         This logic is self-contained and does not modify the Sheet class.
@@ -278,12 +286,9 @@ class MinkowskiNester(BaseNester):
         if not bin_polygon.contains(polygon_to_check):
             return False
 
-        # 2. Manually build the union of placed parts, respecting part_to_ignore
-        other_parts_polygons = [p.shape.polygon for p in sheet.parts if p.shape is not part_to_ignore and p.shape.polygon]
-        if not other_parts_polygons:
+        # 2. Check against the pre-calculated union of other parts
+        if not union_of_other_parts:
             return True # No other parts to collide with
-
-        union_of_other_parts = unary_union(other_parts_polygons)
 
         # --- Advanced Collision Check with Hole Support ---
         if not polygon_to_check.intersects(union_of_other_parts):
