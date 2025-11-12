@@ -146,20 +146,15 @@ class MinkowskiNester(BaseNester):
         hole_candidates.sort(key=lambda p: (p.y, p.x))
         for i, point in enumerate(hole_candidates):
 
-            # Temporarily move the part to the candidate position for validation.
-            original_part_polygon = part_to_place.polygon
-
             # The 'point' is where the centroid should be.
             dx = point.x - rotated_poly_centroid.x
             dy = point.y - rotated_poly_centroid.y
             test_polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
-            part_to_place.polygon = test_polygon
 
             is_valid = self._is_placement_valid_with_holes(
-                part_to_place.polygon, sheet, union_of_other_parts
+                test_polygon, sheet, union_of_other_parts
             )
 
-            part_to_place.polygon = original_part_polygon  # Restore the polygon immediately.
             if is_valid:
                 metric = point.y * self._bin_width + point.x
                 if metric < best_placement_info['metric']:
@@ -174,19 +169,16 @@ class MinkowskiNester(BaseNester):
         # --- Stage 2: If no hole fit, check external positions ---
         external_candidates.sort(key=lambda p: (p.y, p.x))
         for i, point in enumerate(external_candidates):
-            original_part_polygon = part_to_place.polygon
 
             # The 'point' is where the centroid should be.
             dx = point.x - rotated_poly_centroid.x
             dy = point.y - rotated_poly_centroid.y
             test_polygon = translate(rotated_part_poly, xoff=dx, yoff=dy)
-            part_to_place.polygon = test_polygon
 
             is_valid = self._is_placement_valid_with_holes(
-                part_to_place.polygon, sheet, union_of_other_parts
+                test_polygon, sheet, union_of_other_parts
             )
 
-            part_to_place.polygon = original_part_polygon  # Restore the polygon immediately.
             if is_valid:
                 metric = point.y * self._bin_width + point.x
                 if metric < best_placement_info['metric']:
