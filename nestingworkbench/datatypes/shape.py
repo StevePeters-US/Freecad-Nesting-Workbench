@@ -8,6 +8,8 @@ the nesting algorithm, and its final placement information.
 import Part
 import copy
 import FreeCAD
+import threading
+
 try:
     from shapely.affinity import translate, rotate
     SHAPELY_AVAILABLE = True
@@ -21,6 +23,7 @@ class Shape:
     during and after the nesting process.
     """
     nfp_cache = {}
+    nfp_cache_lock = threading.Lock()
     decomposition_cache = {}
     
     def __init__(self, source_freecad_object):

@@ -4,6 +4,7 @@ from shapely.geometry import Polygon, MultiPolygon, Point
 from shapely.affinity import translate, rotate, scale
 from shapely.ops import unary_union
 from PySide import QtGui
+import concurrent.futures
 
 import FreeCAD
 from ....datatypes.shape import Shape
@@ -87,55 +88,39 @@ class MinkowskiNester(BaseNester):
     def _generate_nfps(self, part_to_place, sheet, angle):
         """Generates the No-Fit Polygons for a given part and sheet."""
         individual_nfps = []
-        for placed_part in sheet.parts:
-            placed_part_master_label = placed_part.shape.source_freecad_object.Label
-            part_to_place_master_label = part_to_place.source_freecad_object.Label
-            placed_part_angle = placed_part.angle
+        
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = {executor.submit(self._calculate_and_cache_nfp, placed_part.shape, placed_part.angle, part_to_place, angle, (placed_part.shape.source_freecad_object.Label, placed_part.angle, part_to_place.source_freecad_object.Label, angle)): placed_part for placed_part in sheet.parts}
 
-            cache_key = (
-                placed_part_master_label,
-                placed_part_angle,
-                part_to_place_master_label,
-                angle,
-            )
-            master_nfp = Shape.nfp_cache.get(cache_key)
+            for future in concurrent.futures.as_completed(futures):
+                placed_part = futures[future]
+                master_nfp = future.result()
+                if master_nfp:
+                    # The NFP's reference point is the sum of the reference points.
+                    # We translate the EXTERIOR of the NFP by the placed part's centroid to position it correctly on the sheet.
+                    placed_part_centroid = placed_part.shape.centroid
 
-            if master_nfp is None:
-                # Cache miss. Calculate the NFP now and store it.
-                master_nfp = self._calculate_and_cache_nfp(
-                    placed_part.shape, # Pass the full Shape object
-                    placed_part_angle,
-                    part_to_place,
-                    angle,
-                    cache_key,
-                )
-
-            if master_nfp:
-                # The NFP's reference point is the sum of the reference points.
-                # We translate the EXTERIOR of the NFP by the placed part's centroid to position it correctly on the sheet.
-                placed_part_centroid = placed_part.shape.centroid
-
-                # The exterior represents the "no-go" zone around the placed part.
-                translated_exterior = translate(
-                    Polygon(master_nfp.exterior),
-                    xoff=placed_part_centroid.x,
-                    yoff=placed_part_centroid.y,
-                )
-                
-                # The interiors represent the "go-zones" (holes). These are already in the correct
-                # coordinate space relative to the placed part's centroid, so they do NOT need to be translated again.
-                # We must, however, translate them to the final position of the placed part on the sheet.
-                translated_interiors = []
-                for i, interior in enumerate(master_nfp.interiors):
-                    ifp = Polygon(interior)
-                    translated_ifp = translate(ifp, xoff=placed_part_centroid.x, yoff=placed_part_centroid.y)
-                    translated_interiors.append(translated_ifp)
-                    
-                individual_nfps.append(
-                    Polygon(
-                        translated_exterior.exterior, [p.exterior for p in translated_interiors]
+                    # The exterior represents the "no-go" zone around the placed part.
+                    translated_exterior = translate(
+                        Polygon(master_nfp.exterior),
+                        xoff=placed_part_centroid.x,
+                        yoff=placed_part_centroid.y,
                     )
-                )
+                    
+                    # The interiors represent the "go-zones" (holes). These are already in the correct
+                    # coordinate space relative to the placed part's centroid, so they do NOT need to be translated again.
+                    # We must, however, translate them to the final position of the placed part on the sheet.
+                    translated_interiors = []
+                    for i, interior in enumerate(master_nfp.interiors):
+                        ifp = Polygon(interior)
+                        translated_ifp = translate(ifp, xoff=placed_part_centroid.x, yoff=placed_part_centroid.y)
+                        translated_interiors.append(translated_ifp)
+                        
+                    individual_nfps.append(
+                        Polygon(
+                            translated_exterior.exterior, [p.exterior for p in translated_interiors]
+                        )
+                    )
         return individual_nfps
 
     def _find_best_placement(
@@ -362,8 +347,9 @@ class MinkowskiNester(BaseNester):
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
         """Calculates the NFP between two polygons and stores it in the cache."""
-        if Shape.nfp_cache.get(cache_key):
-            return Shape.nfp_cache.get(cache_key)
+        with Shape.nfp_cache_lock:
+            if Shape.nfp_cache.get(cache_key):
+                return Shape.nfp_cache.get(cache_key)
 
         self.log(f"      - Generating new NFP for '{shape_A.id}' ({angle_A:.1f} deg) and '{part_to_place.id}' ({angle_B:.1f} deg)")
 
@@ -400,7 +386,10 @@ class MinkowskiNester(BaseNester):
                                 nfp_interiors.append(p.exterior)
         
         master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
-        Shape.nfp_cache[cache_key] = master_nfp
+        
+        with Shape.nfp_cache_lock:
+            Shape.nfp_cache[cache_key] = master_nfp
+        
         return master_nfp
 
     def _minkowski_difference(self, master_poly1, angle1, master_poly2, angle2):
