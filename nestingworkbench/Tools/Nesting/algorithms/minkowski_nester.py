@@ -216,6 +216,26 @@ class MinkowskiNester(BaseNester):
 
         return best_placement_info
 
+    def _evaluate_rotation(self, angle, part_to_place, sheet, union_of_other_parts):
+        """
+        Evaluates a single rotation angle to find the best possible placement.
+        This is designed to be run in parallel for each angle.
+        """
+        # We don't move the part itself, we just get its polygon at the target rotation
+        rotated_part_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
+
+        self.log(f"  - Trying part '{part_to_place.id}' on sheet {sheet.id} at rotation {angle:.1f} degrees.")
+
+        # 1. Compute the individual No-Fit Polygons (NFPs). This is already parallelized.
+        individual_nfps = self._generate_nfps(part_to_place, sheet, angle)
+
+        # 2. Find the best placement for this specific angle.
+        placement_info = self._find_best_placement(
+            part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts
+        )
+
+        return placement_info
+
     def _try_place_part_on_sheet(self, part_to_place, sheet, union_of_other_parts):
         """
         Tries to place a single shape on a given sheet using Minkowski sums.
@@ -227,36 +247,29 @@ class MinkowskiNester(BaseNester):
         if part_to_place.original_polygon is None and part_to_place.polygon is not None:
             part_to_place.original_polygon = part_to_place.polygon
 
-        best_placement_info = {'x': None, 'y': None, 'angle': None, 'metric': float('inf')}
-        
-
-        for i in range(part_to_place.rotation_steps):
-            angle = i * (360.0 / part_to_place.rotation_steps) if part_to_place.rotation_steps > 1 else 0.0
-
-            # --- Handle the first part on an empty sheet ---
-            if not sheet.parts:
+        # --- Handle the first part on an empty sheet (no need for parallelization) ---
+        if not sheet.parts:
+            for i in range(part_to_place.rotation_steps):
+                angle = i * (360.0 / part_to_place.rotation_steps) if part_to_place.rotation_steps > 1 else 0.0
                 placed_part = self._handle_first_part(part_to_place, sheet, angle)
                 if placed_part:
                     return placed_part
-                continue  # Try next rotation if origin placement is invalid
+            return None # Could not place even on an empty sheet
 
-            # We don't move the part itself, we just get its polygon at the target rotation
-            rotated_part_poly = rotate(part_to_place.original_polygon, angle, origin='centroid')
+        # --- Parallel evaluation of all rotation angles ---
+        best_placement_info = {'metric': float('inf')}
+        with ThreadPoolExecutor() as executor:
+            angles = [i * (360.0 / part_to_place.rotation_steps) for i in range(part_to_place.rotation_steps)]
+            
+            future_to_angle = {executor.submit(self._evaluate_rotation, angle, part_to_place, sheet, union_of_other_parts): angle for angle in angles}
 
-            self.log(f"  - Trying part '{part_to_place.id}' on sheet {sheet.id} at rotation {angle:.1f} degrees.")
-
-            # 1. Compute the individual No-Fit Polygons (NFPs).
-            individual_nfps = self._generate_nfps(part_to_place, sheet, angle)
-
-            placement_info = self._find_best_placement(
-                part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts
-            )
-
-            if placement_info and placement_info.get('metric') is not None and placement_info.get('metric') < best_placement_info.get('metric', float('inf')):
-                best_placement_info = placement_info
+            for future in as_completed(future_to_angle):
+                placement_info = future.result()
+                if placement_info and placement_info.get('metric', float('inf')) < best_placement_info.get('metric', float('inf')):
+                    best_placement_info = placement_info
 
         # After checking all rotations and their candidates, apply the best one found.
-        if best_placement_info['x'] is not None:
+        if best_placement_info.get('x') is not None:
             best_x = best_placement_info['x']
             best_y = best_placement_info['y']
             best_angle = best_placement_info['angle']
