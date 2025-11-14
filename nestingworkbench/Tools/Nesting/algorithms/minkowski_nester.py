@@ -1,6 +1,7 @@
 import math
 import random
 from shapely.geometry import Polygon, MultiPolygon, Point
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from shapely.affinity import translate, rotate, scale
 from shapely.ops import unary_union
 from PySide import QtGui
@@ -85,62 +86,66 @@ class MinkowskiNester(BaseNester):
             return part_to_place
         return None
 
+    def _process_nfp_for_part(self, placed_part, part_to_place, angle):
+        """Processes a single NFP calculation and translation. For parallel execution."""
+        placed_part_master_label = placed_part.shape.source_freecad_object.Label
+        part_to_place_master_label = part_to_place.source_freecad_object.Label
+        placed_part_angle = placed_part.angle
+
+        cache_key = (
+            placed_part_master_label,
+            placed_part_angle,
+            part_to_place_master_label,
+            angle,
+        )
+        nfp_data = Shape.nfp_cache.get(cache_key)
+
+        if nfp_data is None:
+            # Cache miss. Calculate the NFP now and store it.
+            nfp_data = self._calculate_and_cache_nfp(
+                placed_part.shape, # Pass the full Shape object
+                placed_part_angle,
+                part_to_place,
+                angle,
+                cache_key,
+            )
+
+        if nfp_data:
+            master_nfp = nfp_data["polygon"]
+            placed_part_centroid = placed_part.shape.centroid
+            xoff, yoff = placed_part_centroid.x, placed_part_centroid.y
+
+            # The exterior represents the "no-go" zone around the placed part.
+            translated_exterior = translate(
+                Polygon(master_nfp.exterior), xoff=xoff, yoff=yoff
+            )
+            
+            translated_interiors = []
+            for i, interior in enumerate(master_nfp.interiors):
+                ifp = Polygon(interior)
+                translated_ifp = translate(ifp, xoff=xoff, yoff=yoff)
+                translated_interiors.append(translated_ifp)
+            
+            # Translate the cached points
+            translated_exterior_points = [Point(p.x + xoff, p.y + yoff) for p in nfp_data["exterior_points"]]
+            translated_interior_points = []
+            for interior_points in nfp_data["interior_points"]:
+                translated_interior_points.append([Point(p.x + xoff, p.y + yoff) for p in interior_points])
+
+            return {
+                "polygon": Polygon(
+                    translated_exterior.exterior, [p.exterior for p in translated_interiors]
+                ),
+                "exterior_points": translated_exterior_points,
+                "interior_points": translated_interior_points,
+            }
+        return None
+
     def _generate_nfps(self, part_to_place, sheet, angle):
         """Generates the No-Fit Polygons for a given part and sheet."""
-        individual_nfps = []
-        for placed_part in sheet.parts:
-            placed_part_master_label = placed_part.shape.source_freecad_object.Label
-            part_to_place_master_label = part_to_place.source_freecad_object.Label
-            placed_part_angle = placed_part.angle
-
-            cache_key = (
-                placed_part_master_label,
-                placed_part_angle,
-                part_to_place_master_label,
-                angle,
-            )
-            nfp_data = Shape.nfp_cache.get(cache_key)
-
-            if nfp_data is None:
-                # Cache miss. Calculate the NFP now and store it.
-                nfp_data = self._calculate_and_cache_nfp(
-                    placed_part.shape, # Pass the full Shape object
-                    placed_part_angle,
-                    part_to_place,
-                    angle,
-                    cache_key,
-                )
-
-            if nfp_data:
-                master_nfp = nfp_data["polygon"]
-                placed_part_centroid = placed_part.shape.centroid
-                xoff, yoff = placed_part_centroid.x, placed_part_centroid.y
-
-                # The exterior represents the "no-go" zone around the placed part.
-                translated_exterior = translate(
-                    Polygon(master_nfp.exterior), xoff=xoff, yoff=yoff
-                )
-                
-                translated_interiors = []
-                for i, interior in enumerate(master_nfp.interiors):
-                    ifp = Polygon(interior)
-                    translated_ifp = translate(ifp, xoff=xoff, yoff=yoff)
-                    translated_interiors.append(translated_ifp)
-                
-                # Translate the cached points
-                translated_exterior_points = [Point(p.x + xoff, p.y + yoff) for p in nfp_data["exterior_points"]]
-                translated_interior_points = []
-                for interior_points in nfp_data["interior_points"]:
-                    translated_interior_points.append([Point(p.x + xoff, p.y + yoff) for p in interior_points])
-
-                individual_nfps.append({
-                    "polygon": Polygon(
-                        translated_exterior.exterior, [p.exterior for p in translated_interiors]
-                    ),
-                    "exterior_points": translated_exterior_points,
-                    "interior_points": translated_interior_points,
-                })
-        return individual_nfps
+        with ThreadPoolExecutor() as executor:
+            futures = [executor.submit(self._process_nfp_for_part, p, part_to_place, angle) for p in sheet.parts]
+            return [future.result() for future in as_completed(futures) if future.result() is not None]
 
     def _find_best_placement(
         self, part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts
