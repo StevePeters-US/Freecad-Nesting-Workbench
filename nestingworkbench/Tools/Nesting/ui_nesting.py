@@ -35,7 +35,7 @@ class NestingPanel(QtGui.QWidget):
         self.sheet_width_input = QtGui.QDoubleSpinBox(); self.sheet_width_input.setRange(1, 10000); self.sheet_width_input.setValue(600)
         self.sheet_height_input = QtGui.QDoubleSpinBox(); self.sheet_height_input.setRange(1, 10000); self.sheet_height_input.setValue(600)
         self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
-        self.boundary_resolution_input = QtGui.QSpinBox(); self.boundary_resolution_input.setRange(10, 500); self.boundary_resolution_input.setValue(75)
+        self.boundary_resolution_input = QtGui.QSpinBox(); self.boundary_resolution_input.setRange(10, 500); self.boundary_resolution_input.setValue(300)
         self.boundary_resolution_input.setToolTip("Number of points per curve for boundary creation. Higher values are more accurate but slower.")
         
         self.shape_table = QtGui.QTableWidget()

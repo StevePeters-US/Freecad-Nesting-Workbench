@@ -64,7 +64,7 @@ def get_2d_profile_from_obj(obj):
     raise ValueError(f"Unsupported object '{obj.Label}' or no valid 2D geometry found.")
 
 
-def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution=75):
+def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution=300):
     """
     Processes a FreeCAD object to generate a shapely-based boundary and populates
     the geometric properties of the provided Shape object. The created boundary is
@@ -142,6 +142,10 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     # Buffer the polygon for spacing.
     buffered_polygon = final_polygon_unbuffered.buffer(spacing / 2.0, join_style=1)
     
+    # Simplify the buffered polygon to reduce vertex count.
+    # We use the discretization distance as the tolerance.
+    buffered_polygon = buffered_polygon.simplify(discretize_distance, preserve_topology=True)
+
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")
     else:
