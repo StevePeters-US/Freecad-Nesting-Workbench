@@ -1,6 +1,6 @@
 import FreeCAD
 import FreeCADGui
-from ..nestingworkbench.Tools.Stacker import stacker
+from nestingworkbench.Tools.Stacker import stacker
 
 class StackSheetsCommand:
     """The command to stack and unstack packed sheets."""

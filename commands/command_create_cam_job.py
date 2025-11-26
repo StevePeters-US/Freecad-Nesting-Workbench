@@ -1,6 +1,6 @@
 import FreeCAD
 import FreeCADGui
-from ..nestingworkbench.Tools.Cam import cam_manager
+from nestingworkbench.Tools.Cam import cam_manager
 
 class CreateCAMJobCommand:
     """The command to create a CAM job from a layout."""

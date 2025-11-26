@@ -1,6 +1,6 @@
 import FreeCAD
 import FreeCADGui
-from ..nestingworkbench import task_panel_manager
+from nestingworkbench import task_panel_manager
 
 # --- FreeCAD Command Classes ---
 

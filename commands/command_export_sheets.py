@@ -1,6 +1,6 @@
 import FreeCAD
 import FreeCADGui
-from ..nestingworkbench.Tools.Exporter import exporter
+from nestingworkbench.Tools.Exporter import exporter
 from PySide import QtGui
 import os
 

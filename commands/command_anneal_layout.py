@@ -1,6 +1,6 @@
 import FreeCAD
 import FreeCADGui
-from ..nestingworkbench.Tools.Annealing import ui_anneal
+from nestingworkbench.Tools.Annealing import ui_anneal
 
 class AnnealLayoutCommand:
     """The command to open the layout annealing task panel."""

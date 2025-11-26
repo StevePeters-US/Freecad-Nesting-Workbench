@@ -45,12 +45,12 @@ class NestingWorkbench(FreeCADGui.Workbench):
         """This function is executed when the workbench is activated."""
         # Import the command modules. This executes the FreeCADGui.addCommand()
         # in each file, making the commands available to FreeCAD.
-        from Nesting.commands import command_nest
-        from Nesting.commands import command_stack_sheets
-        from Nesting.commands import command_transform_parts
-        from Nesting.commands import command_anneal_layout
-        from Nesting.commands import command_export_sheets
-        from Nesting.commands import command_create_cam_job
+        from commands import command_nest
+        from commands import command_stack_sheets
+        from commands import command_transform_parts
+        from commands import command_anneal_layout
+        from commands import command_export_sheets
+        from commands import command_create_cam_job
         
         self.appendToolbar("Nesting", [
             'Nesting_Run',

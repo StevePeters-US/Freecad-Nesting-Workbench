@@ -1,6 +1,6 @@
 import FreeCAD
 import FreeCADGui
-from ..nestingworkbench.Tools.Transform import transform_panel_manager
+from nestingworkbench.Tools.Transform import transform_panel_manager
 
 class TransformPartsCommand:
     """The command to manually transform parts in a layout."""
