@@ -6,7 +6,7 @@ class CreateCAMJobCommand:
     """The command to create a CAM job from a layout."""
     def GetResources(self):
         return {
-            'Pixmap': 'Nesting/Resources/icons/Nesting_CAM.svg',
+            'Pixmap': 'CNC_Icon.png',
             'MenuText': 'Create CAM Job',
             'ToolTip': 'Creates a CAM job from the selected layout.'
         }

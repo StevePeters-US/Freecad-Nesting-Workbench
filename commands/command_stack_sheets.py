@@ -6,7 +6,7 @@ class StackSheetsCommand:
     """The command to stack and unstack packed sheets."""
     def GetResources(self):
         return {
-            'Pixmap': 'Nesting/Resources/icons/Nesting_Stack.svg',
+            'Pixmap': 'Stack_Icon.png',
             'MenuText': 'Stack/Unstack Sheets',
             'ToolTip': 'Toggles sheet layout between stacked and unstacked.'
         }

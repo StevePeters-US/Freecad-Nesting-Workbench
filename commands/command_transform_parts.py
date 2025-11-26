@@ -8,7 +8,7 @@ class TransformPartsCommand:
     
     def GetResources(self):
         return {
-            'Pixmap': 'Nesting/Resources/icons/Nesting_Transform.svg', # You'll need to create this icon
+            'Pixmap': 'Transform_Icon.png',
             'MenuText': 'Transform Parts',
             'ToolTip': 'Activates a tool to manually transform parts in the selected layout.'
         }

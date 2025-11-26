@@ -8,7 +8,7 @@ class ExportSheetsCommand:
     """The command to export each sheet as an SVG file."""
     def GetResources(self):
         return {
-            'Pixmap': 'Nesting/Resources/icons/Nesting_Export.svg',
+            'Pixmap': 'DXF_Icon.png',
             'MenuText': 'Export Sheets as DXF',
             'ToolTip': 'Exports each sheet in the layout to a separate DXF file.'
         }

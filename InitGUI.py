@@ -29,6 +29,14 @@ except ImportError:
 
 import FreeCAD
 import FreeCADGui
+import os
+import nestingworkbench
+
+# Register the icon path at module level so it's available immediately
+# Use nestingworkbench module location to reliably find the workbench root
+wb_path = os.path.dirname(os.path.dirname(nestingworkbench.__file__))
+icon_path = os.path.join(wb_path, 'Resources', 'icons')
+FreeCADGui.addIconPath(icon_path)
 
 class NestingWorkbench(FreeCADGui.Workbench):
     """
@@ -36,7 +44,7 @@ class NestingWorkbench(FreeCADGui.Workbench):
     """
     MenuText = "Nesting"
     ToolTip = "A workbench for 2D nesting of shapes."
-    Icon = "Nesting/Resources/icons/Nesting_Workbench.svg"
+    Icon = "Nesting_Workbench.svg"
 
     def GetClassName(self):
         return "Gui::PythonWorkbench"

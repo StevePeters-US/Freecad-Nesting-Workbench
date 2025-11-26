@@ -8,7 +8,7 @@ class AnnealLayoutCommand:
 
     def GetResources(self):
         return {
-            'Pixmap': 'Nesting/Resources/icons/Nesting_Anneal.svg', # You'll need to create this icon
+            'Pixmap': 'Nesting_Anneal.svg', # You'll need to create this icon
             'MenuText': 'Anneal Layout',
             'ToolTip': 'Optimizes the selected layout using Simulated Annealing.'
         }

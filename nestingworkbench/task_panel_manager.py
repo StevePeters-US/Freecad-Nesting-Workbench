@@ -30,5 +30,5 @@ class NestingTaskPanel:
     def cleanup(self):
         """Resets the command's panel instance to allow it to be reopened."""
         # Import here to break the circular dependency
-        from Nesting.commands.command_nest import NestingCommand
+        from commands.command_nest import NestingCommand
         NestingCommand._task_panel = None

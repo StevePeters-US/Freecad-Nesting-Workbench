@@ -11,7 +11,7 @@ class NestingCommand:
     def GetResources(self):
         """Defines the command's appearance in FreeCAD."""
         return {
-            'Pixmap': 'Nesting/Resources/icons/Nesting_Run.svg',
+            'Pixmap': 'Nest_Icon.png',
             'MenuText': 'Run Nesting Tool',
             'ToolTip': 'Opens the 2D nesting task panel.'
         }
