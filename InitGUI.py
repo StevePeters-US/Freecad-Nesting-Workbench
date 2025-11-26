@@ -56,7 +56,6 @@ class NestingWorkbench(FreeCADGui.Workbench):
         from commands import command_nest
         from commands import command_stack_sheets
         from commands import command_transform_parts
-        from commands import command_anneal_layout
         from commands import command_export_sheets
         from commands import command_create_cam_job
         
@@ -64,7 +63,6 @@ class NestingWorkbench(FreeCADGui.Workbench):
             'Nesting_Run',
             'Nesting_StackSheets',
             'Nesting_TransformParts',
-            'Nesting_AnnealLayout',
             'Nesting_Export',
             'Nesting_CreateCAMJob'
         ])
