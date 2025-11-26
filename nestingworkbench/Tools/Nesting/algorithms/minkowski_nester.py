@@ -92,66 +92,100 @@ class MinkowskiNester(BaseNester):
             return part_to_place
         return None
 
-    def _process_nfp_for_part(self, placed_part, part_to_place, angle):
-        """Processes a single NFP calculation and translation. For parallel execution."""
-        placed_part_master_label = placed_part.shape.source_freecad_object.Label
-        part_to_place_master_label = part_to_place.source_freecad_object.Label
+    def _apply_nfp_to_part(self, placed_part, nfp_data):
+        """Applies rotation and translation to a cached NFP for a specific placed part."""
+        master_nfp = nfp_data["polygon"]
+        placed_part_centroid = placed_part.shape.centroid
+        xoff, yoff = placed_part_centroid.x, placed_part_centroid.y
         placed_part_angle = placed_part.angle
 
-        cache_key = (
-            placed_part_master_label,
-            placed_part_angle,
-            part_to_place_master_label,
-            angle,
-        )
-        nfp_data = Shape.nfp_cache.get(cache_key)
+        # 1. Rotate the NFP by the placed part's angle (since we computed it for A@0)
+        # We rotate around (0,0) because the NFP is centered relative to A's centroid at (0,0).
+        rotated_nfp = rotate(master_nfp, placed_part_angle, origin=(0, 0))
 
-        if nfp_data is None:
-            # Cache miss. Calculate the NFP now and store it.
-            nfp_data = self._calculate_and_cache_nfp(
-                placed_part.shape, # Pass the full Shape object
-                placed_part_angle,
-                part_to_place,
-                angle,
-                cache_key,
-            )
+        # 2. Translate to the placed part's position
+        translated_nfp = translate(rotated_nfp, xoff=xoff, yoff=yoff)
+        
+        # Handle points (rotate then translate)
+        def transform_point(p):
+            # Rotate
+            if placed_part_angle != 0:
+                rad = math.radians(placed_part_angle)
+                cos_a = math.cos(rad)
+                sin_a = math.sin(rad)
+                rx = p.x * cos_a - p.y * sin_a
+                ry = p.x * sin_a + p.y * cos_a
+                p = Point(rx, ry)
+            # Translate
+            return Point(p.x + xoff, p.y + yoff)
 
-        if nfp_data:
-            master_nfp = nfp_data["polygon"]
-            placed_part_centroid = placed_part.shape.centroid
-            xoff, yoff = placed_part_centroid.x, placed_part_centroid.y
+        translated_exterior_points = [transform_point(p) for p in nfp_data["exterior_points"]]
+        translated_interior_points = []
+        for interior_points in nfp_data["interior_points"]:
+            translated_interior_points.append([transform_point(p) for p in interior_points])
 
-            # The exterior represents the "no-go" zone around the placed part.
-            translated_exterior = translate(
-                Polygon(master_nfp.exterior), xoff=xoff, yoff=yoff
-            )
-            
-            translated_interiors = []
-            for i, interior in enumerate(master_nfp.interiors):
-                ifp = Polygon(interior)
-                translated_ifp = translate(ifp, xoff=xoff, yoff=yoff)
-                translated_interiors.append(translated_ifp)
-            
-            # Translate the cached points
-            translated_exterior_points = [Point(p.x + xoff, p.y + yoff) for p in nfp_data["exterior_points"]]
-            translated_interior_points = []
-            for interior_points in nfp_data["interior_points"]:
-                translated_interior_points.append([Point(p.x + xoff, p.y + yoff) for p in interior_points])
-
-            return {
-                "polygon": Polygon(
-                    translated_exterior.exterior, [p.exterior for p in translated_interiors]
-                ),
-                "exterior_points": translated_exterior_points,
-                "interior_points": translated_interior_points,
-            }
-        return None
+        return {
+            "polygon": translated_nfp,
+            "exterior_points": translated_exterior_points,
+            "interior_points": translated_interior_points,
+        }
 
     def _generate_nfps(self, part_to_place, sheet, angle):
-        """Generates the No-Fit Polygons for a given part and sheet."""
+        """Generates the No-Fit Polygons for a given part and sheet, grouping by unique configuration."""
+        # 1. Group parts by the cache key they would generate
+        parts_by_key = {}
+        part_to_place_master_label = part_to_place.source_freecad_object.Label
+        
+        for p in sheet.parts:
+            placed_part_master_label = p.shape.source_freecad_object.Label
+            placed_part_angle = p.angle
+            
+            # Normalize angles to relative rotation
+            relative_angle = (angle - placed_part_angle) % 360.0
+            relative_angle = round(relative_angle, 4)
+            
+            cache_key = (placed_part_master_label, part_to_place_master_label, relative_angle)
+            
+            if cache_key not in parts_by_key:
+                parts_by_key[cache_key] = []
+            parts_by_key[cache_key].append(p)
+
+        # 2. Ensure NFPs are calculated for all unique keys (in parallel)
+        unique_keys = list(parts_by_key.keys())
+        
+        def ensure_nfp(key):
+            # Check cache first (fast check)
+            if Shape.nfp_cache.get(key):
+                return
+            
+            # If not in cache, calculate it.
+            # We need actual shapes to calculate.
+            # We can grab the first part from the group to get the shape_A
+            first_part = parts_by_key[key][0]
+            
+            # We calculate for A@0 and B@relative
+            self._calculate_and_cache_nfp(
+                first_part.shape, 
+                0.0, 
+                part_to_place, 
+                key[2], # relative_angle
+                key
+            )
+
         with ThreadPoolExecutor() as executor:
-            futures = [executor.submit(self._process_nfp_for_part, p, part_to_place, angle) for p in sheet.parts]
-            return [future.result() for future in as_completed(futures) if future.result() is not None]
+            list(executor.map(ensure_nfp, unique_keys))
+
+        # 3. Now that cache is populated, generate the final translated NFPs for all parts
+        results = []
+        for key, parts in parts_by_key.items():
+            nfp_data = Shape.nfp_cache.get(key)
+            if not nfp_data: continue 
+            
+            for p in parts:
+                res = self._apply_nfp_to_part(p, nfp_data) 
+                if res: results.append(res)
+                
+        return results
 
     def _find_best_placement(
         self, part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts

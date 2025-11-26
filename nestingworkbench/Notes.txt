@@ -3,6 +3,8 @@ Notes for Nesting Workbench
 
 #TODO
 
+multiple nfps are being made for the same shapes
+
 Nesting tool should only work on one layout object.
 
 Place labels on upper bounds of shapes instead of at a fixed position. Leave the input
