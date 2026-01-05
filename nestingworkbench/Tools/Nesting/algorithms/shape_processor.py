@@ -171,5 +171,6 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     shape_to_populate.polygon = final_buffered_polygon
     shape_to_populate.original_polygon = final_buffered_polygon
     shape_to_populate.spacing = spacing
+    shape_to_populate.resolution = float(resolution)
     shape_to_populate.unbuffered_polygon = final_unbuffered_polygon
     shape_to_populate.source_centroid = source_centroid + offset_from_origin

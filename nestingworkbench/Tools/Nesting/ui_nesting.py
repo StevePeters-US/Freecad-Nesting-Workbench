@@ -84,6 +84,11 @@ class NestingPanel(QtGui.QWidget):
         minkowski_form_layout.addRow("Packing Direction:", minkowski_dial_layout)
         minkowski_form_layout.addRow(self.minkowski_random_checkbox)
         
+        self.clear_cache_checkbox = QtGui.QCheckBox("Clear NFP Cache")
+        self.clear_cache_checkbox.setChecked(False)
+        self.clear_cache_checkbox.setToolTip("Forces recalculation of No-Fit Polygons. Slower, but resolves potential caching issues.")
+        minkowski_form_layout.addRow(self.clear_cache_checkbox)
+        
         # Genetic options for Minkowski
         self.minkowski_population_size_input = QtGui.QSpinBox()
         self.minkowski_population_size_input.setRange(5, 500)

@@ -100,52 +100,55 @@ class MinkowskiEngine:
 
         return valid_hole_candidates, valid_external_candidates
 
-    def generate_nfps(self, part_to_place, sheet, angle):
-        """Generates the No-Fit Polygons for a given part and sheet."""
-        # 1. Group parts by the cache key
-        parts_by_key = {}
-        part_to_place_master_label = part_to_place.source_freecad_object.Label
+    def generate_nfps(self, part_to_place, placed_parts_grouped, angle):
+        """
+        Generates the No-Fit Polygons for a given part and existing placed parts.
         
-        for p in sheet.parts:
-            placed_part_master_label = p.shape.source_freecad_object.Label
-            placed_part_angle = p.angle
+        Args:
+            part_to_place: The Shape object being placed.
+            placed_parts_grouped: A dict mapping (master_label, placed_angle) -> list of PlacedPart objects.
+            angle: The current rotation angle of part_to_place.
+        """
+        results = []
+        part_to_place_master_label = part_to_place.source_freecad_object.Label
+
+        # Iterate over uniqueness of placed parts instead of every instance
+        for (placed_label, placed_angle), parts in placed_parts_grouped.items():
             
             # Normalize angles to relative rotation
-            relative_angle = (angle - placed_part_angle) % 360.0
+            relative_angle = (angle - placed_angle) % 360.0
             relative_angle = round(relative_angle, 4)
             
-            cache_key = (placed_part_master_label, part_to_place_master_label, relative_angle)
-            
-            if cache_key not in parts_by_key:
-                parts_by_key[cache_key] = []
-            parts_by_key[cache_key].append(p)
-
-        # 2. Ensure NFPs are calculated for all unique keys (in parallel)
-        unique_keys = list(parts_by_key.keys())
-        
-        def ensure_nfp(key):
-            if Shape.nfp_cache.get(key):
-                return
-            
-            first_part = parts_by_key[key][0]
-            
-            self._calculate_and_cache_nfp(
-                first_part.shape, 
-                0.0, 
-                part_to_place, 
-                key[2], # relative_angle
-                key
+            # Key includes spacing and resolution to ensure complete uniqueness of geometry
+            cache_key = (
+                placed_label, 
+                part_to_place_master_label, 
+                relative_angle, 
+                part_to_place.spacing,
+                part_to_place.resolution
             )
-
-        with ThreadPoolExecutor() as executor:
-            list(executor.map(ensure_nfp, unique_keys))
-
-        # 3. Generate final translated NFPs
-        results = []
-        for key, parts in parts_by_key.items():
-            nfp_data = Shape.nfp_cache.get(key)
-            if not nfp_data: continue 
             
+            # 1. Retrieve or Calculate NFP
+            nfp_data = Shape.nfp_cache.get(cache_key)
+            if not nfp_data:
+                # Calculate synchronously to avoid nested thread pool overhead
+                # The outer loop in Nester is already parallelized
+                # self.log(f"DEBUG: NFP cache MISS for {cache_key}")
+                first_part = parts[0]
+                nfp_data = self._calculate_and_cache_nfp(
+                    first_part.shape, 
+                    0.0, 
+                    part_to_place, 
+                    relative_angle, 
+                    cache_key
+                )
+            # else:
+                # self.log(f"DEBUG: NFP cache HIT for {cache_key}")
+            
+            if not nfp_data:
+                continue
+
+            # 2. Apply NFP to all instances in this group
             for p in parts:
                 res = self._apply_nfp_to_part(p, nfp_data) 
                 if res: results.append(res)

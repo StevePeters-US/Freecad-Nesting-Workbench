@@ -55,9 +55,20 @@ class NestingController:
         if hasattr(self.ui, 'font_label'):
             self.ui.font_label.setText(os.path.basename(default_font))
 
+        # Persistent cache for processed shape geometry across runs.
+        # Format: { (object_name, spacing, boundary_resolution) : ShapeObject }
+        self.processed_shape_cache = {}
+
     def execute_nesting(self):
         """Main method to run the entire nesting process."""
         FreeCAD.Console.PrintMessage("\n--- NESTING START ---\n")
+        
+        # Conditionally clear the NFP cache
+        if hasattr(self.ui, 'clear_cache_checkbox') and self.ui.clear_cache_checkbox.isChecked():
+            FreeCAD.Console.PrintMessage("Clearing NFP and Geometry caches...\n")
+            Shape.nfp_cache.clear()
+            self.processed_shape_cache.clear()
+        
         start_time = time.time()
         if not self.doc:
             return
@@ -349,9 +360,23 @@ class NestingController:
         # --- Step 1: Create the FreeCAD "master" objects for each unique part. ---
         for label, master_obj in master_shapes_from_ui.items():
             try:
-                # Create a temporary in-memory shape to process geometry.
-                # Check if we are reloading a layout. If so, master_obj is already a master shape object.
+                # Cache Key: (Object Name, Spacing, Resolution)
+                # We use Name because it is unique and persistent.
+                cache_key = (master_obj.Name, spacing, boundary_resolution)
+                
+                # Check if we represent a reloading state
                 is_reloading = master_obj.Label.startswith("master_shape_")
+                
+                temp_shape_wrapper = None
+                
+                # Check Cache
+                if cache_key in self.processed_shape_cache:
+                    FreeCAD.Console.PrintMessage(f"DEBUG: Geometry cache HIT for '{label}'\n")
+                    temp_shape_wrapper = copy.deepcopy(self.processed_shape_cache[cache_key])
+                    # Update the source object reference to the current live object
+                    temp_shape_wrapper.source_freecad_object = master_obj
+                else:
+                    FreeCAD.Console.PrintMessage(f"DEBUG: Geometry cache MISS for '{label}'\n")
                 
                 if is_reloading:
                     # We are reloading. The master_obj is the ShapeObject. Its container is the master_container.
@@ -359,23 +384,25 @@ class NestingController:
                     master_container = master_shape_obj.InList[0]
                     
                     # Update quantity on existing container
-                    quantity, _ = quantities.get(label.replace("master_shape_", ""), (1, 1)) # Label in quantities dict doesn't have prefix here? 
-                    # Actually quantities dict relies on shape table labels. 
-                    # When reloading, shape_table has cleaned labels ("Box" not "master_shape_Box").
-                    # master_obj.Label is "master_shape_Box".
+                    quantity, _ = quantities.get(label.replace("master_shape_", ""), (1, 1))
                     
                     if hasattr(master_container, "Quantity"):
                         master_container.Quantity = quantity
                     else:
                         master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
 
-                    # We still need a temp wrapper for sorting and placement logic.
-                    temp_shape_wrapper = Shape(master_shape_obj)
-                    shape_processor.create_single_nesting_part(temp_shape_wrapper, master_shape_obj, spacing, boundary_resolution)
+                    # If not in cache, process now
+                    if not temp_shape_wrapper:
+                        temp_shape_wrapper = Shape(master_shape_obj)
+                        shape_processor.create_single_nesting_part(temp_shape_wrapper, master_shape_obj, spacing, boundary_resolution)
+                        self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
+                        
                 else:
                     # This is a fresh run. Create new master objects.
-                    temp_shape_wrapper = Shape(master_obj)
-                    shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution)
+                    if not temp_shape_wrapper:
+                        temp_shape_wrapper = Shape(master_obj)
+                        shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution)
+                        self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
                     master_container = self.doc.addObject("App::Part", f"master_{label}")
                     

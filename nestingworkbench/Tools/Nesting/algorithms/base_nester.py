@@ -3,6 +3,7 @@ import math
 import random
 import copy
 from datetime import datetime
+from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
@@ -179,6 +180,13 @@ class Nester:
         if part.original_polygon is None and part.polygon is not None:
             part.original_polygon = part.polygon
             
+        # Pre-group placed parts by (master_label, angle) to avoid repeated work in inner loops
+        # This allows generate_nfps to iterate over unique configurations rather than every part instance.
+        placed_parts_grouped = defaultdict(list)
+        for p in sheet.parts:
+            key = (p.shape.source_freecad_object.Label, p.angle)
+            placed_parts_grouped[key].append(p)
+            
         direction = self.search_direction
         if direction is None:
              angle_rad = random.uniform(0, 2 * math.pi)
@@ -188,7 +196,7 @@ class Nester:
         
         with ThreadPoolExecutor() as executor:
             angles = [i * (360.0 / self.rotation_steps) for i in range(self.rotation_steps)]
-            futures = {executor.submit(self._evaluate_rotation, angle, part, sheet, union_others, direction): angle for angle in angles}
+            futures = {executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, union_others, direction): angle for angle in angles}
             
             for future in as_completed(futures):
                 res = future.result()
@@ -202,10 +210,11 @@ class Nester:
              return part
         return None
 
-    def _evaluate_rotation(self, angle, part, sheet, union_others, direction):
+    def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, union_others, direction):
         """Evaluates one rotation."""
         # 1. Get NFPs from Engine
-        nfps = self.engine.generate_nfps(part, sheet, angle)
+        # We pass the pre-grouped parts to avoid redundant iteration in every thread
+        nfps = self.engine.generate_nfps(part, placed_parts_grouped, angle)
         
         # 2. Get Candidates from Engine
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')

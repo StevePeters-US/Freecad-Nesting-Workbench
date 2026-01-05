@@ -41,7 +41,9 @@ class Shape:
         # --- Metadata ---
         self.label_text = None # Will hold the text for the Draft.ShapeString object
         self.rotation_steps = 1 # The definitive number of rotation steps for this part.
+        self.rotation_steps = 1 # The definitive number of rotation steps for this part.
         self.spacing = 0 # The spacing used for the nesting operation.
+        self.resolution = 0 # The boundary resolution used.
         
         # --- State during/after nesting ---
         self.fc_object = None # Link to the physical FreeCAD object in the 'PartsToPlace' group
