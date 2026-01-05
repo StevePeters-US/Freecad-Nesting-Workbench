@@ -251,6 +251,8 @@ class Sheet:
                             parts_to_place_group.removeObject(shape_obj)
                         except Exception:
                             pass
+                            
+                    FreeCAD.Console.PrintMessage(f"DEBUG_SHEET: Part '{shape.id}': Source Centroid={shape.source_centroid}, Final Placement={final_placement}\n")
 
                     # Apply the final nesting placement to the CONTAINER.
                     container.Placement = final_placement
