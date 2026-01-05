@@ -185,6 +185,7 @@ class NestingJob:
 
     def _recursive_delete(self, obj):
         try:
+            if self.target_layout and obj.Name == self.target_layout.Name: return
             _ = obj.Name # Check validity
         except: return
         
@@ -302,13 +303,29 @@ class NestingController:
     def cancel_job(self):
         """Called when User clicks Cancel."""
         if self.current_job:
+            # Capture target and ensure it's not deleted during cleanup
+            target = self.current_job.target_layout
+            
+            # Run cleanup
             self.current_job.cleanup()
+            
             # Restore visibility of original target
-            if self.current_job.target_layout and hasattr(self.current_job.target_layout, "ViewObject"):
-                self.current_job.target_layout.ViewObject.Visibility = True
+            if target:
+                try: 
+                    # Force visibility on target
+                    if hasattr(target, "ViewObject"):
+                        target.ViewObject.Visibility = True
+                    
+                    # Force visibility on Sheets
+                    if hasattr(target, "Group"):
+                        for child in target.Group:
+                            if child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
+                                child.ViewObject.Visibility = True
+                except: pass
             
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Cancelled.\n")
+            self.doc.recompute()
 
     def toggle_bounds_visibility(self):
         is_visible = self.ui.show_bounds_checkbox.isChecked()

@@ -221,6 +221,10 @@ class Sheet:
                     container = doc.addObject("App::Part", f"nested_{shape.id}")
                     container.Label = f"nested_{shape.id}" # Ensure label matches intended ID
                     
+                    # Add ShowBounds property
+                    container.addProperty("App::PropertyBool", "ShowBounds", "Nesting", "Show the boundary check logic used")
+                    container.ShowBounds = ui_params.get('show_bounds', False)
+
                     shapes_group.addObject(container)
 
                     # Place the boundary object at the container's origin. It is the reference.
@@ -228,6 +232,9 @@ class Sheet:
                     if boundary_obj:
                         boundary_obj.Placement = FreeCAD.Placement()
                         container.addObject(boundary_obj)
+                        
+                        if hasattr(boundary_obj, "ViewObject"):
+                             boundary_obj.ViewObject.Visibility = container.ShowBounds
 
                     # Place the shape object inside the container, offsetting it by -source_centroid
                     # to align it with the boundary object.
@@ -262,11 +269,10 @@ class Sheet:
                     # --- Handle the label object AFTER the container is placed ---
                     if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
                         label_name = f"label_{shape.id}"
-                        label_obj = doc.getObject(label_name)
-                        if label_obj:
-                            doc.removeObject(label_name)
-                            
+                        # Allow FreeCAD to auto-rename if collision exists (e.g. label_Part001)
+                        # Do NOT delete existing objects by name as they might belong to other layouts.
                         label_obj = create_label_object(label_name)
+                        
                         shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('spacing', 0) * 0.6)
                         label_obj.Shape = shapestring_geom.Shape
                         doc.removeObject(shapestring_geom.Name)
