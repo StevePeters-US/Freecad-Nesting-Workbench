@@ -95,6 +95,9 @@ class NestingController:
         QtGui.QApplication.processEvents()
 
         # --- Create or Retrieve the LayoutObject ---
+        FreeCAD.Console.PrintMessage(f"   [TIMING] Prep & UI: {time.time() - start_time:.4f}s\n")
+        step_start_time = time.time()
+        
         FreeCAD.Console.PrintMessage("1. Creating/Updating LayoutObject...\n")
         
         # 0. Check if UI already has a tracked layout (e.g. from previous run)
@@ -163,6 +166,9 @@ class NestingController:
             self.ui.boundary_resolution_input.value(),
             layout_obj # Pass the layout group to add master shapes to.
         )
+        
+        FreeCAD.Console.PrintMessage(f"   [TIMING] Shape Processing: {time.time() - step_start_time:.4f}s\n")
+        step_start_time = time.time()
 
         if not parts_to_nest:
             self.ui.status_label.setText("Error: No valid parts to nest.")
@@ -211,6 +217,8 @@ class NestingController:
                 global_rotation_steps, is_simulating,
                 **algo_kwargs
             )
+            FreeCAD.Console.PrintMessage(f"   [TIMING] Nesting Algorithm: {time.time() - step_start_time:.4f}s\n")
+            step_start_time = time.time()
 
             # If not simulating, the `sheets` object contains deep copies of the parts.
             # We must replace these copies with the original parts that are linked to the
@@ -242,6 +250,8 @@ class NestingController:
                 self.last_run_ui_params,
                 layout_obj # The parent group is the layout object itself
             )
+            
+        FreeCAD.Console.PrintMessage(f"   [TIMING] Drawing Sheets: {time.time() - step_start_time:.4f}s\n")
         
         # --- Cleanup Excess Sheets ---
         # If the previous run had more sheets (e.g. 5) than this run (e.g. 3),
@@ -371,12 +381,13 @@ class NestingController:
                 
                 # Check Cache
                 if cache_key in self.processed_shape_cache:
-                    FreeCAD.Console.PrintMessage(f"DEBUG: Geometry cache HIT for '{label}'\n")
+                    # FreeCAD.Console.PrintMessage(f"DEBUG: Geometry cache HIT for '{label}'\n")
                     temp_shape_wrapper = copy.deepcopy(self.processed_shape_cache[cache_key])
                     # Update the source object reference to the current live object
                     temp_shape_wrapper.source_freecad_object = master_obj
                 else:
-                    FreeCAD.Console.PrintMessage(f"DEBUG: Geometry cache MISS for '{label}'\n")
+                    # FreeCAD.Console.PrintMessage(f"DEBUG: Geometry cache MISS for '{label}'\n")
+                    pass
                 
                 if is_reloading:
                     # We are reloading. The master_obj is the ShapeObject. Its container is the master_container.

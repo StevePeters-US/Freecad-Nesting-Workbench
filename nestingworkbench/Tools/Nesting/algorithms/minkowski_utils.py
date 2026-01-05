@@ -91,7 +91,8 @@ def minkowski_difference(master_poly1, angle1, master_poly2, angle2, logger):
     # Transform both polygons around their centroids
     poly1_transformed = rotate(master_poly1, angle1, origin='centroid')
     poly2_convex_parts = decompose_if_needed(master_poly2, logger)
-    poly2_convex_transformed = [rotate(p, angle2, origin='centroid') for p in poly2_convex_parts]
+    poly2_centroid = master_poly2.centroid
+    poly2_convex_transformed = [rotate(p, angle2, origin=poly2_centroid) for p in poly2_convex_parts]
     
     # Translate both polygons so poly2's centroid is at the origin
     # This makes the Minkowski difference compute placement zones relative to poly2's centroid
@@ -134,18 +135,24 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
     poly2_convex_parts = decompose_if_needed(master_poly2, logger)
 
     # --- Transform Convex Parts ---
+    # --- Transform Convex Parts ---
+    c1 = master_poly1.centroid
+    c2 = master_poly2.centroid
+
     poly1_convex_transformed = []
     for p in poly1_convex_parts:
-        rot_origin = rot_origin1 if rot_origin1 is not None else 'centroid'
-        p_new = rotate(p, angle1, origin=rot_origin)
+        # Use master centroid for rotation to preserve relative positions of parts
+        use_origin = c1 if (rot_origin1 is None or rot_origin1 == 'centroid') else rot_origin1
+        p_new = rotate(p, angle1, origin=use_origin)
         if reflect1:
             p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
         poly1_convex_transformed.append(p_new)
 
     poly2_convex_transformed = []
     for p in poly2_convex_parts:
-        rot_origin = rot_origin2 if rot_origin2 is not None else 'centroid'
-        p_new = rotate(p, angle2, origin=rot_origin)
+        # Use master centroid for rotation to preserve relative positions of parts
+        use_origin = c2 if (rot_origin2 is None or rot_origin2 == 'centroid') else rot_origin2
+        p_new = rotate(p, angle2, origin=use_origin)
         if reflect2:
             p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
         poly2_convex_transformed.append(p_new)

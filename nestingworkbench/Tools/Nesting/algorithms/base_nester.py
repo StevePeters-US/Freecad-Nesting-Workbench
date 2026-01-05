@@ -78,15 +78,24 @@ class Nester:
             
         unplaced_parts = []
         
+        total_parts = len(self.parts_to_place)
         # Main Loop
-        while self.parts_to_place:
-            part = self.parts_to_place.pop(0)
+        for i, part in enumerate(self.parts_to_place):
+            self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
+            start_part_time = datetime.now()
             placed = False
             
             # 1. Try existing sheets
-            for sheet in self.sheets:
+            for sheet_idx, sheet in enumerate(self.sheets):
+                # Optimization: Skip sheets that definitely don't have enough area
+                sheet_area = sheet.width * sheet.height
+                if (sheet_area - sheet.used_area) < part.area:
+                    # self.log(f"  -> Skipping Sheet {sheet_idx+1} (Not enough area)")
+                    continue
+
                 if self._attempt_placement_on_sheet(part, sheet):
                     placed = True
+                    self.log(f"  -> Placed on Sheet {sheet_idx+1} in {(datetime.now() - start_part_time).total_seconds():.4f}s")
                     break
             
             # 2. Try new sheet
@@ -95,8 +104,10 @@ class Nester:
                 if self._attempt_placement_on_sheet(part, new_sheet):
                     self.sheets.append(new_sheet)
                     placed = True
+                    self.log(f"  -> Placed on New Sheet {len(self.sheets)} in {(datetime.now() - start_part_time).total_seconds():.4f}s")
                 else:
                     unplaced_parts.append(part)
+                    self.log(f"  -> FAILED to place in {(datetime.now() - start_part_time).total_seconds():.4f}s")
         
         return self.sheets, unplaced_parts
 
@@ -163,9 +174,18 @@ class Nester:
         """Tries to place a part on a sheet. Returns True if successful."""
         # Calculate union of existing parts for collision checking
         other_polys = [p.shape.polygon for p in sheet.parts if p.shape.polygon]
-        union_others = unary_union(other_polys) if other_polys else None
         
+        t0 = datetime.now()
+        union_others = unary_union(other_polys) if other_polys else None
+        dt_union = (datetime.now() - t0).total_seconds()
+        
+        t1 = datetime.now()
         placed_part = self._try_place_part_on_sheet_logic(part, sheet, union_others)
+        dt_logic = (datetime.now() - t1).total_seconds()
+        
+        if dt_union > 0.05 or dt_logic > 0.05:
+            # Only log if it's taking noticeable time, to avoid clutter
+            self.log(f"    [Sheet Logic] Union: {dt_union:.4f}s | Search: {dt_logic:.4f}s")
         
         if placed_part:
             # Double check validity with engine
@@ -212,10 +232,20 @@ class Nester:
 
     def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, union_others, direction):
         """Evaluates one rotation."""
+        self.log(f"DEBUG: Checking Angle {angle} for {part.id}")
         # 1. Get NFPs from Engine
         # We pass the pre-grouped parts to avoid redundant iteration in every thread
         nfps = self.engine.generate_nfps(part, placed_parts_grouped, angle)
         
+        # Optimization: Use NFP polygons directly for collision checking instead of validating against a Union
+        nfp_polygons = [res['polygon'] for res in nfps]
+        bin_polygon = Polygon([(0, 0), (self.bin_width, 0), (self.bin_width, self.bin_height), (0, self.bin_height)])
+        
+        # Merge all NFPs into one geometry. This front-loads the cost (once per rotation)
+        # but makes the candidate checks (many per rotation) significantly faster.
+        # We handle the empty case for the first part.
+        merged_nfp = unary_union(nfp_polygons) if nfp_polygons else None
+
         # 2. Get Candidates from Engine
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
         hole_cands, ext_cands = self.engine.get_candidate_positions(nfps, rotated_poly)
@@ -231,10 +261,17 @@ class Nester:
         # Check holes
         for pt in hole_cands:
             dx, dy = pt.x - centroid.x, pt.y - centroid.y
-            test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
+            # A. Check against NFPs (Fast Point-in-Union Check)
+            if merged_nfp and merged_nfp.contains(pt):
+                continue
 
+            # B. Check against Sheet Bounds
+            test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
+            if not bin_polygon.contains(test_poly):
+                continue
             
-            if self.engine.is_placement_valid_with_holes(test_poly, sheet, union_others):
+            # If we passed both, it is valid
+            if True:
                 metric = pt.x * (-dir_x) + pt.y * (-dir_y)
                 if metric < best['metric']:
                     best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': metric}
@@ -249,12 +286,21 @@ class Nester:
             metric = pt.x * (-dir_x) + pt.y * (-dir_y)
             if metric >= best['metric']: continue
             
+            # A. Check against NFPs (Fast Point-in-Union Check)
+            if merged_nfp and merged_nfp.contains(pt):
+                continue
+
             dx, dy = pt.x - centroid.x, pt.y - centroid.y
             test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
             
-            if self.engine.is_placement_valid_with_holes(test_poly, sheet, union_others):
-                if metric < best['metric']:
-                    best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': metric}
-                return best # Found best sorted
+            # B. Check against Sheet Bounds
+            if not bin_polygon.contains(test_poly):
+                continue
+
+            # If valid:
+            best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': metric}
+            return best # Found best sorted (greedy)
+        
+        return best
         
         return best

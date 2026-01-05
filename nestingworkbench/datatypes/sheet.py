@@ -32,6 +32,7 @@ class Sheet:
         self.id = sheet_id
         self.width = width
         self.height = height
+        self.used_area = 0.0 # Track area usage for fast filtering
         self.parts = [] # List of PlacedPart objects
         self.spacing = spacing
         self.parent_group_name = None # Will store the name of the top-level layout group
@@ -50,6 +51,7 @@ class Sheet:
     def add_part(self, placed_part):
         """Adds a part to the sheet."""
         self.parts.append(placed_part)
+        self.used_area += placed_part.shape.area
 
     def get_origin(self):
         """
@@ -291,9 +293,16 @@ class Sheet:
                         # shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), ...)
                         # So the target visual center for the label is simply (0,0, Z_height)
                         
+                        # Apply inverse rotation to keep text horizontal
+                        part_rotation = final_placement.Rotation
+                        inverse_rotation = part_rotation.inverted()
+
+                        # To center the text correctly, we must rotate the local center offset
                         target_label_center = FreeCAD.Vector(0, 0, ui_params.get('label_height', 0.1))
-                        label_placement_base = target_label_center - shapestring_center
-                        label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
+                        shapestring_center_rotated = inverse_rotation.multVec(shapestring_center)
+                        label_placement_base = target_label_center - shapestring_center_rotated
+                        
+                        label_obj.Placement = FreeCAD.Placement(label_placement_base, inverse_rotation)
                         
                         shape_obj.LabelObject = label_obj
 

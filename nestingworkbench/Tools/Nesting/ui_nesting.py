@@ -51,6 +51,7 @@ class NestingPanel(QtGui.QWidget):
         self.rotation_steps_spinbox.setRange(1, 360) # Minimum 1 rotation step
         self.rotation_steps_spinbox.setValue(1)     # Default to 1 rotation step
         self.rotation_steps_spinbox.valueChanged.connect(self.rotation_steps_slider.setValue)
+        self.rotation_steps_slider.valueChanged.connect(self.rotation_steps_spinbox.setValue)
 
 
         # --- Minkowski Packer Settings ---

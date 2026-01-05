@@ -135,7 +135,7 @@ class MinkowskiEngine:
             # 1. Retrieve or Calculate NFP
             nfp_data = Shape.nfp_cache.get(cache_key)
             if not nfp_data:
-                self.log(f"DEBUG: NFP cache MISS for {cache_key}")
+                # self.log(f"DEBUG: NFP cache MISS for {cache_key}")
                 # Calculate synchronously to avoid nested thread pool overhead
                 # The outer loop in Nester is already parallelized
                 first_part = parts[0]
@@ -146,8 +146,8 @@ class MinkowskiEngine:
                     relative_angle, 
                     cache_key
                 )
-            else:
-                self.log(f"DEBUG: NFP cache HIT for {cache_key}")
+            # else:
+            #     self.log(f"DEBUG: NFP cache HIT for {cache_key}")
             
             if not nfp_data:
                 continue
