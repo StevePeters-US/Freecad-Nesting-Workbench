@@ -18,7 +18,7 @@ class ShapePreparer:
         self.doc = doc
         self.processed_shape_cache = processed_shape_cache
 
-    def prepare_parts(self, ui_global_settings, quantities, master_shapes_map, layout_obj):
+    def prepare_parts(self, ui_global_settings, quantities, master_shapes_map, layout_obj, parts_group):
         """
         Main entry point to prepare parts.
         
@@ -27,6 +27,7 @@ class ShapePreparer:
             quantities (dict): { label: (quantity, rotation_steps) }
             master_shapes_map (dict): { label: FreeCADObject }
             layout_obj (App::DocumentObjectGroup): The layout group.
+            parts_group (App::DocumentObjectGroup): The PartsToPlace group to add temp instances to.
         
         Returns:
             list[Shape]: List of prepared Shape objects for the nester.
@@ -88,7 +89,8 @@ class ShapePreparer:
             quantities, 
             master_shape_obj_map, 
             master_geometry_cache, 
-            ui_global_settings
+            ui_global_settings,
+            parts_group
         )
         
         return parts_to_nest
@@ -175,7 +177,8 @@ class ShapePreparer:
                          temp_shape_wrapper.polygon = final_poly
                          temp_shape_wrapper.source_centroid = temp_master_obj.Placement.Base.negative()
                          
-                         FreeCAD.Console.PrintMessage(f"SHAPE_PROC: Reusing cached geometry for '{label}'\n")
+                         # FreeCAD.Console.PrintMessage(f"SHAPE_PROC: Reusing cached geometry for '{label}'\n")
+
                          self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
              except Exception as e:
                  FreeCAD.Console.PrintWarning(f"Failed to reuse Master Geometry: {e}. Recalculating...\n")
@@ -254,9 +257,9 @@ class ShapePreparer:
             container.Placement = FreeCAD.Placement(FreeCAD.Vector(current_x, y_offset, 0), FreeCAD.Rotation())
             current_x += container.Shape.BoundBox.XLength + spacing * 2
 
-    def _create_nesting_instances(self, master_shapes_map, quantities, master_shape_obj_map, master_geometry_cache, ui_settings):
+    def _create_nesting_instances(self, master_shapes_map, quantities, master_shape_obj_map, master_geometry_cache, ui_settings, parts_group):
         parts_to_nest = []
-        parts_to_place_group = self.doc.getObject("PartsToPlace")
+        parts_to_place_group = parts_group
         
         add_labels = ui_settings['add_labels']
         font_path = ui_settings['font_path']

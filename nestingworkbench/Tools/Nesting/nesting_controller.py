@@ -1,367 +1,456 @@
-# Nesting/nesting/nesting_controller.py
-
-"""
-This module contains the NestingController, which is the "brain" of the 
-nesting operation. It reads the UI, runs the algorithm, and draws the result.
-"""
 
 import FreeCAD
 import FreeCADGui
 import Part
-import copy
-import math
 import os
 import time
-
-# Import QtGui for UI event processing
+import math
 from PySide import QtGui
-
-# Import other necessary modules from the workbench
 from ...datatypes.shape import Shape
 from .shape_preparer import ShapePreparer
 
 try:
     from .nesting_logic import nest, NestingDependencyError
-    import Draft
 except ImportError:
-    Draft = None
+    pass
 
-try:
-    from shapely.affinity import translate
-except ImportError:
-    translate = None
+class NestingJob:
+    """
+    Encapsulates a single run of the nesting algorithm.
+    Manages the temporary layout and its lifecycle (create, commit, abort).
+    """
+    def __init__(self, doc, ui_params, target_layout=None):
+        self.doc = doc
+        self.params = ui_params
+        self.target_layout = target_layout # Can be None (New Layout)
+        self.temp_layout = None
+        self.sheets = []
+        self.unplaced_parts = []
+        
+        self._init_temp_layout()
+
+    def _init_temp_layout(self):
+        self.temp_layout = self.doc.addObject("App::DocumentObjectGroup", "Layout_temp")
+        if hasattr(self.temp_layout, "ViewObject"):
+            self.temp_layout.ViewObject.Visibility = True
+        
+        FreeCAD.Console.PrintMessage(f"DEBUG: Created temp layout {self.temp_layout.Name}\n")
+        self._debug_print_tree("After Init Temp Layout")
+            
+        # Write params to temp layout essentially "staging" the commit
+        self._apply_properties(self.temp_layout)
+
+    def _debug_print_tree(self, phase):
+        FreeCAD.Console.PrintMessage(f"DEBUG_TREE [{phase}]:\n")
+        if not self.doc: return
+        for obj in self.doc.Objects:
+             FreeCAD.Console.PrintMessage(f"  - {obj.Name} ({obj.Label})\n")
+        FreeCAD.Console.PrintMessage("\n")
+
+    def _apply_properties(self, layout_obj):
+        p = self.params
+        self._set_prop(layout_obj, "App::PropertyLength", "SheetWidth", p['sheet_width'])
+        self._set_prop(layout_obj, "App::PropertyLength", "SheetHeight", p['sheet_height'])
+        self._set_prop(layout_obj, "App::PropertyLength", "PartSpacing", p['spacing'])
+        self._set_prop(layout_obj, "App::PropertyFloat", "BoundaryResolution", p['boundary_resolution'])
+        self._set_prop(layout_obj, "App::PropertyFile", "FontFile", p['font_path'])
+        self._set_prop(layout_obj, "App::PropertyBool", "ShowBounds", p['show_bounds'])
+        self._set_prop(layout_obj, "App::PropertyBool", "AddLabels", p['add_labels'])
+        self._set_prop(layout_obj, "App::PropertyLength", "LabelHeight", p['label_height'])
+        self._set_prop(layout_obj, "App::PropertyInteger", "GlobalRotationSteps", p['rotation_steps'])
+        self._set_prop(layout_obj, "App::PropertyBool", "IsStacked", False)
+
+    def _set_prop(self, obj, type_str, name, val):
+        if not hasattr(obj, name):
+            obj.addProperty(type_str, name, "Layout", "")
+        setattr(obj, name, val)
+
+    def cleanup(self):
+        """Aborts the job and deletes the temporary layout."""
+        FreeCAD.Console.PrintMessage("DEBUG: Starting Cleanup...\n")
+        if not self.temp_layout: return
+        
+        # Recursive delete of temp layout contents
+        self._recursive_delete(self.temp_layout)
+        self.temp_layout = None
+        
+        # Safety cleanup of any stragglers
+        # Collect names first to avoid iterating over a modifying list or accessing dead wrappers
+        candidate_names = []
+        for obj in self.doc.Objects:
+            try:
+                if obj.Label.startswith("Layout_temp") or obj.Label.startswith("PartsToPlace"): # Check partial match for PartsToPlace too (e.g. PartsToPlace001)
+                     candidate_names.append(obj.Name)
+            except (ReferenceError, Exception):
+                pass
+                
+        for name in candidate_names:
+            obj = self.doc.getObject(name)
+            if obj:
+                 self._recursive_delete(obj)
+        
+        self._debug_print_tree("After Cleanup")
+
+    def commit(self):
+        """Moves results from temp to target (or finalizes temp as new)."""
+        if not self.temp_layout: return None
+        
+        final_layout = self.target_layout
+        
+        # With _determine_target_layout ensuring a layout, this should always be true.
+        # Added a fallback for robustness.
+        if not final_layout:
+            FreeCAD.Console.PrintError("Error: No target layout found during commit. Creating fallback.\n")
+            final_layout = self.doc.addObject("App::DocumentObjectGroup", "Layout_Fallback")
+            final_layout.Label = "Layout_Fallback" # Ensure it has a label
+        
+        FreeCAD.Console.PrintMessage(f"DEBUG: Updating existing layout: {final_layout.Label} ({final_layout.Name})\n")
+        # Updating existing
+        self._merge_into_target(final_layout)
+        self.cleanup() # Delete the now-empty temp shell
+            
+        if hasattr(final_layout, "ViewObject"):
+            final_layout.ViewObject.Visibility = True
+            
+        # Ensure MasterShapes derived property is hidden
+        for child in final_layout.Group:
+            if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
+                 child.ViewObject.Visibility = False
+                 
+        self._debug_print_tree("After Commit")
+        return final_layout
+
+    def _merge_into_target(self, target):
+        temp = self.temp_layout
+        
+        # 1. Check for new masters
+        temp_masters = next((c for c in temp.Group if c.Label.startswith("MasterShapes")), None)
+        has_new_masters = temp_masters and len(temp_masters.Group) > 0
+        
+        # 2. Identify removals
+        to_remove = []
+        to_keep = []
+        
+        for child in target.Group:
+            if child.Label.startswith("Sheet_") or child.Label.startswith("PartsToPlace"):
+                to_remove.append(child)
+            elif child.Label.startswith("MasterShapes"):
+                if has_new_masters:
+                    to_remove.append(child)
+                else:
+                    to_keep.append(child)
+            else:
+                to_keep.append(child)
+                
+        # 3. Execute removals
+        for child in to_remove:
+            # Crucial: If deleting a PartsToPlace bin from the TARGET, we must empty it first 
+            # if it happens to contain anything we want to keep (though ideally it shouldn't).
+            # But more importantly, if we delete a container, its children might be deleted if they have no other owners.
+            # The placed parts (in Sheets) reference these objects.
+            # Wait, PartsToPlace in TARGET contains *copies* from previous run? No, they were moved to Sheets?
+            # Actually, standard FreeCAD behavior: if object A is in Group B, and A is also linked by C.
+            # Deleting B does NOT delete A.
+            # BUT, if A was created inside B using addObject, and never moved?
+            # In our logic, placed parts are in Sheets. Sheets are in Target.
+            # If PartsToPlace is ALSO in Target, it's just an empty group usually.
+            # However, to be SAFE and avoid "Scope" errors:
+            if child.Label.startswith("PartsToPlace"):
+                child.Group = []
+            
+            self._recursive_delete(child)
+            
+        # 4. Move children
+        to_move = []
+        for child in list(temp.Group):
+            # If we are keeping old masters, don't move the empty/temp master group
+            if child.Label.startswith("MasterShapes") and not has_new_masters:
+                # Just delete the temp master group container
+                try: self.doc.removeObject(child.Name)
+                except: pass
+                continue
+                
+            if child.Label.startswith("MasterShapes"):
+                child.Label = "MasterShapes"
+                # Sanitize inner labels
+                for m in child.Group:
+                     if m.Label.startswith("temp_master_"):
+                         m.Label = m.Label.replace("temp_master_", "master_")
+            
+            to_move.append(child)
+            
+        # 5. Commit Group
+        temp.Group = [] # Detach from temp
+        target.Group = to_keep + to_move
+        
+        # 6. Update Properties
+        self._apply_properties(target)
+
+    def _recursive_delete(self, obj):
+         # Robustness check: Ensure object is still valid before access
+         try:
+             _ = obj.Name
+         except (ReferenceError, Exception):
+             return
+
+         if hasattr(obj, "Group"):
+             children = []
+             try: children = list(obj.Group)
+             except: pass
+             
+             for c in children: 
+                 self._recursive_delete(c)
+                 
+         try: self.doc.removeObject(obj.Name)
+         except: pass
 
 
 class NestingController:
     """
-    Handles the core logic of preparing shapes, running the nesting
-    algorithm, and drawing the final layout in the document.
+    Main controller.
     """
     def __init__(self, ui_panel):
         self.ui = ui_panel
         self.doc = FreeCAD.ActiveDocument
-        self.last_run_sheets = [] # Store the result of the last nesting run
-        self.last_run_ui_params = {} # Store the UI params from the last run
-        self.last_run_unplaced_parts = [] # Store unplaced parts from the last run
+        self.current_job = None
+        self.shape_preparer = ShapePreparer(self.doc, {})
         
         # Directly set the default font path. The UI can override this if the user selects a different font.
         font_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..', 'fonts'))
         default_font = os.path.join(font_dir, 'PoiretOne-Regular.ttf')
         self.ui.selected_font_path = default_font
-        
-        # Also update the UI label to show the default font is selected.
         if hasattr(self.ui, 'font_label'):
             self.ui.font_label.setText(os.path.basename(default_font))
 
-        # Persistent cache for processed shape geometry across runs.
-        # Persistent cache for processed shape geometry across runs.
-        # Format: { (object_name, spacing, boundary_resolution) : ShapeObject }
-        self.processed_shape_cache = {}
-        self.shape_preparer = ShapePreparer(self.doc, self.processed_shape_cache)
+    def _create_default_layout(self, base_name="Layout"):
+        i = 0
+        existing_labels = [o.Label for o in self.doc.Objects]
+        while f"{base_name}_{i:03d}" in existing_labels:
+            i += 1
+        new_layout = self.doc.addObject("App::DocumentObjectGroup", f"{base_name}_{i:03d}")
+        new_layout.Label = f"{base_name}_{i:03d}" # Ensure label is set
+        return new_layout
 
-        self.target_layout = None
-        self.temp_layout = None
-
-    def execute_nesting(self):
-        """Main method to run the entire nesting process."""
-        FreeCAD.Console.PrintMessage("\n--- NESTING START ---\n")
-        
-        # Cleanup any previous runs first
-        self._cleanup_temp_layout()
-
-        # Conditionally clear the NFP cache
-        if hasattr(self.ui, 'clear_cache_checkbox') and self.ui.clear_cache_checkbox.isChecked():
-            FreeCAD.Console.PrintMessage("Clearing NFP and Geometry caches...\n")
-            Shape.nfp_cache.clear()
-            self.processed_shape_cache.clear()
-        
-        start_time = time.time()
-        if not self.doc:
-            return
-
-        # Hide previous layouts
-        for obj in self.doc.Objects:
-            if (obj.Name.startswith("Layout_") or 
-                obj.Name in ["PartsToPlace", "MasterShapes"]):
-                if hasattr(obj, "ViewObject") and obj.ViewObject.Visibility:
-                    obj.ViewObject.Visibility = False
-
-        # Check if a font is needed and has been selected
-        font_path = getattr(self.ui, 'selected_font_path', None)
-        if self.ui.add_labels_checkbox.isChecked() and not font_path:
-            self.ui.status_label.setText("Error: Could not find a valid font file for labels.")
-            return
-        
-        self.ui.status_label.setText("Preparing shapes...")
-        QtGui.QApplication.processEvents()
-
-        FreeCAD.Console.PrintMessage(f"   [TIMING] Prep & UI: {time.time() - start_time:.4f}s\n")
-        step_start_time = time.time()
-        
-        FreeCAD.Console.PrintMessage("1. Creating/Updating LayoutObject...\n")
-        
-        # --- Identify Target Layout (Existing) ---
+    def _determine_target_layout(self):
         target_layout = getattr(self.ui, 'current_layout', None)
         
-        # Validate target_layout reference
+        # 1. Check Explicit Selection from UI (self.ui.current_layout)
         if target_layout:
             try:
-                # Check if object is valid by accessing a property
+                # Validate if the object still exists in the document
                 _ = target_layout.Name
-                # Also check if it exists in document (ReferenceError usually covers C++ deletion)
                 if target_layout not in self.doc.Objects:
                     raise ReferenceError("Object not in document")
             except (ReferenceError, AttributeError, ValueError):
-                FreeCAD.Console.PrintWarning("Tracked layout object is invalid or deleted. Treating as New Layout.\n")
+                # If the object is invalid or deleted, clear it
                 target_layout = None
                 self.ui.current_layout = None
 
-        # Try to infer layout if selecting master shapes
-        if not target_layout and self.ui.selected_shapes_to_process and self.ui.selected_shapes_to_process[0].Label.startswith("master_shape_"):
+        # 2. Check Inferred from Selection (parent layout of selected master shapes)
+        if not target_layout and hasattr(self.ui, 'selected_shapes_to_process') and self.ui.selected_shapes_to_process:
+            # Assuming selected_shapes_to_process contains FreeCAD objects
+            # This logic attempts to find a parent layout if a master shape is selected
             try:
+                # Check if the first selected shape is a master_shape_ and try to find its parent layout
                 first_shape = self.ui.selected_shapes_to_process[0]
-                if first_shape.InList:
-                    master_container = first_shape.InList[0]
-                    if master_container.InList:
-                        master_group = master_container.InList[0]
-                        if master_group.InList and master_group.Label == "MasterShapes":
-                             layout_candidate = master_group.InList[0]
-                             if layout_candidate.Label.startswith("Layout_"):
-                                 target_layout = layout_candidate
+                if first_shape.Label.startswith("master_shape_"):
+                    # Master shapes are typically inside a container, which is inside MasterShapes group, which is inside a Layout
+                    if hasattr(first_shape, 'InList') and first_shape.InList:
+                        master_container = first_shape.InList[0] # e.g., "MasterShape_001" container
+                        if hasattr(master_container, 'InList') and master_container.InList:
+                            master_group = master_container.InList[0] # "MasterShapes" group
+                            if hasattr(master_group, 'InList') and master_group.InList:
+                                layout_candidate = master_group.InList[0] # The actual Layout object
+                                if layout_candidate and hasattr(layout_candidate, 'Group'): # Ensure it's a group
+                                    target_layout = layout_candidate
+                                    self.ui.current_layout = target_layout # Update UI's current_layout
+                                    FreeCAD.Console.PrintMessage(f"DEBUG: Inferred target layout from selection: {target_layout.Label}\n")
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"   -> Could not determine parent layout: {e}\n")
+                FreeCAD.Console.PrintMessage(f"DEBUG: Could not infer target layout from selection: {e}\n")
+            
+        # 3. Create Default if Missing
+        if not target_layout:
+            target_layout = self._create_default_layout("Layout")
+            self.ui.current_layout = target_layout # Update UI's current_layout
+            FreeCAD.Console.PrintMessage(f"DEBUG: Created default target layout: {target_layout.Label}\n")
+            
+        return target_layout
 
-        self.target_layout = target_layout
-        if self.target_layout:
-             # If we are updating an existing layout, hide it during the operation
-             try:
-                 if hasattr(self.target_layout, "ViewObject"): 
-                     self.target_layout.ViewObject.Visibility = False
-             except ReferenceError:
-                 self.target_layout = None # Abort update if it died right now
-                 self.ui.current_layout = None
-
-        # --- Create Temporary Working Layout ---
-        # We ALWAYS work on a temp object to support atomic Cancel/Undo
-        self.temp_layout = self.doc.addObject("App::DocumentObjectGroup", "Layout_temp")
-        layout_obj = self.temp_layout # Use this as the working object
+    def execute_nesting(self):
+        FreeCAD.Console.PrintMessage("\n--- NESTING START ---\n")
         
-        # --- Store UI Parameters on the Temp Layout Object ---
-        def set_or_add_property(obj, prop_type, prop_name, prop_group, prop_desc, value):
-            if not hasattr(obj, prop_name):
-                 obj.addProperty(prop_type, prop_name, prop_group, prop_desc)
-            setattr(obj, prop_name, value)
+        # 1. Cleanup old jobs
+        if self.current_job:
+            self.current_job.cleanup()
+            self.current_job = None
+            
+        # 2. Hide existing layouts (Visual cleanup)
+        self._hide_all_layouts()
+        
+        # 3. Collect Settings
+        ui_params = self._collect_ui_params()
+        
+        # 4. Identify Target
+        target_layout = self._determine_target_layout()
+        if target_layout and hasattr(target_layout, "ViewObject"):
+            target_layout.ViewObject.Visibility = False
+            
+        # 5. Start Job
+        self.current_job = NestingJob(self.doc, ui_params, target_layout)
+        
+        # 6. Run Nesting Logic
+        # (Prepare Parts, Run Algo, Draw)
+        try:
+            self._run_job_logic(self.current_job)
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"Nesting Failed: {e}\n")
+            self.ui.status_label.setText(f"Error: {e}")
+            self.cancel_job()
 
-        set_or_add_property(layout_obj, "App::PropertyLength", "SheetWidth", "Layout", "Width of the nested sheets", self.ui.sheet_width_input.value())
-        set_or_add_property(layout_obj, "App::PropertyLength", "SheetHeight", "Layout", "Height of the nested sheets", self.ui.sheet_height_input.value())
-        set_or_add_property(layout_obj, "App::PropertyLength", "PartSpacing", "Layout", "Spacing between parts", self.ui.part_spacing_input.value())
-        set_or_add_property(layout_obj, "App::PropertyFloat", "BoundaryResolution", "Layout", "Resolution for boundary approximation", self.ui.boundary_resolution_input.value())
-        set_or_add_property(layout_obj, "App::PropertyFile", "FontFile", "Layout", "Font file used for labels", self.ui.selected_font_path)
-        set_or_add_property(layout_obj, "App::PropertyBool", "ShowBounds", "Layout", "Visibility of part boundaries", self.ui.show_bounds_checkbox.isChecked())
-        set_or_add_property(layout_obj, "App::PropertyBool", "AddLabels", "Layout", "Whether part labels are enabled", self.ui.add_labels_checkbox.isChecked())
-        set_or_add_property(layout_obj, "App::PropertyLength", "LabelHeight", "Layout", "Height of the part labels", self.ui.label_height_input.value())
-        set_or_add_property(layout_obj, "App::PropertyInteger", "GlobalRotationSteps", "Layout", "Global rotation steps for nesting", self.ui.rotation_steps_spinbox.value())
-        set_or_add_property(layout_obj, "App::PropertyBool", "IsStacked", "Layout", "Whether sheets are stacked", False)
-
-        QtGui.QApplication.processEvents()
-        if hasattr(layout_obj, "ViewObject"): layout_obj.ViewObject.Visibility = True
-
-        # --- Create a temporary, visible group for the parts to be placed ---
-        # This must be created BEFORE calling _prepare_parts_from_ui.
-        parts_to_place_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
-        layout_obj.addObject(parts_to_place_group)
-
-        # --- Prepare Parts and Master Shapes ---
-        # Gather UI parameters
+    def _run_job_logic(self, job):
+        # ... logic moved here ...
+        # Create PartsToPlace
+        parts_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
+        job.temp_layout.addObject(parts_group)
+        
+        # Prepare
         ui_settings, quantities, master_map, rotation_params = self._collect_job_parameters()
         
-        # Add layout-specific settings that might be needed by the preparer (like spacing/res which are in ui_settings)
-        # But we need to make sure _collect_job_parameters returns what we need.
-        # Actually, let's just pass what we have.
+        start_time = time.time()
+        self.ui.status_label.setText("Preparing shapes...")
+        QtGui.QApplication.processEvents()
         
         parts_to_nest = self.shape_preparer.prepare_parts(
-            ui_settings,
-            quantities,
-            master_map,
-            layout_obj
+            ui_settings, quantities, master_map, job.temp_layout, parts_group
         )
         
-        FreeCAD.Console.PrintMessage(f"   [TIMING] Shape Processing: {time.time() - step_start_time:.4f}s\n")
-        step_start_time = time.time()
-
         if not parts_to_nest:
-            msg = "Error: No valid parts to nest."
-            if self.ui.selected_shapes_to_process:
-                 msg += " Source shapes might be deleted."
-            self.ui.status_label.setText(msg)
-            self._cleanup_temp_layout() 
+            self.ui.status_label.setText("Error: No valid parts to nest.")
             return
-        
+
+        # Persist Rotations
+        self._persist_rotation_state(job.temp_layout, rotation_params)
+
+        # Run Algo
         self.ui.status_label.setText("Running nesting algorithm...")
-        spacing = self.ui.part_spacing_input.value()
+        algo_kwargs = self._prepare_algo_kwargs(ui_settings)
+        
+        try:
+             # Check for early abort
+             if not job.temp_layout: return
+
+             is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
+             sheets, remaining, steps = nest(
+                parts_to_nest, ui_settings['sheet_width'], ui_settings['sheet_height'],
+                ui_settings['rotation_steps'], is_simulating, **algo_kwargs
+             )
+             
+             if not is_simulating:
+                 self._apply_placement(sheets, parts_to_nest)
+                 
+             # Draw
+             # Verify job still active
+             if not job.temp_layout: return
+             
+             for sheet in sheets:
+                 sheet.draw(self.doc, ui_settings, job.temp_layout, parts_to_place_group=parts_group)
+                 
+             # Cleanup specific sheets overshoot
+             # (Handled by job commit merge usually, but we can prevent it here visually)
+             
+             # Status
+             placed = sum(len(s) for s in sheets)
+             msg = f"Placed {placed} shapes on {len(sheets)} sheets. ({(time.time()-start_time):.2f}s)"
+             self.ui.status_label.setText(msg)
+             FreeCAD.Console.PrintMessage(f"{msg}\n--- NESTING DONE ---\n")
+             if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
+             
+        except NestingDependencyError as e:
+            self.ui.status_label.setText(str(e))
+
+
+    def cancel_job(self):
+        if self.current_job:
+            self.current_job.cleanup()
+            
+            # Restore target visibility
+            if self.current_job.target_layout and hasattr(self.current_job.target_layout, "ViewObject"):
+                self.current_job.target_layout.ViewObject.Visibility = True
+            
+            self.current_job = None
+        
+        FreeCAD.Console.PrintMessage("Job Cancelled.\n")
+
+    def finalize_job(self):
+        if self.current_job:
+            final_obj = self.current_job.commit()
+            self.ui.current_layout = final_obj
+            self.current_job = None
+            FreeCAD.Console.PrintMessage("Job Finalized.\n")
+            self.doc.recompute()
+
+    # ... Include helpers (_collect_ui_params, _prepare_algo_kwargs, etc) adapted from old ...
+    
+    def _collect_ui_params(self):
+        return {
+            'sheet_width': self.ui.sheet_width_input.value(),
+            'sheet_height': self.ui.sheet_height_input.value(),
+            'spacing': self.ui.part_spacing_input.value(),
+            'boundary_resolution': self.ui.boundary_resolution_input.value(),
+            'rotation_steps': self.ui.rotation_steps_spinbox.value(),
+            'add_labels': self.ui.add_labels_checkbox.isChecked(),
+            'font_path': getattr(self.ui, 'selected_font_path', None),
+            'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
+            'label_height': self.ui.label_height_input.value()
+        }
+
+    def _apply_placement(self, sheets, parts_to_nest):
+        original_parts_map = {part.id: part for part in parts_to_nest}
+        for sheet in sheets:
+            for i, placed_part in enumerate(sheet.parts):
+                sheet_origin = sheet.get_origin() 
+                original_part = original_parts_map[placed_part.shape.id]
+                original_part.placement = placed_part.shape.get_final_placement(sheet_origin)
+                sheet.parts[i].shape = original_part
+
+    def _prepare_algo_kwargs(self, ui_settings):
         algo_kwargs = {}
         if self.ui.minkowski_random_checkbox.isChecked():
             algo_kwargs['search_direction'] = None
         else:
-            # Same coordinate logic as gravity: 0=Down, 90=Right, etc.
             angle_deg = (270 - self.ui.minkowski_direction_dial.value()) % 360
             angle_rad = math.radians(angle_deg)
             algo_kwargs['search_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
         
         algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
         algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
-
-        # --- Prepare UI parameters for controllers ---
-        global_rotation_steps = self.ui.rotation_steps_spinbox.value() # This widget is in NestingPanel
-        self.last_run_ui_params = {
-            'spacing': spacing,
-            'sheet_w': self.ui.sheet_width_input.value(),
-            'sheet_h': self.ui.sheet_height_input.value(),
-            'spacing': spacing,
-            'font_path': self.ui.selected_font_path,
-            'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
-            'add_labels': self.ui.add_labels_checkbox.isChecked(),
-            'label_height': self.ui.label_height_input.value(), # This widget is in NestingPanel
-        }
-
-        # Add spacing to algo_kwargs so the nester can use it for sheet origin calculations
-        algo_kwargs['spacing'] = spacing
+        algo_kwargs['spacing'] = ui_settings['spacing']
 
         if hasattr(self.ui, 'log_message'):
             algo_kwargs['log_callback'] = self.ui.log_message
+            
+        return algo_kwargs
 
-        # --- Persist Rotation State ---
-        # We need to save the rotation overrides to the Master Containers so they can be reloaded.
+    def _persist_rotation_state(self, layout_obj, rotation_params):
         master_shapes_group = layout_obj.getObject("MasterShapes")
         if master_shapes_group:
             for container in master_shapes_group.Group:
-                # container is 'master_O_1' etc.
-                # Find the inner shape to identify it
+                if not hasattr(container, "Group"): continue
+                
                 inner_shape = next((c for c in container.Group if c.Label.startswith("master_shape_")), None)
                 if inner_shape:
                     original_label = inner_shape.Label.replace("master_shape_", "")
-                    
-                    # Look up params
                     if original_label in rotation_params:
                         r_steps, r_override = rotation_params[original_label]
-                        set_or_add_property(container, "App::PropertyInteger", "PartRotationSteps", "Nesting", "Rotation steps", r_steps)
-                        set_or_add_property(container, "App::PropertyBool", "PartRotationOverride", "Nesting", "Override global rotation", r_override)
-
-        try:
-            is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
-            sheets, remaining_parts_to_nest, total_steps = nest(
-                parts_to_nest,
-                self.ui.sheet_width_input.value(), self.ui.sheet_height_input.value(),
-                global_rotation_steps, is_simulating,
-                **algo_kwargs
-            )
-            FreeCAD.Console.PrintMessage(f"   [TIMING] Nesting Algorithm: {time.time() - step_start_time:.4f}s\n")
-            step_start_time = time.time()
-
-            # If not simulating, the `sheets` object contains deep copies of the parts.
-            # We must replace these copies with the original parts that are linked to the
-            # FreeCAD objects, and transfer the final placement data.
-            if not is_simulating:
-                original_parts_map = {part.id: part for part in parts_to_nest}
-                for sheet in sheets:
-                    for i, placed_part in enumerate(sheet.parts):
-                        sheet_origin = sheet.get_origin() # Get the origin for the current sheet
-                        original_part = original_parts_map[placed_part.shape.id]
-                        original_part.placement = placed_part.shape.get_final_placement(sheet_origin)
-                        sheet.parts[i].shape = original_part # Replace the copied shape with the original
-        except NestingDependencyError as e:
-            self.ui.status_label.setText(f"Error: {e}")
-            # The dialog is already shown by nesting_logic, so we just stop.
-            return
-
-        # Store the results for later use (e.g., by the bounds toggle)
-        self.last_run_sheets = sheets
-        self.last_run_unplaced_parts = remaining_parts_to_nest
-
-        # --- Draw the final layout directly, without recompute ---
-        # The LayoutController's execute method is no longer used.
-        # We perform all drawing actions imperatively here.
-        for sheet in sheets:
-            sheet.draw(
-                self.doc,
-                # sheet_origin is now calculated inside draw()
-                self.last_run_ui_params,
-                layout_obj # The parent group is the layout object itself
-            )
-            
-        FreeCAD.Console.PrintMessage(f"   [TIMING] Drawing Sheets: {time.time() - step_start_time:.4f}s\n")
-        
-        # --- Cleanup Excess Sheets ---
-        # If the previous run had more sheets (e.g. 5) than this run (e.g. 3),
-        # we need to remove Sheet_4 and Sheet_5.
-        num_sheets = len(sheets)
-        for child in list(layout_obj.Group):
-            if child.Label.startswith("Sheet_"):
-                try:
-                    # Extract ID from "Sheet_X"
-                    sheet_id = int(child.Label.split('_')[1])
-                    if sheet_id > num_sheets:
-                        FreeCAD.Console.PrintMessage(f"Cleaning up unused sheet: {child.Label}\n")
-                        self.doc.removeObject(child.Name)
-                except (ValueError, IndexError):
-                    pass # Ignore if label format doesn't match
-        
-        # Now that the recompute is finished and parts are moved, it is safe to remove the empty group.
-        # Check if it still exists (it might have been removed via layout cleanup already if Logic reuse/naming was mismatched)
-        parts_group = self.doc.getObject("PartsToPlace")
-        if parts_group:
-             self.doc.removeObject(parts_group.Name)
-        
-        placed_count = sum(len(s) for s in sheets)
-
-        status_text = f"Placed {placed_count} shapes on {len(sheets)} sheets."
-
-        if remaining_parts_to_nest:
-            status_text += f" Could not place {len(remaining_parts_to_nest)} shapes."
-        
-        # Calculate fill percentage for the status message
-        sheet_fills = [s.calculate_fill_percentage() for s in sheets]
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        status_text += f" (Took {duration:.2f} seconds)."
-        self.ui.status_label.setText(status_text)
-
-        if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
-        self._debug_dump_doc()
-
-    def toggle_bounds_visibility(self):
-        """Toggles the 'ShowBounds' property on all nested ShapeObjects in the document."""
-        is_visible = self.ui.show_bounds_checkbox.isChecked()
-        
-        # Find all ShapeObjects in the document and toggle their property.
-        # The ShapeObject's onChanged method will handle the visibility change.
-        toggled_count = 0
-        for obj in self.doc.Objects:
-            # Only toggle bounds for the final nested parts, which are prefixed with "nested_".
-            # The "nested_" object is an App::Part container. We need to find the
-            # ShapeObject inside it to toggle the property, as the onChanged logic
-            # is on the ShapeObject's proxy.
-            if obj.Label.startswith("nested_") and obj.isDerivedFrom("App::Part"):
-                # Find the ShapeObject within the container group
-                shape_child = next((child for child in obj.Group if hasattr(child, "Proxy") and child.Proxy.__class__.__name__ == "ShapeObject"), None)
-                if shape_child and hasattr(shape_child, "ShowBounds"):
-                    shape_child.ShowBounds = is_visible
-                    toggled_count += 1
-        
-        if toggled_count > 0:
-            self.ui.status_label.setText(f"Toggled bounds visibility for {toggled_count} shapes.")
+                        if not hasattr(container, "PartRotationSteps"):
+                             container.addProperty("App::PropertyInteger", "PartRotationSteps", "Nesting", "Rotation steps")
+                        if not hasattr(container, "PartRotationOverride"):
+                             container.addProperty("App::PropertyBool", "PartRotationOverride", "Nesting", "Override global rotation")
+                        container.PartRotationSteps = r_steps
+                        container.PartRotationOverride = r_override
 
     def _collect_job_parameters(self):
-        """Reads the UI table and returns job configuration."""
-        ui_settings = {
-            'spacing': self.ui.part_spacing_input.value(),
-            'boundary_resolution': self.ui.boundary_resolution_input.value(),
-            'rotation_steps': self.ui.rotation_steps_spinbox.value(),
-            'add_labels': self.ui.add_labels_checkbox.isChecked(),
-            'font_path': getattr(self.ui, 'selected_font_path', None)
-        }
-        
+        ui_settings = self._collect_ui_params()
         global_rotation_steps = ui_settings['rotation_steps']
         
         # 1. Collect raw data from UI Table (Key = Display Label)
@@ -388,24 +477,21 @@ class NestingController:
         quantities = {}
         master_shapes_from_ui = {}
         
-        # Check reload state
         is_reloading = False
         if self.ui.selected_shapes_to_process and self.ui.selected_shapes_to_process[0].Label.startswith("master_shape_"):
             is_reloading = True
             
         for obj in self.ui.selected_shapes_to_process:
             try:
-                # Validation
                 _ = obj.Name 
                 if obj not in self.doc.Objects: continue
                 
-                # Resolve key
                 display_label = obj.Label
                 if display_label.startswith("master_shape_"):
                     display_label = display_label.replace("master_shape_", "")
                 
                 if display_label in ui_row_data:
-                    # Filter logic: if reloading, only accept actual master shapes?
+                    # Relaxed check for reloading
                     if not is_reloading or obj.Label.startswith("master_shape_"):
                          quantities[display_label] = ui_row_data[display_label]
                          master_shapes_from_ui[obj.Label] = obj
@@ -415,192 +501,50 @@ class NestingController:
 
         return ui_settings, quantities, master_shapes_from_ui, rotation_params
 
-    def _cleanup_temp_layout(self):
-        """Helper to recursively delete the temporary layout group."""
-        if not self.doc: return
+    def _determine_target_layout(self):
+        target_layout = getattr(self.ui, 'current_layout', None)
         
-        # 1. Delete explicitly tracked temp layout
-        if self.temp_layout:
-             # Standard recursive delete
-             def delete_recursive(obj):
-                 if hasattr(obj, "Group"):
-                     # Iterate over copy because list might change? Actually Group is property.
-                     # But safer to cast to list.
-                     children = list(obj.Group) 
-                     for child in children:
-                         delete_recursive(child)
-                 try:
-                     self.doc.removeObject(obj.Name)
-                 except: pass
-
-             try:
-                 delete_recursive(self.temp_layout)
-             except (ReferenceError, AttributeError):
-                 pass
-             self.temp_layout = None
-        
-        # 2. Safety net: Search for ANY object starting with "Layout_temp"
-        # This catches stragglers if the controller was re-instantiated or state was lost.
-        objects_to_delete = []
-        for obj in self.doc.Objects:
-            if obj.Label.startswith("Layout_temp"):
-                 objects_to_delete.append(obj)
-        
-        for obj in objects_to_delete:
-            # Recursive delete might be needed if they are groups and we missed them
-             if hasattr(obj, "Group"):
-                 for child in list(obj.Group):
-                     try: self.doc.removeObject(child.Name)
-                     except: pass
-             try: self.doc.removeObject(obj.Name)
-             except: pass
-
-    def cancel_job(self):
-        """Called by UI when Cancel is clicked."""
-        FreeCAD.Console.PrintMessage("Job Cancelled by User.\n")
-        self._cleanup_temp_layout()
-        
-        # Restore target visibility
-        if self.target_layout:
-             if hasattr(self.target_layout, "ViewObject"):
-                 self.target_layout.ViewObject.Visibility = True
-                 
-        self.target_layout = None
-        
-        # Cleanup any unplaced parts visual artifacts
-        # (Already handled by cleanup_temp mostly, but PartsToPlace is inside temp)
-
-    def _debug_dump_doc(self):
-        msg = "\n--- DEBUG DOCUMENT STRUCTURE ---\n"
-        for obj in self.doc.Objects:
-            if obj.isDerivedFrom("App::Origin") or obj.isDerivedFrom("App::Line") or obj.isDerivedFrom("App::Plane") or obj.isDerivedFrom("App::Point"):
-                 continue
-            msg += f"Object: {obj.Name} ({obj.Label}) Type: {obj.TypeId}\n"
-            if hasattr(obj, "Group"):
-                 msg += f"  Group children: {[c.Name for c in obj.Group]}\n"
-        msg += "--------------------------------\n"
-        FreeCAD.Console.PrintMessage(msg)
-
-    def finalize_job(self):
-        """Called by UI when OK is clicked."""
-        self._debug_dump_doc()
-        FreeCAD.Console.PrintMessage("DEBUG: Finalizing Job...\n")
-        if not self.temp_layout: return
-
-        if self.target_layout:
-            FreeCAD.Console.PrintMessage(f"DEBUG: Updating Target Layout {self.target_layout.Label}\n")
-            
-            # Check if we have new masters in temp
-            temp_masters_group = None
-            current_temp_group = list(self.temp_layout.Group)
-            for child in current_temp_group:
-                if child.Label.startswith("MasterShapes"):
-                    temp_masters_group = child
-                    break
-            
-            has_new_masters = False
-            if temp_masters_group and len(temp_masters_group.Group) > 0:
-                has_new_masters = True
-            
-            # 1. Identify children to remove vs keep
-            children_to_remove = []
-            children_to_keep = []
-            
-            for child in self.target_layout.Group:
-                if child.Label.startswith("Sheet_") or child.Label == "PartsToPlace":
-                    children_to_remove.append(child)
-                elif child.Label.startswith("MasterShapes"):
-                    if has_new_masters:
-                        children_to_remove.append(child)
-                    else:
-                        children_to_keep.append(child)
-                        FreeCAD.Console.PrintMessage("DEBUG: Preserving existing MasterShapes.\n")
-                else:
-                    children_to_keep.append(child)
-
-            # 2. Delete removals
-            for child in children_to_remove:
-                def delete_recursive(obj):
-                     if hasattr(obj, "Group"):
-                         for c in list(obj.Group): delete_recursive(c)
-                     try: self.doc.removeObject(obj.Name)
-                     except Exception as e: FreeCAD.Console.PrintWarning(f"Failed to remove {obj.Name}: {e}\n")
-                delete_recursive(child)
-            
-            # 3. Move from Temp to Target
-            children_to_move = []
-            for child in current_temp_group:
-                if child.Label.startswith("MasterShapes") and not has_new_masters:
-                    try: self.doc.removeObject(child.Name)
-                    except: pass
-                    continue
-                
-                # Enforce clean label for new MasterShapes
-                if child.Label.startswith("MasterShapes"):
-                    child.Label = "MasterShapes"
-                    
-                children_to_move.append(child)
-            
-            # 4. Set Group
-            # Detach from Temp first to avoid "Object can only be in a single Group" error
-            self.temp_layout.Group = []
-            self.target_layout.Group = children_to_keep + children_to_move
-            
-            # 5. Properties
-            def ensure_prop(obj, name, val, type_str="App::PropertyLength"):
-                if not hasattr(obj, name):
-                    obj.addProperty(type_str, name, "Layout", "")
-                setattr(obj, name, val)
-
-            ensure_prop(self.target_layout, "SheetWidth", self.temp_layout.SheetWidth)
-            ensure_prop(self.target_layout, "SheetHeight", self.temp_layout.SheetHeight)
-            ensure_prop(self.target_layout, "PartSpacing", self.temp_layout.PartSpacing)
-            
-            if hasattr(self.temp_layout, "BoundaryResolution"):
-                ensure_prop(self.target_layout, "BoundaryResolution", self.temp_layout.BoundaryResolution, "App::PropertyFloat")
-            
-            if hasattr(self.temp_layout, "FontFile"):
-                ensure_prop(self.target_layout, "FontFile", self.temp_layout.FontFile, "App::PropertyFile")
-             
-            FreeCAD.Console.PrintMessage("DEBUG: Target Layout Updated Successfully.\n")
-            
-            # CRITICAL: Clear Temp Layout Group before deleting to avoid issues
-            try: FreeCAD.Console.PrintMessage(f"DEBUG: Removing Temp Layout: {self.temp_layout.Name} ({self.temp_layout.Label}). Children: {[c.Name for c in self.temp_layout.Group]}\n")
-            except: pass
-            self.temp_layout.Group = []
-
-            # 6. Delete Temp Layout
+        if target_layout:
             try:
-                self.doc.removeObject(self.temp_layout.Name)
-                FreeCAD.Console.PrintMessage("DEBUG: Temp Layout Object Removed.\n")
-            except Exception as e: 
-                FreeCAD.Console.PrintWarning(f"DEBUG: Failed to remove Temp Layout Object: {e}\n")
-            
-            if hasattr(self.target_layout, "ViewObject"):
-                self.target_layout.ViewObject.Visibility = True
-            
-            self.ui.current_layout = self.target_layout
+                _ = target_layout.Name
+                if target_layout not in self.doc.Objects:
+                    raise ReferenceError("Object not in document")
+            except (ReferenceError, AttributeError, ValueError):
+                target_layout = None
+                self.ui.current_layout = None
 
-        else:
-            # --- New Layout ---
-            base_name, i = "Layout", 0
-            existing_labels = [o.Label for o in self.doc.Objects]
-            while f"{base_name}_{i:03d}" in existing_labels:
-                i += 1
-            final_name = f"{base_name}_{i:03d}"
-            
-            self.temp_layout.Label = final_name
-            self.ui.current_layout = self.temp_layout
-            FreeCAD.Console.PrintMessage(f"DEBUG: Finalized New Layout {final_name}\n")
+        if not target_layout and self.ui.selected_shapes_to_process and self.ui.selected_shapes_to_process[0].Label.startswith("master_shape_"):
+            try:
+                first_shape = self.ui.selected_shapes_to_process[0]
+                if first_shape.InList:
+                    master_container = first_shape.InList[0]
+                    if master_container.InList:
+                        master_group = master_container.InList[0]
+                        if master_group.InList and master_group.Label == "MasterShapes":
+                             layout_candidate = master_group.InList[0]
+                             if layout_candidate.Label.startswith("Layout_"):
+                                 target_layout = layout_candidate
+            except Exception:
+                pass
+        return target_layout
+        
+    def _hide_all_layouts(self):
+        for obj in self.doc.Objects:
+            if (obj.Name.startswith("Layout_") or 
+                obj.Name in ["PartsToPlace", "MasterShapes"]):
+                if hasattr(obj, "ViewObject") and obj.ViewObject.Visibility:
+                    obj.ViewObject.Visibility = False
 
-        # Ensure MasterShapes are hidden
-        if self.ui.current_layout:
-            for child in self.ui.current_layout.Group:
-                if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
-                     child.ViewObject.Visibility = False
+    def toggle_bounds_visibility(self):
+        is_visible = self.ui.show_bounds_checkbox.isChecked()
+        toggled_count = 0
+        for obj in self.doc.Objects:
+            if obj.Label.startswith("nested_") and obj.isDerivedFrom("App::Part"):
+                shape_child = next((child for child in obj.Group if hasattr(child, "Proxy") and child.Proxy.__class__.__name__ == "ShapeObject"), None)
+                if shape_child and hasattr(shape_child, "ShowBounds"):
+                    shape_child.ShowBounds = is_visible
+                    toggled_count += 1
+        
+        if toggled_count > 0:
+            self.ui.status_label.setText(f"Toggled bounds visibility for {toggled_count} shapes.")
 
-        self.target_layout = None
-        self.temp_layout = None
-        self.doc.recompute()
-        FreeCAD.Console.PrintMessage("Nesting Job Finalized.\n")
-        self._debug_dump_doc()

@@ -143,7 +143,7 @@ class Sheet:
         
         return True
 
-    def draw(self, doc, ui_params, parent_group=None, transient_part=None):
+    def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None):
         """
         Draws the sheet and its contents into the FreeCAD document.
 
@@ -154,6 +154,8 @@ class Sheet:
             parent_group (App.DocumentObjectGroup): The main layout group to add this sheet to.
             draw_shape (bool): If True, draws the final FreeCAD part.
             draw_shape_bounds (bool): If True, draws the shapely boundary polygon.
+            parts_to_place_group (App.DocumentObjectGroup): Optional. The temporary group where parts were created.
+                                                            Required to safely remove parts from it to prevent deletion.
         """
         sheet_origin = self.get_origin()
 
@@ -164,28 +166,10 @@ class Sheet:
             sheet_group_name = f"Sheet_{self.id+1}"
             sheet_group = parent_group.getObject(sheet_group_name)
             
-            # Since we cleared the layout children in the controller, we expect to create new ones.
-            # However, if the user manually kept something, or if the cleanup failed, we should be robust.
-            # But wait, the controller explicitly deletes children starting with 'Sheet_'.
-            # The issue described is "Creates 3 new folders - shapes_X, text_x, sheet_boundary_x".
-            # This implies `doc.addObject` is creating unique names like 'Shapes_1001', 'Shapes_1002' 
-            # while the sheet group itself might be successfully recreated as 'Sheet_1'.
-            
-            # Actually, `doc.addObject` will auto-increment names if "Sheet_1" exists in the document 
-            # (even if deleted but not purged? No, deleted objects are gone).
-            # The user says "new folders - shapes_X...".
-            # If we just deleted "Sheet_1", we can recreate "Sheet_1".
-            
             if not sheet_group:
                  sheet_group = doc.addObject("App::DocumentObjectGroup", sheet_group_name)
                  parent_group.addObject(sheet_group)
             else:
-                # If we are reusing the sheet group, we must ensure it is empty of old contents.
-                # The controller removes the Sheet group itself, but if we are in a state where it wasn't removed,
-                # or if we found a lingering group by name, we need to clean it.
-                # Actually, simply clearing the group's children is safer than deleting/recreating.
-                # Note: doc.removeObject deletes the object from the document.
-                # We need to iterate over a copy of the list.
                 for child in list(sheet_group.Group):
                     doc.removeObject(child.Name)
 
@@ -210,13 +194,13 @@ class Sheet:
             # Draw the parts placed on this sheet
             FreeCAD.Console.PrintMessage(f"DEBUG: --- Drawing Sheet {self.id+1} --- \n")
             for placed_part in self.parts:
-                self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, shapes_group)
+                self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, shapes_group, parts_to_place_group)
 
         # --- Simulation Drawing Mode (with transient_part) ---
         elif transient_part:
             self._draw_single_part(doc, transient_part, sheet_origin, ui_params)
 
-    def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None):
+    def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None, parts_to_place_group=None):
         """Helper to draw a single part, either for final placement or simulation."""
         if shape:
             # FreeCAD.Console.PrintMessage(f"DEBUG:   Attempting to draw part '{shape.id}' (id={id(shape)}). Checking for fc_object...\n")
@@ -230,27 +214,13 @@ class Sheet:
                 # During simulation, we just move the existing part.
                 # For final drawing, we create a container.
                 if shapes_group:
-                    # Create or Retrieve a container to hold the part and its bounds
-                    container_name = f"nested_{shape.id}"
-                    container = doc.getObject(container_name)
-                    if not container:
-                         container = doc.addObject("App::Part", container_name)
-                    else:
-                         # Clear existing contents if reusing
-                         for child in list(container.Group):
-                             # Be careful not to delete the master shape object itself, 
-                             # but wait, the master shape object is LINKED here, not created here?
-                             # In nesting_controller loop: `part_copy = self.doc.copyObject(master_shape_obj, True)`
-                             # The `shape.fc_object` IS `part_copy`.
-                             # And we add `shape_obj` (which is `part_copy`) into `container`.
-                             # So the container holds the unique copy for this instance.
-                             # If we are reusing the container, we probably need to remove the OLD copy if it exists?
-                             # But `shape.fc_object` is a NEW copy created in this run by the controller's `_prepare_parts_from_ui`.
-                             # So the container from a previous run contains the OLD copy.
-                             # We should empty the container.
-                             # Note: doc.removeObject deletes it from document. 
-                             doc.removeObject(child.Name)
-                             
+                    # Create a NEW container to hold the part. 
+                    # Do NOT try to reuse an existing container by name, as it might belong to 
+                    # an old layout that is about to be deleted.
+                    # FreeCAD will automatically handle name collisions (e.g. nested_O_1001).
+                    container = doc.addObject("App::Part", f"nested_{shape.id}")
+                    container.Label = f"nested_{shape.id}" # Ensure label matches intended ID
+                    
                     shapes_group.addObject(container)
 
                     # Place the boundary object at the container's origin. It is the reference.
@@ -272,6 +242,15 @@ class Sheet:
                     
                     if hasattr(container, "ViewObject"):
                         container.ViewObject.Visibility = True
+
+                    # Unlink from the temporary "PartsToPlace" bin so cleanup doesn't delete them
+                    if parts_to_place_group:
+                        try:
+                            if boundary_obj:
+                                parts_to_place_group.removeObject(boundary_obj)
+                            parts_to_place_group.removeObject(shape_obj)
+                        except Exception:
+                            pass
 
                     # Apply the final nesting placement to the CONTAINER.
                     container.Placement = final_placement

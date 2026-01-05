@@ -269,8 +269,11 @@ class NestingPanel(QtGui.QWidget):
             rotation_steps_map = {}
             
             for master_container in master_shapes_group.Group:
-                if master_container.isDerivedFrom("App::Part") and master_container.Label.startswith("master_"):
-                    # The object to load is the 'master_shape_...' object inside the 'master_...' container.
+                # Use a relaxed check for the container to ensure robust loading.
+                # While we enforce "master_" naming on write, reading should be tolerant
+                # to handle potential legacy or manually modified files.
+                if hasattr(master_container, "Group"): 
+                    # The object to load is the 'master_shape_...' object inside the container.
                     shape_obj = next((child for child in master_container.Group if child.Label.startswith("master_shape_")), None)
                     if shape_obj and hasattr(shape_obj, "Proxy"):
                         shapes_to_load.append(shape_obj)
@@ -445,11 +448,21 @@ class NestingPanel(QtGui.QWidget):
 
     def log_message(self, message, level="message"):
         """Displays a message in the status label and logs to the console."""
-        self.status_label.setText(message)
+        try:
+            self.status_label.setText(message)
+        except RuntimeError:
+            # The widget C++ object has been deleted (panel closed), but Python object persists.
+            # We can just log to console and ignore the UI update.
+            pass
+
         if level == "warning":
             FreeCAD.Console.PrintWarning(message + "\n")
         else:
             FreeCAD.Console.PrintMessage(message + "\n")
         
         # Process UI events to make sure the label updates immediately
-        QtGui.QApplication.processEvents()
+        # We wrap this too, just in case
+        try:
+            QtGui.QApplication.processEvents()
+        except RuntimeError:
+            pass
