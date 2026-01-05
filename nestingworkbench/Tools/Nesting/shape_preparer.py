@@ -56,8 +56,8 @@ class ShapePreparer:
                     temp_shape_wrapper.source_freecad_object = master_obj
                 
                 if is_reloading:
-                    master_shape_obj, temp_shape_wrapper = self._handle_reloading(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj
+                    master_shape_obj, temp_shape_wrapper = self._create_temp_from_reloading(
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj, master_shapes_group
                     )
                 else:
                     master_shape_obj, temp_shape_wrapper = self._handle_new_master(
@@ -102,50 +102,67 @@ class ShapePreparer:
         
         if not master_shapes_group:
             master_shapes_group = self.doc.addObject("App::DocumentObjectGroup", "MasterShapes")
+            master_shapes_group.Label = "MasterShapes"
             layout_obj.addObject(master_shapes_group)
         
         if hasattr(master_shapes_group, "ViewObject"):
             master_shapes_group.ViewObject.Visibility = False
         return master_shapes_group
 
-    def _handle_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj=None):
-        master_shape_obj = master_obj
-        master_container = master_shape_obj.InList[0]
+    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj, master_shapes_group):
+        # 1. Clone Original to Temp
+        temp_master_obj = self.doc.copyObject(master_obj)
+        # Keep same label logic
         
-        # Update quantity on existing container
-        # label here is "master_shape_X", so we replace to get original X
         original_label = label.replace("master_shape_", "")
-        quantity, _ = quantities.get(original_label, (1, 1))
+        temp_container = self.doc.addObject("App::Part", f"temp_master_{original_label}")
+        master_shapes_group.addObject(temp_container)
+        temp_container.addObject(temp_master_obj)
         
-        if hasattr(master_container, "Quantity"):
-            master_container.Quantity = quantity
-        else:
-            master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
+        # 2. Clone Boundary Object
+        if hasattr(master_obj, "BoundaryObject") and master_obj.BoundaryObject:
+             temp_bound = self.doc.copyObject(master_obj.BoundaryObject)
+             temp_container.addObject(temp_bound)
+             temp_master_obj.BoundaryObject = temp_bound
+             if hasattr(temp_bound, "ViewObject"): temp_bound.ViewObject.Visibility = False
+        
+        if hasattr(temp_master_obj, "ViewObject"): temp_master_obj.ViewObject.Visibility = False
+        if hasattr(temp_container, "ViewObject"): temp_container.ViewObject.Visibility = False
 
-        # TRUST MASTER MODE: Use existing geometry if spacing matches
+        # 3. Update Quantity
+        quantity, _ = quantities.get(original_label, (1, 1))
+        temp_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
+
+        # 4. TRUST MASTER LOGIC (Check against OLD Layout Spacing)
         cached_spacing = -1
-        if layout_obj and hasattr(layout_obj, "PartSpacing"):
-             # Handle PropertyLength which returns Quantity
-             prop = layout_obj.PartSpacing
-             cached_spacing = prop.Value if hasattr(prop, "Value") else float(prop)
+        try:
+             # Traverse up: master -> container -> MasterShapes -> Layout
+             if master_obj.InList: 
+                 cont = master_obj.InList[0]
+                 if cont.InList: # MasterShapes
+                     grp = cont.InList[0]
+                     if grp.InList: # Layout
+                         old_layout = grp.InList[0]
+                         if hasattr(old_layout, "PartSpacing"):
+                             prop = old_layout.PartSpacing
+                             cached_spacing = prop.Value if hasattr(prop, "Value") else float(prop)
+        except: pass
         
-        if not temp_shape_wrapper and abs(cached_spacing - spacing) < 1e-4 and hasattr(master_shape_obj, "BoundaryObject") and master_shape_obj.BoundaryObject:
+        # Reuse if spacing matches
+        if not temp_shape_wrapper and abs(cached_spacing - spacing) < 1e-4 and hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
              try:
                  from shapely.geometry import Polygon
-                 bound_shape = master_shape_obj.BoundaryObject.Shape
+                 bound_shape = temp_master_obj.BoundaryObject.Shape
                  
                  wires = bound_shape.Wires
-                 # Sort by length, assume longest is outer
                  wires.sort(key=lambda w: w.Length, reverse=True)
                  
                  if wires:
-                     # Discretize to recover polygon. Use Deflection to recover vertices efficiently
-                     # Discretize with Deflection returns points primarily at vertices/curve inflection
+                     # Discretize (Deflection)
                      outer_pts = [(v.x, v.y) for v in wires[0].discretize(Deflection=0.01)]
                      if outer_pts:
                          if outer_pts[0] != outer_pts[-1]: outer_pts.append(outer_pts[0])
                          poly = Polygon(outer_pts)
-                         
                          holes = []
                          for w in wires[1:]:
                              h_pts = [(v.x, v.y) for v in w.discretize(Deflection=0.01)]
@@ -154,39 +171,39 @@ class ShapePreparer:
                          
                          final_poly = Polygon(poly.exterior.coords, holes)
                          
-                         temp_shape_wrapper = Shape(master_shape_obj)
+                         temp_shape_wrapper = Shape(temp_master_obj)
                          temp_shape_wrapper.polygon = final_poly
-                         temp_shape_wrapper.source_centroid = master_shape_obj.Placement.Base.negative()
+                         temp_shape_wrapper.source_centroid = temp_master_obj.Placement.Base.negative()
                          
                          FreeCAD.Console.PrintMessage(f"SHAPE_PROC: Reusing cached geometry for '{label}'\n")
                          self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
              except Exception as e:
                  FreeCAD.Console.PrintWarning(f"Failed to reuse Master Geometry: {e}. Recalculating...\n")
                  temp_shape_wrapper = None
-
-        # Fallback / Recalc
+        
+        # Fallback / Recalc (On Temp Clone)
         if not temp_shape_wrapper:
-            temp_shape_wrapper = Shape(master_shape_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_shape_obj, spacing, boundary_resolution)
-            self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
-            
-            # Sync Boundary
-            if temp_shape_wrapper.polygon and hasattr(master_shape_obj, "BoundaryObject") and master_shape_obj.BoundaryObject:
-                 try:
-                     points = list(temp_shape_wrapper.polygon.exterior.coords)
-                     exterior_verts = [FreeCAD.Vector(v[0], v[1], 0) for v in points]
-                     wires = []
-                     if len(exterior_verts) > 2: wires.append(Part.makePolygon(exterior_verts))
-                     for interior in temp_shape_wrapper.polygon.interiors:
-                         interior_verts = [FreeCAD.Vector(v[0], v[1], 0) for v in interior.coords]
-                         if len(interior_verts) > 2: wires.append(Part.makePolygon(interior_verts))
-                     
-                     if wires:
-                        master_shape_obj.BoundaryObject.Shape = Part.makeCompound(wires)
-                 except Exception as e:
-                     FreeCAD.Console.PrintWarning(f"Could not update boundary for {label}: {e}\n")
+             temp_shape_wrapper = Shape(temp_master_obj)
+             shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, boundary_resolution)
+             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
+             
+             # Sync Boundary
+             if temp_shape_wrapper.polygon and hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
+                  try:
+                      points = list(temp_shape_wrapper.polygon.exterior.coords)
+                      exterior_verts = [FreeCAD.Vector(v[0], v[1], 0) for v in points]
+                      wires = []
+                      if len(exterior_verts) > 2: wires.append(Part.makePolygon(exterior_verts))
+                      for interior in temp_shape_wrapper.polygon.interiors:
+                          interior_verts = [FreeCAD.Vector(v[0], v[1], 0) for v in interior.coords]
+                          if len(interior_verts) > 2: wires.append(Part.makePolygon(interior_verts))
+                      
+                      if wires:
+                         temp_master_obj.BoundaryObject.Shape = Part.makeCompound(wires)
+                  except Exception as e:
+                      FreeCAD.Console.PrintWarning(f"Could not update boundary for {label}: {e}\n")
 
-        return master_shape_obj, temp_shape_wrapper
+        return temp_master_obj, temp_shape_wrapper
 
     def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, master_shapes_group, is_reloading):
         if not temp_shape_wrapper:

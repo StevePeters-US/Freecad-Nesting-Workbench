@@ -265,7 +265,13 @@ class Sheet:
                         shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), FreeCAD.Rotation())
                     else:
                         shape_obj.Placement = FreeCAD.Placement()
+
+                    if hasattr(shape_obj, "ViewObject"):
+                        shape_obj.ViewObject.Visibility = True
                     container.addObject(shape_obj)
+                    
+                    if hasattr(container, "ViewObject"):
+                        container.ViewObject.Visibility = True
 
                     # Apply the final nesting placement to the CONTAINER.
                     container.Placement = final_placement

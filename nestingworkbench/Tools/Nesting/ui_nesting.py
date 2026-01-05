@@ -253,7 +253,12 @@ class NestingPanel(QtGui.QWidget):
             self.font_label.setText(os.path.basename(layout_group.FontFile))
 
         # Get the shapes from the layout
-        master_shapes_group = layout_group.getObject("MasterShapes")
+        master_shapes_group = None
+        for child in layout_group.Group:
+            if child.Label.startswith("MasterShapes"):
+                master_shapes_group = child
+                break
+        
         if master_shapes_group:
             # The master shapes are now copies inside this group.
             # We need to find the actual ShapeObject inside each 'master_' container,

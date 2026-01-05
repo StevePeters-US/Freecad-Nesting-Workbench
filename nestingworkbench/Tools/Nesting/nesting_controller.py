@@ -328,6 +328,7 @@ class NestingController:
         self.ui.status_label.setText(status_text)
 
         if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
+        self._debug_dump_doc()
 
     def toggle_bounds_visibility(self):
         """Toggles the 'ShowBounds' property on all nested ShapeObjects in the document."""
@@ -472,6 +473,8 @@ class NestingController:
     def _debug_dump_doc(self):
         msg = "\n--- DEBUG DOCUMENT STRUCTURE ---\n"
         for obj in self.doc.Objects:
+            if obj.isDerivedFrom("App::Origin") or obj.isDerivedFrom("App::Line") or obj.isDerivedFrom("App::Plane") or obj.isDerivedFrom("App::Point"):
+                 continue
             msg += f"Object: {obj.Name} ({obj.Label}) Type: {obj.TypeId}\n"
             if hasattr(obj, "Group"):
                  msg += f"  Group children: {[c.Name for c in obj.Group]}\n"
@@ -489,16 +492,15 @@ class NestingController:
             
             # Check if we have new masters in temp
             temp_masters_group = None
-            for child in self.temp_layout.Group:
-                if child.Label == "MasterShapes":
+            current_temp_group = list(self.temp_layout.Group)
+            for child in current_temp_group:
+                if child.Label.startswith("MasterShapes"):
                     temp_masters_group = child
                     break
             
             has_new_masters = False
             if temp_masters_group and len(temp_masters_group.Group) > 0:
                 has_new_masters = True
-            
-            FreeCAD.Console.PrintMessage(f"DEBUG: Has New Masters: {has_new_masters}\n")
             
             # 1. Identify children to remove vs keep
             children_to_remove = []
@@ -507,7 +509,7 @@ class NestingController:
             for child in self.target_layout.Group:
                 if child.Label.startswith("Sheet_") or child.Label == "PartsToPlace":
                     children_to_remove.append(child)
-                elif child.Label == "MasterShapes":
+                elif child.Label.startswith("MasterShapes"):
                     if has_new_masters:
                         children_to_remove.append(child)
                     else:
@@ -518,31 +520,33 @@ class NestingController:
 
             # 2. Delete removals
             for child in children_to_remove:
-                # Recursive deletion helper
                 def delete_recursive(obj):
                      if hasattr(obj, "Group"):
-                         # Copy list to avoid modification during iteration issues
                          for c in list(obj.Group): delete_recursive(c)
                      try: self.doc.removeObject(obj.Name)
-                     except: pass
-                
+                     except Exception as e: FreeCAD.Console.PrintWarning(f"Failed to remove {obj.Name}: {e}\n")
                 delete_recursive(child)
             
             # 3. Move from Temp to Target
-            kids_to_move = []
-            for child in self.temp_layout.Group:
-                if child.Label == "MasterShapes" and not has_new_masters:
-                    # It's an empty or unused group. Delete and skip.
+            children_to_move = []
+            for child in current_temp_group:
+                if child.Label.startswith("MasterShapes") and not has_new_masters:
                     try: self.doc.removeObject(child.Name)
                     except: pass
                     continue
-                kids_to_move.append(child)
+                
+                # Enforce clean label for new MasterShapes
+                if child.Label.startswith("MasterShapes"):
+                    child.Label = "MasterShapes"
+                    
+                children_to_move.append(child)
             
-            # 4. Set Group (Preserve kept children + Add new kids)
-            self.target_layout.Group = children_to_keep + kids_to_move
+            # 4. Set Group
+            # Detach from Temp first to avoid "Object can only be in a single Group" error
+            self.temp_layout.Group = []
+            self.target_layout.Group = children_to_keep + children_to_move
             
-            # 5. Copy Properties
-            # Ensure properties exist on target
+            # 5. Properties
             def ensure_prop(obj, name, val, type_str="App::PropertyLength"):
                 if not hasattr(obj, name):
                     obj.addProperty(type_str, name, "Layout", "")
@@ -557,26 +561,28 @@ class NestingController:
             
             if hasattr(self.temp_layout, "FontFile"):
                 ensure_prop(self.target_layout, "FontFile", self.temp_layout.FontFile, "App::PropertyFile")
-            
-            # Copy other bool/int props if needed
              
             FreeCAD.Console.PrintMessage("DEBUG: Target Layout Updated Successfully.\n")
             
-            # Show Target
-            if hasattr(self.target_layout, "ViewObject"):
-                self.target_layout.ViewObject.Visibility = True
+            # CRITICAL: Clear Temp Layout Group before deleting to avoid issues
+            try: FreeCAD.Console.PrintMessage(f"DEBUG: Removing Temp Layout: {self.temp_layout.Name} ({self.temp_layout.Label}). Children: {[c.Name for c in self.temp_layout.Group]}\n")
+            except: pass
+            self.temp_layout.Group = []
 
-            # Finally, delete the temp layout object itself
+            # 6. Delete Temp Layout
             try:
                 self.doc.removeObject(self.temp_layout.Name)
                 FreeCAD.Console.PrintMessage("DEBUG: Temp Layout Object Removed.\n")
-            except: 
-                FreeCAD.Console.PrintWarning("DEBUG: Failed to remove Temp Layout Object.\n")
+            except Exception as e: 
+                FreeCAD.Console.PrintWarning(f"DEBUG: Failed to remove Temp Layout Object: {e}\n")
+            
+            if hasattr(self.target_layout, "ViewObject"):
+                self.target_layout.ViewObject.Visibility = True
             
             self.ui.current_layout = self.target_layout
+
         else:
             # --- New Layout ---
-            # Just rename the temp layout to a permanent unique name
             base_name, i = "Layout", 0
             existing_labels = [o.Label for o in self.doc.Objects]
             while f"{base_name}_{i:03d}" in existing_labels:
@@ -585,6 +591,13 @@ class NestingController:
             
             self.temp_layout.Label = final_name
             self.ui.current_layout = self.temp_layout
+            FreeCAD.Console.PrintMessage(f"DEBUG: Finalized New Layout {final_name}\n")
+
+        # Ensure MasterShapes are hidden
+        if self.ui.current_layout:
+            for child in self.ui.current_layout.Group:
+                if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
+                     child.ViewObject.Visibility = False
 
         self.target_layout = None
         self.temp_layout = None
