@@ -25,6 +25,9 @@ class MinkowskiNester(BaseNester):
         self._log_lock = Lock()
 
         self.discretize_edges = discretize_edges
+        # Default to (0, -1) which corresponds to "Down", matching original behavior (sort of)
+        # Original behavior was minimizing Y then X. (0, -1) minimizes Y.
+        self.search_direction = kwargs.get("search_direction", (0, -1))
 
     def nest(self, parts):
         """Overrides the base nester to add Minkowski-specific cleanup."""
@@ -83,14 +86,7 @@ class MinkowskiNester(BaseNester):
                 else:
                     FreeCAD.Console.PrintMessage(log_message + "\n")
 
-    def _handle_first_part(self, part_to_place, sheet, angle):
-        """Handles the placement of the first part on an empty sheet."""
-        part_to_place.set_rotation(angle)
-        # For the first part, we try to place its bottom-left corner at the origin.
-        part_to_place.move_to(0, 0)
-        if sheet.is_placement_valid(part_to_place):
-            return part_to_place
-        return None
+
 
     def _apply_nfp_to_part(self, placed_part, nfp_data):
         """Applies rotation and translation to a cached NFP for a specific placed part."""
@@ -188,7 +184,7 @@ class MinkowskiNester(BaseNester):
         return results
 
     def _find_best_placement(
-        self, part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts
+        self, part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts, direction
     ):
         """Finds the best placement for a given rotation."""
         best_placement_info = {'metric': float('inf')}
@@ -206,8 +202,14 @@ class MinkowskiNester(BaseNester):
         # The candidate points are for the centroid, so we need the centroid of the rotated part poly
         rotated_poly_centroid = rotated_part_poly.centroid
 
+        # Pre-calculate metric term factors
+        # We want to minimize: x * (-dir_x) + y * (-dir_y)
+        # This aligns "highest value in direction" with "lowest score"
+        dir_x, dir_y = direction
+        
         # --- Stage 1: Check holes first ---
-        hole_candidates.sort(key=lambda p: (p.y, p.x))
+        # Sort by proximity to target direction? Or just check all?
+        # Checking all is safer for optimality.
         for i, point in enumerate(hole_candidates):
 
             # The 'point' is where the centroid should be.
@@ -220,7 +222,13 @@ class MinkowskiNester(BaseNester):
             )
 
             if is_valid:
-                metric = point.y * self._bin_width + point.x
+                # Calculate metric: Dot product with negative direction vector
+                metric = point.x * (-dir_x) + point.y * (-dir_y)
+                
+                # Add a small tie-breaker using the perpendicular axis to keep things tidy
+                # minimizing perpendicular distance to origin line?
+                # For now, simple dot product is robust.
+                
                 if metric < best_placement_info['metric']:
                     best_placement_info = {
                         'x': point.x,
@@ -228,11 +236,29 @@ class MinkowskiNester(BaseNester):
                         'angle': angle,
                         'metric': metric,
                     }
-                return best_placement_info  # Found the best spot in a hole for this angle
+                # For holes, we might want to continue searching to find the DEEPEST hole spot?
+                # Original logic returned immediately. That assumes the candidates were sorted best-first.
+                # Since we changed methods, let's iterate them all for safety or sort them first.
+                # Sorting first avoids full checks on bad candidates. 
+                # But 'metric' depends on x/y. Let's just check all for holes (usually few candidates).
+                
+        if best_placement_info['metric'] != float('inf'):
+             return best_placement_info
 
         # --- Stage 2: If no hole fit, check external positions ---
-        external_candidates.sort(key=lambda p: (p.y, p.x))
+        # Sort candidates by potentially best metric to find a "good enough" one early?
+        # Actually finding the GLOBAL best for this rotation requires checking all valid ones 
+        # or having them sorted. sorting points by metric is fast.
+        external_candidates.sort(key=lambda p: p.x * (-dir_x) + p.y * (-dir_y))
+        
         for i, point in enumerate(external_candidates):
+            metric = point.x * (-dir_x) + point.y * (-dir_y)
+            
+            # Optimization: If this candidate's potential metric is already worse than best found, 
+            # and we are sorted, we can stop? 
+            # Only if we found a valid one already.
+            if metric >= best_placement_info['metric']:
+                 continue
 
             # The 'point' is where the centroid should be.
             dx = point.x - rotated_poly_centroid.x
@@ -244,7 +270,6 @@ class MinkowskiNester(BaseNester):
             )
 
             if is_valid:
-                metric = point.y * self._bin_width + point.x
                 if metric < best_placement_info['metric']:
                     best_placement_info = {
                         'x': point.x,
@@ -252,11 +277,12 @@ class MinkowskiNester(BaseNester):
                         'angle': angle,
                         'metric': metric,
                     }
+                # Since we sorted by metric, the first VALID one we find IS the best one for this rotation (in this group).
                 return best_placement_info  # Found the best external spot for this angle
 
         return best_placement_info
 
-    def _evaluate_rotation(self, angle, part_to_place, sheet, union_of_other_parts):
+    def _evaluate_rotation(self, angle, part_to_place, sheet, union_of_other_parts, direction):
         """
         Evaluates a single rotation angle to find the best possible placement.
         This is designed to be run in parallel for each angle.
@@ -271,7 +297,7 @@ class MinkowskiNester(BaseNester):
 
         # 2. Find the best placement for this specific angle.
         placement_info = self._find_best_placement(
-            part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts
+            part_to_place, sheet, angle, rotated_part_poly, individual_nfps, union_of_other_parts, direction
         )
 
         return placement_info
@@ -287,21 +313,20 @@ class MinkowskiNester(BaseNester):
         if part_to_place.original_polygon is None and part_to_place.polygon is not None:
             part_to_place.original_polygon = part_to_place.polygon
 
-        # --- Handle the first part on an empty sheet (no need for parallelization) ---
-        if not sheet.parts:
-            for i in range(part_to_place.rotation_steps):
-                angle = i * (360.0 / part_to_place.rotation_steps) if part_to_place.rotation_steps > 1 else 0.0
-                placed_part = self._handle_first_part(part_to_place, sheet, angle)
-                if placed_part:
-                    return placed_part
-            return None # Could not place even on an empty sheet
+        if self.search_direction is None:
+             # Generata random direction on unit circle
+             # We want a random angle.
+             angle_rad = random.uniform(0, 2 * math.pi)
+             part_direction = (math.cos(angle_rad), math.sin(angle_rad))
+        else:
+             part_direction = self.search_direction
 
         # --- Parallel evaluation of all rotation angles ---
         best_placement_info = {'metric': float('inf')}
         with ThreadPoolExecutor() as executor:
             angles = [i * (360.0 / part_to_place.rotation_steps) for i in range(part_to_place.rotation_steps)]
             
-            future_to_angle = {executor.submit(self._evaluate_rotation, angle, part_to_place, sheet, union_of_other_parts): angle for angle in angles}
+            future_to_angle = {executor.submit(self._evaluate_rotation, angle, part_to_place, sheet, union_of_other_parts, part_direction): angle for angle in angles}
 
             for future in as_completed(future_to_angle):
                 placement_info = future.result()
@@ -387,8 +412,27 @@ class MinkowskiNester(BaseNester):
         # This is where the part's centroid would be placed.
         if part_to_place_poly:
             min_x, min_y, max_x, max_y = part_to_place_poly.bounds
-            # Add the point that would place the part's bottom-left at the origin
+            
+            # Add Candidates for all 4 corners of the bin.
+            # 1. Bottom-Left: Part's min_x, min_y at 0,0
             external_points.append(Point(-min_x, -min_y))
+            
+            # 2. Bottom-Right: Part's max_x at Width, min_y at 0.
+            #    We place the centroid such that max_x = Width.
+            #    Centroid + max_x_offset = Width => Centroid = Width - max_x_offset.
+            #    Actually, `bounds` are in the polygon's local coordinates (relative to centroid/original system).
+            #    If we translate by (dx, dy), new bounds are (min_x+dx, ...).
+            #    We want min_x+dx = 0 => dx = -min_x.  (matches Bottom-Left logic).
+            #    We want max_x+dx = BinWidth => dx = BinWidth - max_x.
+            #    We want min_y+dy = 0 => dy = -min_y.
+            #    We want max_y+dy = BinHeight => dy = BinHeight - max_y.
+            
+            w_bin = self._bin_width
+            h_bin = self._bin_height
+            
+            external_points.append(Point(w_bin - max_x, -min_y)) # Bottom-Right
+            external_points.append(Point(-min_x, h_bin - max_y)) # Top-Left
+            external_points.append(Point(w_bin - max_x, h_bin - max_y)) # Top-Right
 
         # The vertices of each individual NFP are the primary candidates for placement of the part's reference point.
         # These represent the locations where the part can touch an existing part.

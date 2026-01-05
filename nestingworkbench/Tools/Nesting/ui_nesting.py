@@ -70,6 +70,40 @@ class NestingPanel(QtGui.QWidget):
         self.genetic_settings_group.setLayout(genetic_form_layout)
 
 
+
+        # --- Minkowski Packer Settings ---
+        self.minkowski_settings_group = QtGui.QGroupBox("Minkowski Nester Settings")
+        minkowski_form_layout = QtGui.QFormLayout()
+
+        # Direction Dial for Minkowski
+        self.minkowski_direction_dial = QtGui.QDial()
+        self.minkowski_direction_dial.setRange(0, 359)
+        self.minkowski_direction_dial.setValue(0) # Default to Down
+        self.minkowski_direction_dial.setWrapping(True)
+        self.minkowski_direction_dial.setNotchesVisible(True)
+        self.minkowski_direction_label = QtGui.QLabel("Down")
+        self.minkowski_direction_label.setAlignment(QtCore.Qt.AlignCenter)
+        
+        def update_minkowski_dial_label(value):
+            direction_map = {0: "Down", 90: "Left", 180: "Up", 270: "Right"}
+            direction_text = direction_map.get(value, "")
+            self.minkowski_direction_label.setText(direction_text if direction_text else f"{value}°")
+        self.minkowski_direction_dial.valueChanged.connect(update_minkowski_dial_label)
+
+        minkowski_dial_layout = QtGui.QVBoxLayout()
+        minkowski_dial_layout.addWidget(self.minkowski_direction_dial)
+        minkowski_dial_layout.addWidget(self.minkowski_direction_label)
+
+        # Random Direction Checkbox for Minkowski
+        self.minkowski_random_checkbox = QtGui.QCheckBox("Use Random Strategy")
+        self.minkowski_random_checkbox.setToolTip("If checked, each part will use a randomized placement weighting.")
+        self.minkowski_random_checkbox.stateChanged.connect(lambda state: self.minkowski_direction_dial.setDisabled(state))
+
+        minkowski_form_layout.addRow("Packing Direction:", minkowski_dial_layout)
+        minkowski_form_layout.addRow(self.minkowski_random_checkbox)
+        self.minkowski_settings_group.setLayout(minkowski_form_layout)
+
+
         # --- Gravity Packer Settings ---
         self.gravity_settings_group = QtGui.QGroupBox("Gravity Nester Settings")
         gravity_form_layout = QtGui.QFormLayout()
@@ -153,6 +187,7 @@ class NestingPanel(QtGui.QWidget):
         form_layout.addRow("Boundary Resolution:", self.boundary_resolution_input)
         form_layout.addRow("Algorithm:", self.algorithm_dropdown)
         form_layout.addRow(self.genetic_settings_group)
+        form_layout.addRow(self.minkowski_settings_group)
         form_layout.addRow(self.gravity_settings_group)
         form_layout.addRow("Identifier Font:", font_layout)
         form_layout.addRow(label_options_layout)
@@ -201,6 +236,7 @@ class NestingPanel(QtGui.QWidget):
         """Shows or hides algorithm-specific settings."""
         algo_name = self.algorithm_dropdown.itemText(index)
         self.genetic_settings_group.setVisible(algo_name == "Genetic")
+        self.minkowski_settings_group.setVisible(algo_name == "Minkowski")
         self.gravity_settings_group.setVisible(algo_name == "Gravity")
 
     def load_selection(self):

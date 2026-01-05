@@ -147,6 +147,15 @@ class NestingController:
             algo_kwargs['anneal_steps'] = self.ui.gravity_anneal_steps_input.value() # This widget is in NestingPanel
             algo_kwargs['max_nesting_steps'] = self.ui.gravity_max_nesting_steps_input.value() # This widget is in NestingPanel
 
+        if algorithm == 'Minkowski':
+            if self.ui.minkowski_random_checkbox.isChecked():
+                algo_kwargs['search_direction'] = None
+            else:
+                # Same coordinate logic as gravity: 0=Down, 90=Right, etc.
+                angle_deg = (270 - self.ui.minkowski_direction_dial.value()) % 360
+                angle_rad = math.radians(angle_deg)
+                algo_kwargs['search_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
+
         if algorithm == 'Genetic':
             algo_kwargs['population_size'] = self.ui.genetic_population_size_input.value()
             algo_kwargs['generations'] = self.ui.genetic_generations_input.value()
