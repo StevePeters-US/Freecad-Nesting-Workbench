@@ -25,6 +25,10 @@ class MinkowskiEngine:
         if self.log_callback:
             with self._log_lock:
                 self.log_callback("MINKOWSKI_ENGINE: " + message)
+        else:
+             # Fallback to FreeCAD console if no callback is wired
+             import FreeCAD
+             FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {message}\n")
 
     def is_placement_valid_with_holes(self, polygon_to_check, sheet, union_of_other_parts):
         """
@@ -131,9 +135,9 @@ class MinkowskiEngine:
             # 1. Retrieve or Calculate NFP
             nfp_data = Shape.nfp_cache.get(cache_key)
             if not nfp_data:
+                self.log(f"DEBUG: NFP cache MISS for {cache_key}")
                 # Calculate synchronously to avoid nested thread pool overhead
                 # The outer loop in Nester is already parallelized
-                # self.log(f"DEBUG: NFP cache MISS for {cache_key}")
                 first_part = parts[0]
                 nfp_data = self._calculate_and_cache_nfp(
                     first_part.shape, 
@@ -142,8 +146,8 @@ class MinkowskiEngine:
                     relative_angle, 
                     cache_key
                 )
-            # else:
-                # self.log(f"DEBUG: NFP cache HIT for {cache_key}")
+            else:
+                self.log(f"DEBUG: NFP cache HIT for {cache_key}")
             
             if not nfp_data:
                 continue
