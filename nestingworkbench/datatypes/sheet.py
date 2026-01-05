@@ -187,13 +187,10 @@ class Sheet:
                     doc.removeObject(child.Name)
 
             shapes_group_name = f"Shapes_{self.id+1}"
-            text_group_name = f"Text_{self.id+1}"
             
             shapes_group = doc.addObject("App::DocumentObjectGroup", shapes_group_name)
-            text_group = doc.addObject("App::DocumentObjectGroup", text_group_name)
             
             sheet_group.addObject(shapes_group)
-            sheet_group.addObject(text_group)
 
             # Draw sheet boundary
             sheet_boundary_name = f"Sheet_Boundary_{self.id+1}"
@@ -210,13 +207,13 @@ class Sheet:
             # Draw the parts placed on this sheet
             FreeCAD.Console.PrintMessage(f"DEBUG: --- Drawing Sheet {self.id+1} --- \n")
             for placed_part in self.parts:
-                self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, shapes_group, text_group)
+                self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, shapes_group)
 
         # --- Simulation Drawing Mode (with transient_part) ---
         elif transient_part:
             self._draw_single_part(doc, transient_part, sheet_origin, ui_params)
 
-    def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None, text_group=None):
+    def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None):
         """Helper to draw a single part, either for final placement or simulation."""
         if shape:
             # FreeCAD.Console.PrintMessage(f"DEBUG:   Attempting to draw part '{shape.id}' (id={id(shape)}). Checking for fc_object...\n")
@@ -272,7 +269,8 @@ class Sheet:
                     # FreeCAD.Console.PrintMessage(f"DEBUG: PLACEMENT for '{container.Label}': {container.Placement}")
 
                     # --- Handle the label object AFTER the container is placed ---
-                    if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text and text_group:
+                    # --- Handle the label object AFTER the container is placed ---
+                    if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
                         label_name = f"label_{shape.id}"
                         label_obj = doc.getObject(label_name)
                         if label_obj:
@@ -283,13 +281,20 @@ class Sheet:
                         label_obj.Shape = shapestring_geom.Shape
                         doc.removeObject(shapestring_geom.Name)
                         
+                        # Add label to the CONTAINER (same scope as part)
+                        container.addObject(label_obj)
+                        
+                        # Calculate local placement relative to the part inside the container
                         shapestring_center = label_obj.Shape.BoundBox.Center
-                        final_part_center = container.Placement.Base
-                        target_label_center = final_part_center + FreeCAD.Vector(0, 0, ui_params.get('label_height', 0.1))
+                        
+                        # The part is centered at (0,0,0) within the container because we applied 
+                        # shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), ...)
+                        # So the target visual center for the label is simply (0,0, Z_height)
+                        
+                        target_label_center = FreeCAD.Vector(0, 0, ui_params.get('label_height', 0.1))
                         label_placement_base = target_label_center - shapestring_center
                         label_obj.Placement = FreeCAD.Placement(label_placement_base, FreeCAD.Rotation())
                         
-                        text_group.addObject(label_obj)
                         shape_obj.LabelObject = label_obj
 
                     # Set visibility on the main shape object

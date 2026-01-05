@@ -77,6 +77,10 @@ class SheetStacker:
             FreeCAD.Console.PrintMessage("No valid packed layout found to stack/unstack.\n")
             return
         
+        if not hasattr(self.layout_group, "IsStacked"):
+             self.layout_group.addProperty("App::PropertyBool", "IsStacked", "Nesting")
+             self.layout_group.IsStacked = False
+        
         if self.layout_group.IsStacked:
             self._unstack()
         else:

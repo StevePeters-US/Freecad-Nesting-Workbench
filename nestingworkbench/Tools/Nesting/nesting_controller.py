@@ -135,6 +135,7 @@ class NestingController:
         set_or_add_property(layout_obj, "App::PropertyBool", "ShowBounds", "Layout", "Visibility of part boundaries", self.ui.show_bounds_checkbox.isChecked())
         set_or_add_property(layout_obj, "App::PropertyBool", "AddLabels", "Layout", "Whether part labels are enabled", self.ui.add_labels_checkbox.isChecked())
         set_or_add_property(layout_obj, "App::PropertyLength", "LabelHeight", "Layout", "Height of the part labels", self.ui.label_height_input.value())
+        set_or_add_property(layout_obj, "App::PropertyBool", "IsStacked", "Layout", "Whether sheets are stacked", False)
 
         QtGui.QApplication.processEvents()
         # Ensure the new layout group is visible by default.
