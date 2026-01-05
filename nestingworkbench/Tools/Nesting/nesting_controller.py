@@ -83,23 +83,58 @@ class NestingController:
         self.ui.status_label.setText("Preparing shapes...")
         QtGui.QApplication.processEvents()
 
-        # --- Create the final LayoutObject FIRST ---
-        FreeCAD.Console.PrintMessage("1. Creating LayoutObject...\n")
-        base_name, i = "Layout", 0
-        existing_labels = [o.Label for o in self.doc.Objects]
-        while f"{base_name}_{i:03d}" in existing_labels:
-            i += 1
-        layout_name = f"{base_name}_{i:03d}"
+        # --- Create or Retrieve the LayoutObject ---
+        FreeCAD.Console.PrintMessage("1. Creating/Updating LayoutObject...\n")
+        
+        # 0. Check if UI already has a tracked layout (e.g. from previous run)
+        layout_obj = getattr(self.ui, 'current_layout', None)
+        
+        # 1. Helper to traverse up: master_shape -> master_container -> MasterShapes -> Layout
+        if not layout_obj and self.ui.selected_shapes_to_process and self.ui.selected_shapes_to_process[0].Label.startswith("master_shape_"):
+            try:
+                first_shape = self.ui.selected_shapes_to_process[0]
+                if first_shape.InList:
+                    master_container = first_shape.InList[0]
+                    if master_container.InList:
+                        master_group = master_container.InList[0]
+                        if master_group.InList and master_group.Label == "MasterShapes":
+                             layout_candidate = master_group.InList[0]
+                             if layout_candidate.Label.startswith("Layout_"):
+                                 layout_obj = layout_candidate
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"   -> Could not determine parent layout: {e}\n")
 
-        layout_obj = self.doc.addObject("App::DocumentObjectGroup", layout_name)
+        if layout_obj:
+             FreeCAD.Console.PrintMessage(f"   -> Updating existing layout: {layout_obj.Label}\n")
+             # Clean up old results. We ONLY remove 'PartsToPlace' here. 
+             # We rely on Sheet.draw reusing existing 'Sheet_X' groups, 
+             # and we will delete any excess sheets at the end.
+             for child in list(layout_obj.Group):
+                 if child.Label == "PartsToPlace":
+                     self.doc.removeObject(child.Name)
+        else:
+            base_name, i = "Layout", 0
+            existing_labels = [o.Label for o in self.doc.Objects]
+            while f"{base_name}_{i:03d}" in existing_labels:
+                i += 1
+            layout_name = f"{base_name}_{i:03d}"
+            layout_obj = self.doc.addObject("App::DocumentObjectGroup", layout_name)
+        
+        # Track this layout in the UI so subsequent clicks reuse it
+        self.ui.current_layout = layout_obj
         # --- Store UI Parameters on the Layout Object ---
-        layout_obj.addProperty("App::PropertyLength", "SheetWidth", "Layout", "Width of the nested sheets").SheetWidth = self.ui.sheet_width_input.value()
-        layout_obj.addProperty("App::PropertyLength", "SheetHeight", "Layout", "Height of the nested sheets").SheetHeight = self.ui.sheet_height_input.value()
-        layout_obj.addProperty("App::PropertyLength", "PartSpacing", "Layout", "Spacing between parts").PartSpacing = self.ui.part_spacing_input.value()
-        layout_obj.addProperty("App::PropertyFile", "FontFile", "Layout", "Font file used for labels").FontFile = self.ui.selected_font_path
-        layout_obj.addProperty("App::PropertyBool", "ShowBounds", "Layout", "Visibility of part boundaries").ShowBounds = self.ui.show_bounds_checkbox.isChecked()
-        layout_obj.addProperty("App::PropertyBool", "AddLabels", "Layout", "Whether part labels are enabled").AddLabels = self.ui.add_labels_checkbox.isChecked()
-        layout_obj.addProperty("App::PropertyLength", "LabelHeight", "Layout", "Height of the part labels").LabelHeight = self.ui.label_height_input.value()
+        def set_or_add_property(obj, prop_type, prop_name, prop_group, prop_desc, value):
+            if not hasattr(obj, prop_name):
+                 obj.addProperty(prop_type, prop_name, prop_group, prop_desc)
+            setattr(obj, prop_name, value)
+
+        set_or_add_property(layout_obj, "App::PropertyLength", "SheetWidth", "Layout", "Width of the nested sheets", self.ui.sheet_width_input.value())
+        set_or_add_property(layout_obj, "App::PropertyLength", "SheetHeight", "Layout", "Height of the nested sheets", self.ui.sheet_height_input.value())
+        set_or_add_property(layout_obj, "App::PropertyLength", "PartSpacing", "Layout", "Spacing between parts", self.ui.part_spacing_input.value())
+        set_or_add_property(layout_obj, "App::PropertyFile", "FontFile", "Layout", "Font file used for labels", self.ui.selected_font_path)
+        set_or_add_property(layout_obj, "App::PropertyBool", "ShowBounds", "Layout", "Visibility of part boundaries", self.ui.show_bounds_checkbox.isChecked())
+        set_or_add_property(layout_obj, "App::PropertyBool", "AddLabels", "Layout", "Whether part labels are enabled", self.ui.add_labels_checkbox.isChecked())
+        set_or_add_property(layout_obj, "App::PropertyLength", "LabelHeight", "Layout", "Height of the part labels", self.ui.label_height_input.value())
 
         QtGui.QApplication.processEvents()
         # Ensure the new layout group is visible by default.
@@ -196,8 +231,26 @@ class NestingController:
                 layout_obj # The parent group is the layout object itself
             )
         
+        # --- Cleanup Excess Sheets ---
+        # If the previous run had more sheets (e.g. 5) than this run (e.g. 3),
+        # we need to remove Sheet_4 and Sheet_5.
+        num_sheets = len(sheets)
+        for child in list(layout_obj.Group):
+            if child.Label.startswith("Sheet_"):
+                try:
+                    # Extract ID from "Sheet_X"
+                    sheet_id = int(child.Label.split('_')[1])
+                    if sheet_id > num_sheets:
+                        FreeCAD.Console.PrintMessage(f"Cleaning up unused sheet: {child.Label}\n")
+                        self.doc.removeObject(child.Name)
+                except (ValueError, IndexError):
+                    pass # Ignore if label format doesn't match
+        
         # Now that the recompute is finished and parts are moved, it is safe to remove the empty group.
-        self.doc.removeObject(parts_to_place_group.Name)
+        # Check if it still exists (it might have been removed via layout cleanup already if Logic reuse/naming was mismatched)
+        parts_group = self.doc.getObject("PartsToPlace")
+        if parts_group:
+             self.doc.removeObject(parts_group.Name)
         
         placed_count = sum(len(s) for s in sheets)
 
@@ -267,9 +320,16 @@ class NestingController:
         # Otherwise, use the original user-selected shapes.
         master_shapes_from_ui = {obj.Label: obj for obj in self.ui.selected_shapes_to_process if obj.Label in quantities and (not is_reloading or obj.Label.startswith("master_shape_"))}
 
-        # --- Create the hidden MasterShapes group ---
-        master_shapes_group = self.doc.addObject("App::DocumentObjectGroup", "MasterShapes")
-        layout_obj.addObject(master_shapes_group)
+        # --- Create or Retrieve the hidden MasterShapes group ---
+        master_shapes_group = None
+        for child in layout_obj.Group:
+             if child.Label == "MasterShapes":
+                 master_shapes_group = child
+                 break
+        
+        if not master_shapes_group:
+            master_shapes_group = self.doc.addObject("App::DocumentObjectGroup", "MasterShapes")
+            layout_obj.addObject(master_shapes_group)
         # The master shapes group is for internal reference and should not be visible.
         if hasattr(master_shapes_group, "ViewObject"):
             master_shapes_group.ViewObject.Visibility = False

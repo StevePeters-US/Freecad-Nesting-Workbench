@@ -157,16 +157,50 @@ class Sheet:
         # --- Final Drawing Mode (with parent_group) ---
         if parent_group:
             self.parent_group_name = parent_group.Name
-            # Create the group structure for this sheet
-            sheet_group = doc.addObject("App::DocumentObjectGroup", f"Sheet_{self.id+1}")
-            shapes_group = doc.addObject("App::DocumentObjectGroup", f"Shapes_{self.id+1}")
-            text_group = doc.addObject("App::DocumentObjectGroup", f"Text_{self.id+1}")
+            # Create or Retrieve the group structure for this sheet
+            sheet_group_name = f"Sheet_{self.id+1}"
+            sheet_group = parent_group.getObject(sheet_group_name)
+            
+            # Since we cleared the layout children in the controller, we expect to create new ones.
+            # However, if the user manually kept something, or if the cleanup failed, we should be robust.
+            # But wait, the controller explicitly deletes children starting with 'Sheet_'.
+            # The issue described is "Creates 3 new folders - shapes_X, text_x, sheet_boundary_x".
+            # This implies `doc.addObject` is creating unique names like 'Shapes_1001', 'Shapes_1002' 
+            # while the sheet group itself might be successfully recreated as 'Sheet_1'.
+            
+            # Actually, `doc.addObject` will auto-increment names if "Sheet_1" exists in the document 
+            # (even if deleted but not purged? No, deleted objects are gone).
+            # The user says "new folders - shapes_X...".
+            # If we just deleted "Sheet_1", we can recreate "Sheet_1".
+            
+            if not sheet_group:
+                 sheet_group = doc.addObject("App::DocumentObjectGroup", sheet_group_name)
+                 parent_group.addObject(sheet_group)
+            else:
+                # If we are reusing the sheet group, we must ensure it is empty of old contents.
+                # The controller removes the Sheet group itself, but if we are in a state where it wasn't removed,
+                # or if we found a lingering group by name, we need to clean it.
+                # Actually, simply clearing the group's children is safer than deleting/recreating.
+                # Note: doc.removeObject deletes the object from the document.
+                # We need to iterate over a copy of the list.
+                for child in list(sheet_group.Group):
+                    doc.removeObject(child.Name)
+
+            shapes_group_name = f"Shapes_{self.id+1}"
+            text_group_name = f"Text_{self.id+1}"
+            
+            shapes_group = doc.addObject("App::DocumentObjectGroup", shapes_group_name)
+            text_group = doc.addObject("App::DocumentObjectGroup", text_group_name)
+            
             sheet_group.addObject(shapes_group)
             sheet_group.addObject(text_group)
-            parent_group.addObject(sheet_group)
 
             # Draw sheet boundary
-            sheet_obj = doc.addObject("Part::Feature", f"Sheet_Boundary_{self.id+1}")
+            sheet_boundary_name = f"Sheet_Boundary_{self.id+1}"
+            sheet_obj = doc.getObject(sheet_boundary_name)
+            if not sheet_obj:
+                sheet_obj = doc.addObject("Part::Feature", sheet_boundary_name)
+            
             sheet_obj.Shape = Part.makePlane(self.width, self.height)
             sheet_obj.Placement = FreeCAD.Placement(sheet_origin, FreeCAD.Rotation())
             sheet_group.addObject(sheet_obj)
@@ -196,8 +230,27 @@ class Sheet:
                 # During simulation, we just move the existing part.
                 # For final drawing, we create a container.
                 if shapes_group:
-                    # Create a container to hold the part and its bounds, which will be rotated.
-                    container = doc.addObject("App::Part", f"nested_{shape.id}")
+                    # Create or Retrieve a container to hold the part and its bounds
+                    container_name = f"nested_{shape.id}"
+                    container = doc.getObject(container_name)
+                    if not container:
+                         container = doc.addObject("App::Part", container_name)
+                    else:
+                         # Clear existing contents if reusing
+                         for child in list(container.Group):
+                             # Be careful not to delete the master shape object itself, 
+                             # but wait, the master shape object is LINKED here, not created here?
+                             # In nesting_controller loop: `part_copy = self.doc.copyObject(master_shape_obj, True)`
+                             # The `shape.fc_object` IS `part_copy`.
+                             # And we add `shape_obj` (which is `part_copy`) into `container`.
+                             # So the container holds the unique copy for this instance.
+                             # If we are reusing the container, we probably need to remove the OLD copy if it exists?
+                             # But `shape.fc_object` is a NEW copy created in this run by the controller's `_prepare_parts_from_ui`.
+                             # So the container from a previous run contains the OLD copy.
+                             # We should empty the container.
+                             # Note: doc.removeObject deletes it from document. 
+                             doc.removeObject(child.Name)
+                             
                     shapes_group.addObject(container)
 
                     # Place the boundary object at the container's origin. It is the reference.
@@ -220,7 +273,12 @@ class Sheet:
 
                     # --- Handle the label object AFTER the container is placed ---
                     if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text and text_group:
-                        label_obj = create_label_object(f"label_{shape.id}")
+                        label_name = f"label_{shape.id}"
+                        label_obj = doc.getObject(label_name)
+                        if label_obj:
+                            doc.removeObject(label_name)
+                            
+                        label_obj = create_label_object(label_name)
                         shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('spacing', 0) * 0.6)
                         label_obj.Shape = shapestring_geom.Shape
                         doc.removeObject(shapestring_geom.Name)

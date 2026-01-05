@@ -20,6 +20,7 @@ class NestingPanel(QtGui.QWidget):
         self.setWindowTitle("Nesting Tool")
         self.selected_shapes_to_process = []
         self.hidden_originals = []
+        self.current_layout = None
         self.selected_font_path = ""
         self.initUI()
         self.load_selection()
@@ -206,6 +207,7 @@ class NestingPanel(QtGui.QWidget):
 
     def load_layout(self, layout_group):
         """Loads the parameters and shapes from a layout group."""
+        self.current_layout = layout_group
         self.nest_button.setEnabled(True)
         self.selected_shapes_to_process = []
         self.hidden_originals = []
@@ -243,6 +245,7 @@ class NestingPanel(QtGui.QWidget):
         self.nest_button.setEnabled(True)
         self.selected_shapes_to_process = list(dict.fromkeys(selection)) # Keep unique, preserve order
         if not is_reloading_layout:
+            self.current_layout = None
             self.hidden_originals = list(self.selected_shapes_to_process)
         
         self.shape_table.setRowCount(len(self.selected_shapes_to_process))
