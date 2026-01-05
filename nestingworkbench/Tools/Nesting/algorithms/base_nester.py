@@ -7,6 +7,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from shapely.geometry import Polygon
 from shapely.ops import unary_union
+from shapely.prepared import prep
 from shapely.affinity import rotate, translate
 
 import FreeCAD
@@ -29,7 +30,7 @@ class PlacementOptimizer:
         if self.log_callback:
             self.log_callback(message)
 
-    def find_best_placement(self, part, sheet, union_others):
+    def find_best_placement(self, part, sheet):
         """
         Parallel evaluation of rotations to find best spot.
         """
@@ -53,7 +54,7 @@ class PlacementOptimizer:
         with ThreadPoolExecutor() as executor:
             angles = [i * (360.0 / self.rotation_steps) for i in range(self.rotation_steps)]
             futures = {
-                executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, union_others, direction): angle 
+                executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle 
                 for angle in angles
             }
             
@@ -69,7 +70,7 @@ class PlacementOptimizer:
              return part
         return None
 
-    def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, union_others, direction):
+    def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, direction):
         # self.log(f"DEBUG: Checking Angle {angle} for {part.id}")
         
         # 1. Get NFPs from Engine
@@ -77,9 +78,10 @@ class PlacementOptimizer:
         
         # Optimization: Use NFP polygons directly for collision checking
         nfp_polygons = [res['polygon'] for res in nfps]
-        bin_polygon = Polygon([(0, 0), (sheet.width, 0), (sheet.width, sheet.height), (0, sheet.height)])
+        bin_polygon = self.engine.bin_polygon
         
         merged_nfp = unary_union(nfp_polygons) if nfp_polygons else None
+        prepared_nfp = prep(merged_nfp) if merged_nfp else None
 
         # 2. Get Candidates from Engine
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
@@ -96,8 +98,8 @@ class PlacementOptimizer:
         # Function to score a point
         def score_point(pt):
              dx, dy = pt.x - centroid.x, pt.y - centroid.y
-             # Check NFP
-             if merged_nfp and merged_nfp.contains(pt): return None
+             # Check NFP efficiently (Point in Polygon)
+             if prepared_nfp and prepared_nfp.contains(pt): return None
              # Check Bounds
              test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
              if not bin_polygon.contains(test_poly): return None
@@ -278,12 +280,15 @@ class Nester:
 
     def _attempt_placement_on_sheet(self, part, sheet):
         """Delegates to PlacementOptimizer."""
-        other_polys = [p.shape.polygon for p in sheet.parts if p.shape.polygon]
-        union_others = unary_union(other_polys) if other_polys else None
+        # Removed early unary_union calculation for optimization
         
-        placed_part = self.optimizer.find_best_placement(part, sheet, union_others)
+        placed_part = self.optimizer.find_best_placement(part, sheet)
         
         if placed_part:
+            # Calc union only when needed for validity check
+            other_polys = [p.shape.polygon for p in sheet.parts if p.shape.polygon]
+            union_others = unary_union(other_polys) if other_polys else None
+
             # Double check validity with engine (optional/redundant but good for safety)
             if self.engine.is_placement_valid_with_holes(placed_part.polygon, sheet, union_others):
                 placed_part.placement = placed_part.get_final_placement(sheet.get_origin())

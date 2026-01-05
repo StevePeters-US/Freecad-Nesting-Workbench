@@ -20,6 +20,7 @@ class MinkowskiEngine:
         self.discretize_edges = discretize_edges
         self.log_callback = log_callback
         self._log_lock = Lock()
+        self.bin_polygon = Polygon([(0, 0), (self.bin_width, 0), (self.bin_width, self.bin_height), (0, self.bin_height)])
 
     def log(self, message):
         if self.log_callback:
@@ -35,8 +36,7 @@ class MinkowskiEngine:
         Custom validation function for Minkowski that correctly handles holes.
         """
         # 1. Check containment within sheet boundaries
-        bin_polygon = Polygon([(0, 0), (self.bin_width, 0), (self.bin_width, self.bin_height), (0, self.bin_height)])
-        if not bin_polygon.contains(polygon_to_check):
+        if not self.bin_polygon.contains(polygon_to_check):
             return False
 
         # 2. Check against the pre-calculated union of other parts
@@ -215,20 +215,22 @@ class MinkowskiEngine:
         rotated_nfp = rotate(master_nfp, placed_part_angle, origin=(0, 0))
         translated_nfp = translate(rotated_nfp, xoff=xoff, yoff=yoff)
         
-        def transform_point(p):
-            if placed_part_angle != 0:
-                rad = math.radians(placed_part_angle)
-                cos_a = math.cos(rad)
-                sin_a = math.sin(rad)
-                rx = p.x * cos_a - p.y * sin_a
-                ry = p.x * sin_a + p.y * cos_a
-                p = Point(rx, ry)
-            return Point(p.x + xoff, p.y + yoff)
+        # Optimize point transformation using Shapely's affinity on MultiPoint
+        # This pushes the iteration to C++ (GEOS) rather than Python loops
+        
+        # Exterior
+        ext_mp = MultiPoint(nfp_data["exterior_points"])
+        rotated_ext = rotate(ext_mp, placed_part_angle, origin=(0, 0))
+        translated_ext = translate(rotated_ext, xoff=xoff, yoff=yoff)
+        translated_exterior_points = list(translated_ext.geoms)
 
-        translated_exterior_points = [transform_point(p) for p in nfp_data["exterior_points"]]
+        # Interiors
         translated_interior_points = []
         for interior_points in nfp_data["interior_points"]:
-            translated_interior_points.append([transform_point(p) for p in interior_points])
+            int_mp = MultiPoint(interior_points)
+            rotated_int = rotate(int_mp, placed_part_angle, origin=(0, 0))
+            translated_int = translate(rotated_int, xoff=xoff, yoff=yoff)
+            translated_interior_points.append(list(translated_int.geoms))
 
         return {
             "polygon": translated_nfp,
