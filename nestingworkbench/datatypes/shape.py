@@ -104,7 +104,9 @@ class Shape:
         final_polygon = translate(self.polygon, xoff=sheet_origin.x, yoff=sheet_origin.y)
 
         bound_obj_name = f"bound_{self.id}"
-        bound_obj = doc.getObject(bound_obj_name)
+        # ALWAYS create new boundary object - don't reuse existing ones as they may belong to other layouts
+        # FreeCAD will auto-rename if there's a name collision (e.g., bound_Triangle001)
+        bound_obj = doc.addObject("Part::Feature", bound_obj_name)
 
         wires = []
         # Create exterior wire
@@ -114,17 +116,15 @@ class Shape:
         for i, interior in enumerate(final_polygon.interiors):
             interior_verts = [FreeCAD.Vector(v[0], v[1], 0) for v in interior.coords]
             if len(interior_verts) > 2: wires.append(Part.makePolygon(interior_verts))
-        if not wires: return None
+        if not wires:
+            # Remove the empty object we created
+            doc.removeObject(bound_obj.Name)
+            return None
 
         new_shape = Part.makeCompound(wires)
-
-        if bound_obj:
-            bound_obj.Shape = new_shape
-        else:
-            bound_obj = doc.addObject("Part::Feature", bound_obj_name)
-            bound_obj.Shape = new_shape
-            if group: group.addObject(bound_obj)
-            if FreeCAD.GuiUp: bound_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)
+        bound_obj.Shape = new_shape
+        if group: group.addObject(bound_obj)
+        if FreeCAD.GuiUp: bound_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)
         return bound_obj
 
     def get_final_placement(self, sheet_origin=None):

@@ -237,6 +237,7 @@ class NestingPanel(QtGui.QWidget):
 
     def load_layout(self, layout_group):
         """Loads the parameters and shapes from a layout group."""
+        FreeCAD.Console.PrintMessage(f"\n=== DEBUG: load_layout({layout_group.Label}) ===\n")
         self.current_layout = layout_group
         self.nest_button.setEnabled(True)
         self.selected_shapes_to_process = []
@@ -255,12 +256,15 @@ class NestingPanel(QtGui.QWidget):
 
         # Get the shapes from the layout
         master_shapes_group = None
+        FreeCAD.Console.PrintMessage(f"  Layout children: {[c.Label for c in layout_group.Group]}\n")
         for child in layout_group.Group:
             if child.Label.startswith("MasterShapes"):
                 master_shapes_group = child
                 break
         
         if master_shapes_group:
+            FreeCAD.Console.PrintMessage(f"  Found MasterShapes: {master_shapes_group.Label}\n")
+            FreeCAD.Console.PrintMessage(f"  MasterShapes children: {[c.Label for c in master_shapes_group.Group]}\n")
             # The master shapes are now copies inside this group.
             # We need to find the actual ShapeObject inside each 'master_' container,
             # as that is what the processing logic expects.
@@ -270,15 +274,19 @@ class NestingPanel(QtGui.QWidget):
             rotation_steps_map = {}
             
             for master_container in master_shapes_group.Group:
+                FreeCAD.Console.PrintMessage(f"    Checking container: {master_container.Label}\n")
                 # Use a relaxed check for the container to ensure robust loading.
                 # While we enforce "master_" naming on write, reading should be tolerant
                 # to handle potential legacy or manually modified files.
-                if hasattr(master_container, "Group"): 
+                if hasattr(master_container, "Group"):
+                    container_children = [c.Label for c in master_container.Group]
+                    FreeCAD.Console.PrintMessage(f"      Container children: {container_children}\n")
                     # The object to load is the 'master_shape_...' object inside the container.
                     shape_obj = next((child for child in master_container.Group if child.Label.startswith("master_shape_")), None)
                     # Note: We no longer require Proxy, as it may be lost during copyObject.
                     # The shape geometry is what we need.
                     if shape_obj and hasattr(shape_obj, "Shape"):
+                        FreeCAD.Console.PrintMessage(f"      Found shape: {shape_obj.Label}\n")
                         shapes_to_load.append(shape_obj)
                         
                         # Recover properties from container
@@ -288,7 +296,12 @@ class NestingPanel(QtGui.QWidget):
                             rotation_overrides[shape_obj.Label] = master_container.PartRotationOverride
                         if hasattr(master_container, "PartRotationSteps"):
                             rotation_steps_map[shape_obj.Label] = master_container.PartRotationSteps
+                    else:
+                        FreeCAD.Console.PrintMessage(f"      No master_shape_ found in container!\n")
+                else:
+                    FreeCAD.Console.PrintMessage(f"      Container has no Group attribute\n")
             
+            FreeCAD.Console.PrintMessage(f"  Total shapes to load: {len(shapes_to_load)}\n")
             
             self.load_shapes(
                 shapes_to_load, 
@@ -302,6 +315,7 @@ class NestingPanel(QtGui.QWidget):
             if hasattr(layout_group, "GlobalRotationSteps"):
                 self.rotation_steps_spinbox.setValue(layout_group.GlobalRotationSteps)
         else:
+            FreeCAD.Console.PrintMessage(f"  WARNING: No MasterShapes group found!\n")
             self.status_label.setText("Warning: Could not find 'MasterShapes' group in the selected layout.")
 
     def load_shapes(self, selection, is_reloading_layout=False, initial_quantities=None, initial_overrides=None, initial_rotation_steps=None):

@@ -129,6 +129,14 @@ class NestingJob:
             
         # 2. Check for new MasterShapes in Temp
         temp_masters = next((c for c in self.temp_layout.Group if c.Label.startswith("MasterShapes")), None)
+        
+        # DEBUG: What's in temp_masters before commit?
+        if temp_masters:
+            FreeCAD.Console.PrintMessage(f"\n=== DEBUG: Commit - temp_masters has {len(temp_masters.Group)} containers ===\n")
+            for container in temp_masters.Group:
+                children = [c.Label for c in container.Group] if hasattr(container, 'Group') else []
+                FreeCAD.Console.PrintMessage(f"  {container.Label}: {children}\n")
+        
         if temp_masters and len(temp_masters.Group) > 0:
             # We have new masters, replace old ones in Target
             old_masters = next((c for c in self.target_layout.Group if c.Label.startswith("MasterShapes")), None)
@@ -142,6 +150,14 @@ class NestingJob:
                     m.Label = m.Label.replace("temp_master_", "master_")
             
             self.target_layout.addObject(temp_masters)
+            
+            # DEBUG: What's in target after commit?
+            final_masters = next((c for c in self.target_layout.Group if c.Label.startswith("MasterShapes")), None)
+            if final_masters:
+                FreeCAD.Console.PrintMessage(f"\n=== DEBUG: After commit - final_masters has {len(final_masters.Group)} containers ===\n")
+                for container in final_masters.Group:
+                    children = [c.Label for c in container.Group] if hasattr(container, 'Group') else []
+                    FreeCAD.Console.PrintMessage(f"  {container.Label}: {children}\n")
         else:
             # No new masters, if temp has empty master group, delete it
             if temp_masters:
@@ -466,9 +482,6 @@ class NestingController:
                 if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
             
             self.doc.recompute()
-            
-            # DEBUG: Show what's left in the document
-            self._debug_document_state("After GA Nesting")
         except Exception as e:
             FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n")
             self.ui.status_label.setText(f"Error: {e}")
@@ -499,7 +512,6 @@ class NestingController:
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Finalized & Committed.\n")
             self.doc.recompute()
-            self._debug_document_state("After OK")
 
     def cancel_job(self):
         """Called when User clicks Cancel."""
@@ -530,20 +542,6 @@ class NestingController:
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Cancelled.\n")
             self.doc.recompute()
-            self._debug_document_state("After Cancel")
-    
-    def _debug_document_state(self, title):
-        """Debug helper to show document contents."""
-        FreeCAD.Console.PrintMessage(f"\n=== DEBUG: {title} ===\n")
-        skip_prefixes = ('Origin', 'X-axis', 'Y-axis', 'Z-axis', 'XY-plane', 'XZ-plane', 'YZ-plane', 
-                        'Sketch', 'Pad')
-        for obj in self.doc.Objects:
-            if hasattr(obj, 'Label'):
-                label = obj.Label
-                if any(label.startswith(p) for p in skip_prefixes):
-                    continue
-                parent = obj.InList[0].Label if obj.InList else "ROOT"
-                FreeCAD.Console.PrintMessage(f"  {label} (parent: {parent})\n")
     
     def toggle_bounds_visibility(self):
         is_visible = self.ui.show_bounds_checkbox.isChecked()
