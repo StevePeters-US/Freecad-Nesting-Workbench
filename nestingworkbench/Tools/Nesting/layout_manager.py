@@ -20,6 +20,10 @@ class Layout:
     """
     Represents a single layout attempt (population member in GA).
     Contains references to the FreeCAD objects and the parts list.
+    
+    Attributes:
+        genes: List of (part_id, angle) tuples representing the ordering and rotation
+               of parts. Can be used to recreate the exact same layout.
     """
     def __init__(self, layout_group, parts_group, parts, master_shapes_group=None):
         self.layout_group = layout_group  # The Layout_xxx group object
@@ -29,6 +33,8 @@ class Layout:
         self.sheets = []                  # Filled after nesting
         self.fitness = float('inf')
         self.efficiency = 0.0
+        self.genes = []                   # (part_id, angle) tuples - the "DNA" of this layout
+        self.contact_score = 0.0          # How much parts touch each other
     
     @property
     def name(self):
@@ -125,39 +131,64 @@ class LayoutManager:
     
     def delete_layout(self, layout):
         """
-        Removes a layout and all its child objects from the document.
+        Removes a layout group and ALL its children from the document.
+        Must recursively delete children first since FreeCAD doesn't do this automatically.
         
         Args:
             layout: Layout object to delete
         """
-        if not layout or not layout.layout_group:
+        if not layout:
             return
             
+        # Check if already deleted
+        if hasattr(layout, '_deleted') and layout._deleted:
+            return
+        
+        # Get the group object before we mark it deleted
+        group_obj = None
         try:
-            # Recursively delete all children
-            self._recursive_delete(layout.layout_group)
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(f"Error deleting layout: {e}\n")
+            if layout.layout_group:
+                group_obj = layout.layout_group
+        except:
+            pass
+        
+        layout_label = layout.name if hasattr(layout, 'name') else "unknown"
+        
+        # Mark as deleted immediately to prevent re-entry
+        layout._deleted = True
+        layout.layout_group = None
+        layout.sheets = []
+        layout.parts = []
+        
+        # Recursively delete the group and all children
+        if group_obj:
+            self._recursive_delete(group_obj)
+            FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
     
     def _recursive_delete(self, obj):
-        """Recursively deletes an object and all its children."""
-        if hasattr(obj, "Group"):
-            # Delete children first
-            for child in list(obj.Group):
-                self._recursive_delete(child)
+        """
+        Recursively deletes an object and all its children.
+        Must delete children first since FreeCAD doesn't cascade deletes.
+        """
+        if not obj:
+            return
         
-        # Delete linked objects (like BoundaryObject)
-        if hasattr(obj, "BoundaryObject") and obj.BoundaryObject:
-            try:
-                self.doc.removeObject(obj.BoundaryObject.Name)
-            except:
-                pass
+        try:
+            obj_name = obj.Name
+        except:
+            return  # Object already deleted
+        
+        # First, recursively delete all children (if it's a group)
+        if hasattr(obj, 'Group'):
+            for child in list(obj.Group):  # Copy list to avoid modification during iteration
+                self._recursive_delete(child)
         
         # Delete the object itself
         try:
-            self.doc.removeObject(obj.Name)
-        except Exception as e:
-            pass
+            if self.doc.getObject(obj_name):
+                self.doc.removeObject(obj_name)
+        except:
+            pass  # Already deleted
     
     def calculate_efficiency(self, layout, sheet_width, sheet_height) -> tuple:
         """
@@ -203,10 +234,65 @@ class LayoutManager:
             except:
                 pass
         
+        # Contact score: reward parts that touch each other
+        # Lower fitness = better, so we subtract contact bonus
+        contact_bonus = self._calculate_contact_score(layout)
+        fitness -= contact_bonus
+        
         layout.fitness = fitness
         layout.efficiency = efficiency
+        layout.contact_score = contact_bonus
         
         return fitness, efficiency
+    
+    def _calculate_contact_score(self, layout) -> float:
+        """
+        Calculate how much parts are in contact with each other.
+        Higher score = more contact = better packing.
+        
+        Uses buffer/touches approach: if buffered polygon touches another, they're in contact.
+        """
+        try:
+            from shapely.ops import unary_union
+        except ImportError:
+            return 0.0
+        
+        total_contact = 0.0
+        buffer_distance = 0.5  # Small buffer to detect "almost touching"
+        
+        for sheet in layout.sheets:
+            # Get parts that have a valid polygon (Shape.polygon, not bounds_polygon)
+            parts = [p for p in sheet.parts if hasattr(p, 'shape') and p.shape and p.shape.polygon]
+            
+            for i, part_a in enumerate(parts):
+                poly_a = part_a.shape.polygon
+                if not poly_a or poly_a.is_empty:
+                    continue
+                buffered_a = poly_a.buffer(buffer_distance)
+                
+                for part_b in parts[i+1:]:
+                    poly_b = part_b.shape.polygon
+                    if not poly_b or poly_b.is_empty:
+                        continue
+                    
+                    # Check if they touch or are very close
+                    if buffered_a.intersects(poly_b):
+                        # Calculate contact length (intersection of boundaries)
+                        try:
+                            intersection = buffered_a.intersection(poly_b)
+                            if intersection.is_empty:
+                                continue
+                            # Use length of intersection boundary as contact score
+                            if hasattr(intersection, 'length'):
+                                total_contact += intersection.length
+                            elif hasattr(intersection, 'area'):
+                                # For area-based contact, use sqrt to normalize
+                                total_contact += intersection.area ** 0.5
+                        except:
+                            # Simple fallback: just count the contact
+                            total_contact += 10.0
+        
+        return total_contact
     
     def create_ga_population(self, master_shapes_map, quantities, ui_params, 
                              population_size, rotation_steps=1) -> list:

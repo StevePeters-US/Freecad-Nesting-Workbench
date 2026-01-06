@@ -143,7 +143,7 @@ class Sheet:
         
         return True
 
-    def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None):
+    def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None, x_offset=0):
         """
         Draws the sheet and its contents into the FreeCAD document.
 
@@ -156,22 +156,37 @@ class Sheet:
             draw_shape_bounds (bool): If True, draws the shapely boundary polygon.
             parts_to_place_group (App.DocumentObjectGroup): Optional. The temporary group where parts were created.
                                                             Required to safely remove parts from it to prevent deletion.
+            x_offset (float): Optional X offset for placing layouts side by side in GA mode.
         """
         sheet_origin = self.get_origin()
+        # Apply X offset for GA layout visualization
+        if x_offset != 0:
+            sheet_origin = FreeCAD.Vector(sheet_origin.x + x_offset, sheet_origin.y, sheet_origin.z)
 
         # --- Final Drawing Mode (with parent_group) ---
         if parent_group:
             self.parent_group_name = parent_group.Name
             # Create or Retrieve the group structure for this sheet
             sheet_group_name = f"Sheet_{self.id+1}"
-            sheet_group = parent_group.getObject(sheet_group_name)
+            
+            # Find existing sheet group in parent's children (getObject doesn't work on groups)
+            sheet_group = None
+            if hasattr(parent_group, 'Group'):
+                for child in parent_group.Group:
+                    if child.Label == sheet_group_name:
+                        sheet_group = child
+                        break
             
             if not sheet_group:
                  sheet_group = doc.addObject("App::DocumentObjectGroup", sheet_group_name)
                  parent_group.addObject(sheet_group)
             else:
+                # Clear existing children
                 for child in list(sheet_group.Group):
-                    doc.removeObject(child.Name)
+                    try:
+                        doc.removeObject(child.Name)
+                    except:
+                        pass
 
             shapes_group_name = f"Shapes_{self.id+1}"
             
@@ -179,12 +194,9 @@ class Sheet:
             
             sheet_group.addObject(shapes_group)
 
-            # Draw sheet boundary
+            # Draw sheet boundary - always create a new one (FreeCAD will auto-rename if collision)
             sheet_boundary_name = f"Sheet_Boundary_{self.id+1}"
-            sheet_obj = doc.getObject(sheet_boundary_name)
-            if not sheet_obj:
-                sheet_obj = doc.addObject("Part::Feature", sheet_boundary_name)
-            
+            sheet_obj = doc.addObject("Part::Feature", sheet_boundary_name)
             sheet_obj.Shape = Part.makePlane(self.width, self.height)
             sheet_obj.Placement = FreeCAD.Placement(sheet_origin, FreeCAD.Rotation())
             sheet_group.addObject(sheet_obj)

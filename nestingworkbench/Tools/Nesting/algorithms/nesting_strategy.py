@@ -159,12 +159,14 @@ class Nester:
         self.spacing = kwargs.get("spacing", 0)
         self.search_direction = kwargs.get("search_direction", (0, -1)) # Default Down
         
-        # Optimization settings
-        self.population_size = kwargs.get("population_size", 20)
+        # Optimization settings (kept for backwards compatibility, GA now in controller)
+        self.population_size = kwargs.get("population_size", 1)
         self.generations = kwargs.get("generations", 1)
         self.mutation_rate = 0.1
         self.elite_size = max(1, int(self.population_size * 0.1))
         
+        # Logging control
+        self.quiet = kwargs.get("quiet", False)  # If True, suppress per-part logs
         self.log_callback = kwargs.get("log_callback")
         self.trial_callback = kwargs.get("trial_callback")  # For visualizing trial placements
         self.part_start_callback = kwargs.get("part_start_callback")  # Called when starting to place a part
@@ -202,15 +204,18 @@ class Nester:
 
         return self._nest_standard(parts, sort=sort)
 
-    def _nest_standard(self, parts, sort=True, quiet=False):
+    def _nest_standard(self, parts, sort=True, quiet=None):
         """
         Standard greedy nesting strategy.
         
         Args:
             parts: List of parts to nest
             sort: Whether to sort by area (largest first)
-            quiet: If True, suppresses logging and callbacks (used during GA fitness evaluation)
+            quiet: If True, suppresses logging and callbacks. Defaults to self.quiet.
         """
+        # Use instance quiet setting if not explicitly passed
+        if quiet is None:
+            quiet = self.quiet
         current_parts = list(parts)
         if sort:
             current_parts.sort(key=lambda p: p.area, reverse=True)

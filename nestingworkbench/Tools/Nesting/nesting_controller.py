@@ -315,7 +315,7 @@ class NestingController:
         # Create LayoutManager
         layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache)
         
-        # Create initial population of layouts
+        # STEP 1: Create initial population of layouts
         self.ui.status_label.setText(f"Creating {population_size} layouts...")
         QtGui.QApplication.processEvents()
         
@@ -333,22 +333,37 @@ class NestingController:
                 self.ui.status_label.setText(f"Generation {gen+1}/{generations}...")
                 QtGui.QApplication.processEvents()
                 
+                # Debug: show all layouts with their part counts
+                FreeCAD.Console.PrintMessage(f"  Layouts to evaluate: {len(layouts)}\n")
+                for i, lay in enumerate(layouts):
+                    part_ids = [p.id for p in lay.parts] if lay.parts else []
+                    FreeCAD.Console.PrintMessage(f"    {i+1}. {lay.name}: {part_ids}\n")
+                
                 # Run nesting on each layout
                 for idx, layout in enumerate(layouts):
-                    FreeCAD.Console.PrintMessage(f"  Layout {idx+1}/{len(layouts)}: {layout.name}\n")
+                    FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
+                    
+                    # Store genes (ordering and rotations) for this layout
+                    layout.genes = [(p.id, getattr(p, '_angle', 0)) for p in layout.parts] if layout.parts else []
+                    
+                    # Skip if already nested (e.g., winner from previous generation)
+                    if layout.sheets:
+                        FreeCAD.Console.PrintMessage(f"    -> Already nested (winner from previous gen), efficiency: {layout.efficiency:.1f}%\n")
+                        continue
                     
                     if not layout.parts:
                         layout.fitness = float('inf')
                         layout.efficiency = 0
                         continue
                     
-                    # Run nesting
+                    # Run nesting with quiet mode (suppress per-part logs)
                     sheets, unplaced, _ = nest(
                         layout.parts,
                         ui_params['sheet_width'],
                         ui_params['sheet_height'],
                         rotation_steps,
                         is_simulating,
+                        quiet=True,  # Suppress per-part logging in GA mode
                         **algo_kwargs
                     )
                     
@@ -365,9 +380,10 @@ class NestingController:
                     
                     FreeCAD.Console.PrintMessage(f"    -> Efficiency: {efficiency:.1f}%\n")
                     
-                    # Draw the layout
+                    # Draw the layout (no offset - we'll delete non-winners)
                     for sheet in sheets:
-                        sheet.draw(self.doc, ui_params, layout.layout_group, parts_to_place_group=layout.parts_group)
+                        sheet.draw(self.doc, ui_params, layout.layout_group, 
+                                   parts_to_place_group=layout.parts_group)
                     
                     QtGui.QApplication.processEvents()
                 
@@ -380,6 +396,9 @@ class NestingController:
                     best_efficiency = current_best.efficiency
                     generations_without_improvement = 0
                     FreeCAD.Console.PrintMessage(f"\n>>> New Best: {best_efficiency:.1f}% efficiency <<<\n")
+                    FreeCAD.Console.PrintMessage(f"    Best genes: {best_layout.genes[:5]}... ({len(best_layout.genes)} total)\n")
+                    if hasattr(best_layout, 'contact_score'):
+                        FreeCAD.Console.PrintMessage(f"    Contact score: {best_layout.contact_score:.1f}\n")
                 else:
                     generations_without_improvement += 1
                     FreeCAD.Console.PrintMessage(f"\nNo improvement ({generations_without_improvement}/{early_stop_threshold})\n")
@@ -389,22 +408,24 @@ class NestingController:
                     FreeCAD.Console.PrintMessage(f"Early stopping: no improvement for {early_stop_threshold} generations\n")
                     break
                 
-                # Prepare next generation (if not last)
-                if gen < generations - 1:
-                    # Keep elite layouts, delete the rest
-                    elite_layouts = layouts[:elite_count]
-                    
-                    # Delete non-elite layouts
-                    for layout in layouts[elite_count:]:
+                # Hide winner (we'll show it at the end)
+                if best_layout and best_layout.layout_group:
+                    if hasattr(best_layout.layout_group, "ViewObject"):
+                        best_layout.layout_group.ViewObject.Visibility = False
+                
+                # STEP 2: Delete all non-winner layouts from this generation
+                FreeCAD.Console.PrintMessage(f"  Deleting {len(layouts) - 1} non-winning layouts...\n")
+                for layout in layouts:
+                    if layout != best_layout:
                         layout_manager.delete_layout(layout)
+                
+                # STEP 3: Create new layouts for next generation (if not last)
+                if gen < generations - 1:
+                    layouts = [best_layout]  # Start with the winner
                     
-                    # Create new layouts for next generation
-                    # For now, we'll just recreate with shuffled orderings
-                    # TODO: Implement proper crossover using chromosome orderings
-                    new_layouts = []
-                    for i in range(population_size - elite_count):
+                    for i in range(population_size - 1):
                         new_layout = layout_manager.create_layout(
-                            f"Layout_GA_{gen+1}_{i+1}",
+                            f"Layout_GA_{gen+2}_{i+1}",
                             master_map, quantities, ui_params
                         )
                         # Shuffle and mutate
@@ -413,20 +434,22 @@ class NestingController:
                             random.shuffle(new_layout.parts)
                             if rotation_steps > 1:
                                 genetic_utils.mutate_chromosome(new_layout.parts, mutation_rate, rotation_steps)
-                        new_layouts.append(new_layout)
-                    
-                    layouts = elite_layouts + new_layouts
+                        layouts.append(new_layout)
+                else:
+                    # Last generation - just keep the winner
+                    layouts = [best_layout]
             
-            # Final result
+            # STEP 4: Final result - winner becomes Layout_temp
             FreeCAD.Console.PrintMessage(f"\n=== Best Solution: {best_efficiency:.1f}% efficiency ===\n")
+            if hasattr(best_layout, 'contact_score'):
+                FreeCAD.Console.PrintMessage(f"    Contact score: {best_layout.contact_score:.1f}\n")
             
-            # Delete all layouts except the best
-            for layout in layouts:
-                if layout != best_layout:
-                    layout_manager.delete_layout(layout)
-            
-            # Rename best layout and set as current job's temp_layout
+            # Show and rename best layout, set as current job's temp_layout
             if best_layout:
+                # Make winner visible
+                if best_layout.layout_group and hasattr(best_layout.layout_group, "ViewObject"):
+                    best_layout.layout_group.ViewObject.Visibility = True
+                
                 best_layout.layout_group.Label = "Layout_temp"
                 self.current_job = NestingJob.__new__(NestingJob)
                 self.current_job.doc = self.doc
@@ -442,13 +465,18 @@ class NestingController:
                 FreeCAD.Console.PrintMessage(f"{msg}\n--- NESTING DONE ---\n")
                 if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
             
+            self.doc.recompute()
+            
+            # DEBUG: Show what's left in the document
+            self._debug_document_state("After GA Nesting")
         except Exception as e:
             FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n")
             self.ui.status_label.setText(f"Error: {e}")
-            # Cleanup all layouts
+            # Cleanup all remaining layouts on error
             for layout in layouts:
                 layout_manager.delete_layout(layout)
-
+            self.doc.recompute()
+    
     def finalize_job(self):
         """Called when User clicks OK."""
         if self.current_job:
@@ -471,6 +499,7 @@ class NestingController:
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Finalized & Committed.\n")
             self.doc.recompute()
+            self._debug_document_state("After OK")
 
     def cancel_job(self):
         """Called when User clicks Cancel."""
@@ -501,7 +530,21 @@ class NestingController:
             self.current_job = None
             FreeCAD.Console.PrintMessage("Job Cancelled.\n")
             self.doc.recompute()
-
+            self._debug_document_state("After Cancel")
+    
+    def _debug_document_state(self, title):
+        """Debug helper to show document contents."""
+        FreeCAD.Console.PrintMessage(f"\n=== DEBUG: {title} ===\n")
+        skip_prefixes = ('Origin', 'X-axis', 'Y-axis', 'Z-axis', 'XY-plane', 'XZ-plane', 'YZ-plane', 
+                        'Sketch', 'Pad')
+        for obj in self.doc.Objects:
+            if hasattr(obj, 'Label'):
+                label = obj.Label
+                if any(label.startswith(p) for p in skip_prefixes):
+                    continue
+                parent = obj.InList[0].Label if obj.InList else "ROOT"
+                FreeCAD.Console.PrintMessage(f"  {label} (parent: {parent})\n")
+    
     def toggle_bounds_visibility(self):
         is_visible = self.ui.show_bounds_checkbox.isChecked()
         
