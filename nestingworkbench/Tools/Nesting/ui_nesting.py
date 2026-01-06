@@ -111,8 +111,9 @@ class NestingPanel(QtGui.QWidget):
         
         # Genetic options for Minkowski
         self.minkowski_population_size_input = QtGui.QSpinBox()
-        self.minkowski_population_size_input.setRange(5, 500)
-        self.minkowski_population_size_input.setValue(20)
+        self.minkowski_population_size_input.setRange(1, 500)
+        self.minkowski_population_size_input.setValue(1)
+        self.minkowski_population_size_input.setToolTip("Set to 1 for a single pass. Increase with generations for Genetic Algorithm.")
         
         self.minkowski_generations_input = QtGui.QSpinBox()
         self.minkowski_generations_input.setRange(1, 1000)

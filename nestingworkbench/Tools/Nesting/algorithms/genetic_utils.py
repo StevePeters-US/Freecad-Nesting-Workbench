@@ -63,15 +63,44 @@ def ordered_crossover(parent1, parent2):
 
 def mutate_chromosome(chromosome, mutation_rate, rotation_steps):
     """
-    Mutates a chromosome in place.
+    Mutates a chromosome in place with multiple mutation operators:
+    - Swap mutation: swap two random parts
+    - Segment reversal: reverse a random segment
+    - Adjacent swap: swap two adjacent parts
+    - Rotation mutation: rotate a random part
     """
-    # Swap mutation
-    if random.random() < mutation_rate and len(chromosome) > 1:
+    if len(chromosome) < 2:
+        return
+    
+    # Swap mutation - swap two random parts
+    if random.random() < mutation_rate:
         i, j = random.sample(range(len(chromosome)), 2)
         chromosome[i], chromosome[j] = chromosome[j], chromosome[i]
-        
-    # Rotation mutation
+    
+    # Segment reversal mutation - reverse a random segment
+    if random.random() < mutation_rate * 0.5:  # Less frequent
+        start = random.randint(0, len(chromosome) - 2)
+        end = random.randint(start + 1, len(chromosome))
+        chromosome[start:end] = reversed(chromosome[start:end])
+    
+    # Adjacent swap mutation - swap two adjacent parts
+    if random.random() < mutation_rate * 0.3:  # Less frequent
+        i = random.randint(0, len(chromosome) - 2)
+        chromosome[i], chromosome[i + 1] = chromosome[i + 1], chromosome[i]
+    
+    # Rotation mutation - rotate a random part
     if rotation_steps > 1 and random.random() < mutation_rate:
         part = random.choice(chromosome)
         new_angle = random.randrange(rotation_steps) * (360.0 / rotation_steps)
         part.set_rotation(new_angle)
+    
+    # Rotation spreading - slightly adjust rotations of multiple parts
+    if rotation_steps > 1 and random.random() < mutation_rate * 0.2:
+        for part in chromosome:
+            if random.random() < 0.3:  # 30% chance per part
+                current_step = int(part._angle / (360.0 / rotation_steps)) if hasattr(part, '_angle') else 0
+                # Move to adjacent rotation step
+                delta = random.choice([-1, 1])
+                new_step = (current_step + delta) % rotation_steps
+                new_angle = new_step * (360.0 / rotation_steps)
+                part.set_rotation(new_angle)

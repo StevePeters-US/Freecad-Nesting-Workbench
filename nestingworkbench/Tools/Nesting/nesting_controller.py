@@ -8,6 +8,7 @@ import math
 from PySide import QtGui
 from ...datatypes.shape import Shape
 from .shape_preparer import ShapePreparer
+from .layout_manager import LayoutManager, Layout
 
 try:
     from .nesting_logic import nest, NestingDependencyError
@@ -259,16 +260,31 @@ class NestingController:
         ui_params = self._collect_ui_params()
         ui_params, quantities, master_map, rotation_params = self._collect_job_parameters(ui_params)
         
-        # 3. Create Job
+        algo_kwargs = self._prepare_algo_kwargs(ui_params)
+        is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
+        
+        # Check if GA mode is enabled
+        generations = algo_kwargs.get('generations', 1)
+        population_size = algo_kwargs.get('population_size', 1)
+        
+        if generations > 1 and population_size > 1:
+            # GA Mode: Use LayoutManager for multiple layouts
+            self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
+                                     rotation_params, algo_kwargs, is_simulating)
+        else:
+            # Standard Mode: Single job
+            self._execute_standard_nesting(target_layout, ui_params, quantities, master_map, 
+                                           rotation_params, algo_kwargs, is_simulating)
+    
+    def _execute_standard_nesting(self, target_layout, ui_params, quantities, master_map, 
+                                   rotation_params, algo_kwargs, is_simulating):
+        """Standard single-layout nesting."""
+        # Create Job
         self.current_job = NestingJob(self.doc, target_layout, ui_params, self.shape_preparer)
         
-        # 4. Run Job
         try:
             self.ui.status_label.setText("Running nesting...")
             QtGui.QApplication.processEvents()
-            
-            algo_kwargs = self._prepare_algo_kwargs(ui_params)
-            is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
             
             num_sheets, num_parts = self.current_job.run(quantities, master_map, rotation_params, algo_kwargs, is_simulating)
             
@@ -276,16 +292,162 @@ class NestingController:
             self.ui.status_label.setText(msg)
             FreeCAD.Console.PrintMessage(f"{msg}\n--- NESTING DONE ---\n")
             if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
-            
-            if is_simulating:
-                 # Simulation doesn't commit automatically? 
-                 # Usually simulation is just visual.
-                 pass
                  
         except Exception as e:
             FreeCAD.Console.PrintError(f"Nesting Error: {e}\n")
             self.ui.status_label.setText(f"Error: {e}")
             self.cancel_job()
+    
+    def _execute_ga_nesting(self, target_layout, ui_params, quantities, master_map, 
+                            rotation_params, algo_kwargs, is_simulating):
+        """GA optimization using multiple layouts."""
+        from .algorithms import genetic_utils
+        
+        generations = algo_kwargs.get('generations', 1)
+        population_size = algo_kwargs.get('population_size', 1)
+        rotation_steps = ui_params.get('rotation_steps', 1)
+        elite_count = max(1, population_size // 5)  # Keep top 20%
+        mutation_rate = 0.1
+        early_stop_threshold = 5
+        
+        FreeCAD.Console.PrintMessage(f"GA Mode: {generations} generations, {population_size} population\n")
+        
+        # Create LayoutManager
+        layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache)
+        
+        # Create initial population of layouts
+        self.ui.status_label.setText(f"Creating {population_size} layouts...")
+        QtGui.QApplication.processEvents()
+        
+        layouts = layout_manager.create_ga_population(
+            master_map, quantities, ui_params, population_size, rotation_steps
+        )
+        
+        best_layout = None
+        best_efficiency = 0
+        generations_without_improvement = 0
+        
+        try:
+            for gen in range(generations):
+                FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
+                self.ui.status_label.setText(f"Generation {gen+1}/{generations}...")
+                QtGui.QApplication.processEvents()
+                
+                # Run nesting on each layout
+                for idx, layout in enumerate(layouts):
+                    FreeCAD.Console.PrintMessage(f"  Layout {idx+1}/{len(layouts)}: {layout.name}\n")
+                    
+                    if not layout.parts:
+                        layout.fitness = float('inf')
+                        layout.efficiency = 0
+                        continue
+                    
+                    # Run nesting
+                    sheets, unplaced, _ = nest(
+                        layout.parts,
+                        ui_params['sheet_width'],
+                        ui_params['sheet_height'],
+                        rotation_steps,
+                        is_simulating,
+                        **algo_kwargs
+                    )
+                    
+                    layout.sheets = sheets
+                    
+                    # Calculate efficiency
+                    fitness, efficiency = layout_manager.calculate_efficiency(
+                        layout, ui_params['sheet_width'], ui_params['sheet_height']
+                    )
+                    
+                    # Penalize unplaced parts
+                    if unplaced:
+                        layout.fitness += len(unplaced) * ui_params['sheet_width'] * ui_params['sheet_height'] * 10
+                    
+                    FreeCAD.Console.PrintMessage(f"    -> Efficiency: {efficiency:.1f}%\n")
+                    
+                    # Draw the layout
+                    for sheet in sheets:
+                        sheet.draw(self.doc, ui_params, layout.layout_group, parts_to_place_group=layout.parts_group)
+                    
+                    QtGui.QApplication.processEvents()
+                
+                # Sort by fitness (lower is better)
+                layouts.sort(key=lambda l: l.fitness)
+                
+                current_best = layouts[0]
+                if best_layout is None or current_best.fitness < best_layout.fitness:
+                    best_layout = current_best
+                    best_efficiency = current_best.efficiency
+                    generations_without_improvement = 0
+                    FreeCAD.Console.PrintMessage(f"\n>>> New Best: {best_efficiency:.1f}% efficiency <<<\n")
+                else:
+                    generations_without_improvement += 1
+                    FreeCAD.Console.PrintMessage(f"\nNo improvement ({generations_without_improvement}/{early_stop_threshold})\n")
+                
+                # Early stopping
+                if generations_without_improvement >= early_stop_threshold:
+                    FreeCAD.Console.PrintMessage(f"Early stopping: no improvement for {early_stop_threshold} generations\n")
+                    break
+                
+                # Prepare next generation (if not last)
+                if gen < generations - 1:
+                    # Keep elite layouts, delete the rest
+                    elite_layouts = layouts[:elite_count]
+                    
+                    # Delete non-elite layouts
+                    for layout in layouts[elite_count:]:
+                        layout_manager.delete_layout(layout)
+                    
+                    # Create new layouts for next generation
+                    # For now, we'll just recreate with shuffled orderings
+                    # TODO: Implement proper crossover using chromosome orderings
+                    new_layouts = []
+                    for i in range(population_size - elite_count):
+                        new_layout = layout_manager.create_layout(
+                            f"Layout_GA_{gen+1}_{i+1}",
+                            master_map, quantities, ui_params
+                        )
+                        # Shuffle and mutate
+                        if new_layout.parts:
+                            import random
+                            random.shuffle(new_layout.parts)
+                            if rotation_steps > 1:
+                                genetic_utils.mutate_chromosome(new_layout.parts, mutation_rate, rotation_steps)
+                        new_layouts.append(new_layout)
+                    
+                    layouts = elite_layouts + new_layouts
+            
+            # Final result
+            FreeCAD.Console.PrintMessage(f"\n=== Best Solution: {best_efficiency:.1f}% efficiency ===\n")
+            
+            # Delete all layouts except the best
+            for layout in layouts:
+                if layout != best_layout:
+                    layout_manager.delete_layout(layout)
+            
+            # Rename best layout and set as current job's temp_layout
+            if best_layout:
+                best_layout.layout_group.Label = "Layout_temp"
+                self.current_job = NestingJob.__new__(NestingJob)
+                self.current_job.doc = self.doc
+                self.current_job.target_layout = target_layout
+                self.current_job.params = ui_params
+                self.current_job.preparer = self.shape_preparer
+                self.current_job.temp_layout = best_layout.layout_group
+                self.current_job.parts_group = best_layout.parts_group
+                self.current_job.sheets = best_layout.sheets
+                
+                msg = f"GA Complete: {best_efficiency:.1f}% efficiency, {len(best_layout.sheets)} sheets"
+                self.ui.status_label.setText(msg)
+                FreeCAD.Console.PrintMessage(f"{msg}\n--- NESTING DONE ---\n")
+                if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
+            
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n")
+            self.ui.status_label.setText(f"Error: {e}")
+            # Cleanup all layouts
+            for layout in layouts:
+                layout_manager.delete_layout(layout)
 
     def finalize_job(self):
         """Called when User clicks OK."""

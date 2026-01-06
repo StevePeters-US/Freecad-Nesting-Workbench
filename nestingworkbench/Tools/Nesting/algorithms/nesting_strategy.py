@@ -188,20 +188,29 @@ class Nester:
                 FreeCAD.Console.PrintMessage(f"NESTER: {message}\n")
 
     def nest(self, parts, sort=True):
-        """Main entry point for nesting."""
-        # Cleanup
+        """
+        Main entry point for nesting.
+        
+        NOTE: GA optimization is now handled at the controller level using LayoutManager.
+        This method just runs standard greedy nesting.
+        """
+        # Cleanup debug objects
         doc = FreeCAD.ActiveDocument
         if doc and doc.getObject("MinkowskiDebug"):
             doc.removeObject("MinkowskiDebug")
             doc.recompute()
 
-        if self.generations > 1:
-            return self._nest_genetic(parts)
-        else:
-            return self._nest_standard(parts, sort=sort)
+        return self._nest_standard(parts, sort=sort)
 
-    def _nest_standard(self, parts, sort=True):
-        """Standard greedy nesting strategy."""
+    def _nest_standard(self, parts, sort=True, quiet=False):
+        """
+        Standard greedy nesting strategy.
+        
+        Args:
+            parts: List of parts to nest
+            sort: Whether to sort by area (largest first)
+            quiet: If True, suppresses logging and callbacks (used during GA fitness evaluation)
+        """
         current_parts = list(parts)
         if sort:
             current_parts.sort(key=lambda p: p.area, reverse=True)
@@ -211,12 +220,13 @@ class Nester:
         total_parts = len(current_parts)
         
         for i, part in enumerate(current_parts):
-            self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
+            if not quiet:
+                self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
             start_part_time = datetime.now()
             placed = False
             
             # Notify start of part placement (for highlighting master shapes)
-            if self.part_start_callback:
+            if not quiet and self.part_start_callback:
                 self.part_start_callback(part)
             
             # 1. Try existing sheets
@@ -225,9 +235,10 @@ class Nester:
 
                 if self._attempt_placement_on_sheet(part, sheet):
                     placed = True
-                    elapsed = (datetime.now() - start_part_time).total_seconds()
-                    self.log(f"  -> Placed on Sheet {sheet_idx+1} ({elapsed:.4f}s)")
-                    if self.update_callback: self.update_callback(part, sheet)
+                    if not quiet:
+                        elapsed = (datetime.now() - start_part_time).total_seconds()
+                        self.log(f"  -> Placed on Sheet {sheet_idx+1} ({elapsed:.4f}s)")
+                        if self.update_callback: self.update_callback(part, sheet)
                     break
             
             # 2. Try new sheet
@@ -236,89 +247,27 @@ class Nester:
                 if self._attempt_placement_on_sheet(part, new_sheet):
                     sheets.append(new_sheet)
                     placed = True
-                    elapsed = (datetime.now() - start_part_time).total_seconds()
-                    self.log(f"  -> Placed on New Sheet {len(sheets)} ({elapsed:.4f}s)")
-                    if self.update_callback: self.update_callback(part, new_sheet)
+                    if not quiet:
+                        elapsed = (datetime.now() - start_part_time).total_seconds()
+                        self.log(f"  -> Placed on New Sheet {len(sheets)} ({elapsed:.4f}s)")
+                        if self.update_callback: self.update_callback(part, new_sheet)
                 else:
                     unplaced_parts.append(part)
-                    self.log(f"  -> FAILED to place in {(datetime.now() - start_part_time).total_seconds():.4f}s")
+                    if not quiet:
+                        self.log(f"  -> FAILED to place in {(datetime.now() - start_part_time).total_seconds():.4f}s")
             
             # Notify end of part placement (for unhighlighting master shapes)
-            if self.part_end_callback:
+            if not quiet and self.part_end_callback:
                 self.part_end_callback(part, placed)
         
         return sheets, unplaced_parts
 
-    def _nest_genetic(self, parts):
-        """Genetic optimization loop."""
-        self.log(f"Starting Genetic Optimization with {self.generations} generations.")
-        rotation_steps = self.optimizer.rotation_steps
-        
-        population = [genetic_utils.create_random_chromosome(parts, rotation_steps) 
-                      for _ in range(self.population_size)]
-        
-        best_solution = None
-        
-        for gen in range(self.generations):
-            self.log(f"Generation {gen+1}/{self.generations}...")
-            ranked_population = []
-            
-            for chrom in population:
-                fitness = self._calculate_fitness(chrom)
-                ranked_population.append((fitness, chrom))
-            
-            ranked_population.sort(key=lambda x: x[0])
-            
-            if best_solution is None or ranked_population[0][0] < best_solution[0]:
-                best_solution = ranked_population[0]
-                self.log(f"  > New Best Fitness: {best_solution[0]:.2f}")
-            
-            if gen < self.generations - 1:
-                next_pop = [sol[1] for sol in ranked_population[:self.elite_size]]
-                while len(next_pop) < self.population_size:
-                    p1 = genetic_utils.tournament_selection(ranked_population)
-                    p2 = genetic_utils.tournament_selection(ranked_population)
-                    child = genetic_utils.ordered_crossover(p1, p2)
-                    genetic_utils.mutate_chromosome(child, self.mutation_rate, rotation_steps)
-                    next_pop.append(child)
-                population = next_pop
-
-        self.log("Running final placement for best solution...")
-        return self._nest_standard(best_solution[1], sort=False)
-
-    def _calculate_fitness(self, chromosome):
-        """Calculates fitness (lower is better)."""
-        test_parts = [copy.deepcopy(p) for p in chromosome]
-        # Run standard nesting silently (could suppress logging here if needed)
-        sheets, unplaced = self._nest_standard(test_parts, sort=False)
-        
-        if not sheets: return float('inf')
-        
-        fitness = len(sheets) * self.bin_width * self.bin_height
-        
-        # Add used area of last sheet
-        last_sheet = sheets[-1]
-        if last_sheet.parts:
-            min_x = min(p.shape.bounding_box()[0] for p in last_sheet.parts)
-            min_y = min(p.shape.bounding_box()[1] for p in last_sheet.parts)
-            max_x = max(p.shape.bounding_box()[0] + p.shape.bounding_box()[2] for p in last_sheet.parts)
-            max_y = max(p.shape.bounding_box()[1] + p.shape.bounding_box()[3] for p in last_sheet.parts)
-            fitness += (max_x - min_x) * (max_y - min_y)
-            
-        if unplaced:
-            fitness += len(unplaced) * self.bin_width * self.bin_height * 10
-            
-        return fitness
-
     def _attempt_placement_on_sheet(self, part, sheet):
         """Delegates to PlacementOptimizer."""
-        # Removed early unary_union calculation for optimization
-        
         placed_part = self.optimizer.find_best_placement(part, sheet)
         
         if placed_part:
             # We trust the PlacementOptimizer (and NFP engine) to have found a valid spot.
-            # The expensive unary_union check is unnecessary if NFP logic is correct.
             placed_part.placement = placed_part.get_final_placement(sheet.get_origin())
             sheet.add_part(PlacedPart(placed_part))
             return True
