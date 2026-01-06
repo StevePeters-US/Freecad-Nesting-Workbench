@@ -66,6 +66,75 @@ def _cleanup_trial_viz():
             pass
         _trial_viz_obj = None
 
+# --- Master Shape Highlighting ---
+_current_highlighted_master = None  # Track the currently highlighted master container
+
+def _find_master_container_for_part(part):
+    """Finds the master container corresponding to a part being placed."""
+    doc = FreeCAD.ActiveDocument
+    if not doc:
+        return None
+    
+    # Get the base label (e.g., "O" from "O_1")
+    base_label = part.id.rsplit('_', 1)[0] if '_' in part.id else part.id
+    
+    # Try both temp_master_ (during nesting) and master_ prefixes
+    master_names = [f"temp_master_{base_label}", f"master_{base_label}"]
+    
+    # Search in Layout_temp first (active nesting), then other layouts
+    for obj in doc.Objects:
+        if hasattr(obj, "Group") and (obj.Label.startswith("Layout_temp") or obj.Label.startswith("Layout")):
+            for child in obj.Group:
+                if child.Label == "MasterShapes" and hasattr(child, "Group"):
+                    for master in child.Group:
+                        if master.Label in master_names:
+                            return master
+    return None
+
+def _highlight_master(master_container, highlight):
+    """Sets the highlighting state for a master container's boundary."""
+    if master_container and hasattr(master_container, "Group"):
+        for child in master_container.Group:
+            if hasattr(child, "BoundaryObject") and child.BoundaryObject:
+                boundary = child.BoundaryObject
+                if hasattr(boundary, "ViewObject"):
+                    if highlight:
+                        boundary.ViewObject.Visibility = True
+                        boundary.ViewObject.LineColor = (0.0, 0.8, 0.0)  # Green
+                        boundary.ViewObject.LineWidth = 3.0
+                    else:
+                        boundary.ViewObject.Visibility = False
+                        boundary.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
+                        boundary.ViewObject.LineWidth = 2.0
+
+def _on_part_start(part):
+    """Called when starting to place a part - highlight the master shape's boundary if it's a new master."""
+    global _current_highlighted_master
+    
+    master_container = _find_master_container_for_part(part)
+    if master_container:
+        # Only switch highlighting if it's a different master
+        if _current_highlighted_master != master_container:
+            # Unhighlight the previous master
+            if _current_highlighted_master:
+                _highlight_master(_current_highlighted_master, False)
+            # Highlight the new master
+            _highlight_master(master_container, True)
+            _current_highlighted_master = master_container
+            QtGui.QApplication.processEvents()
+
+def _on_part_end(part, placed):
+    """Called after part is placed - we don't unhighlight here, we wait for a new master type."""
+    # Don't unhighlight here - keep it on until we switch to a different master
+    pass
+
+def _cleanup_highlighting():
+    """Called after nesting completes to ensure all highlighting is removed."""
+    global _current_highlighted_master
+    if _current_highlighted_master:
+        _highlight_master(_current_highlighted_master, False)
+        _current_highlighted_master = None
+
 # --- Public Function ---
 def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
     """Convenience function to run the nesting algorithm."""
@@ -88,9 +157,11 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
         show_shapely_installation_instructions()
         raise NestingDependencyError("The selected algorithm requires the 'Shapely' library, which is not installed.")
 
-    # If simulation is enabled, add trial_callback to kwargs
+    # If simulation is enabled, add callbacks to kwargs
     if simulate:
         kwargs['trial_callback'] = _draw_trial_bounds
+        kwargs['part_start_callback'] = _on_part_start
+        kwargs['part_end_callback'] = _on_part_end
 
     # The controller now passes a fresh list of all parts to be nested.
     # The nester algorithms are responsible for the full multi-sheet nesting run.
@@ -103,9 +174,10 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
 
     result = nester.nest(parts_to_process)
     
-    # Cleanup trial visualization
+    # Cleanup trial visualization and highlighting
     if simulate:
         _cleanup_trial_viz()
+        _cleanup_highlighting()
     
     # Some nesters may return a 3-tuple (sheets, unplaced, steps), while others
     # may return a 2-tuple (sheets, unplaced). We handle both cases here.

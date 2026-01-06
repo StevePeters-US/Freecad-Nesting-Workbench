@@ -167,6 +167,8 @@ class Nester:
         
         self.log_callback = kwargs.get("log_callback")
         self.trial_callback = kwargs.get("trial_callback")  # For visualizing trial placements
+        self.part_start_callback = kwargs.get("part_start_callback")  # Called when starting to place a part
+        self.part_end_callback = kwargs.get("part_end_callback")  # Called after part is placed
         
         step_size = kwargs.get("step_size", 5.0) 
         self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback)
@@ -213,6 +215,10 @@ class Nester:
             start_part_time = datetime.now()
             placed = False
             
+            # Notify start of part placement (for highlighting master shapes)
+            if self.part_start_callback:
+                self.part_start_callback(part)
+            
             # 1. Try existing sheets
             for sheet_idx, sheet in enumerate(sheets):
                 if (sheet.width * sheet.height - sheet.used_area) < part.area: continue
@@ -236,6 +242,10 @@ class Nester:
                 else:
                     unplaced_parts.append(part)
                     self.log(f"  -> FAILED to place in {(datetime.now() - start_part_time).total_seconds():.4f}s")
+            
+            # Notify end of part placement (for unhighlighting master shapes)
+            if self.part_end_callback:
+                self.part_end_callback(part, placed)
         
         return sheets, unplaced_parts
 

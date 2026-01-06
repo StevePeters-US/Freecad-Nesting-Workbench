@@ -107,8 +107,9 @@ class ShapePreparer:
             master_shapes_group.Label = "MasterShapes"
             layout_obj.addObject(master_shapes_group)
         
+        # Make MasterShapes visible during nesting (will be hidden after commit)
         if hasattr(master_shapes_group, "ViewObject"):
-            master_shapes_group.ViewObject.Visibility = False
+            master_shapes_group.ViewObject.Visibility = True
         return master_shapes_group
 
     def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj, master_shapes_group):
@@ -163,10 +164,11 @@ class ShapePreparer:
             if hasattr(temp_bound, "ViewObject"): 
                 temp_bound.ViewObject.Visibility = False
         
+        # Shape visible, container visible during nesting
         if hasattr(temp_master_obj, "ViewObject"): 
-            temp_master_obj.ViewObject.Visibility = False
+            temp_master_obj.ViewObject.Visibility = True
         if hasattr(temp_container, "ViewObject"): 
-            temp_container.ViewObject.Visibility = False
+            temp_container.ViewObject.Visibility = True
 
         # 4. Copy Quantity property
         quantity, _ = quantities.get(original_label, (1, 1))
@@ -241,9 +243,9 @@ class ShapePreparer:
             # Fallback: use the shape's actual center of mass
             master_container.SourceCentroid = master_obj.Shape.CenterOfMass
 
-        # Hide container
+        # Make container visible during nesting (child boundary visibility is toggled by highlighting)
         if hasattr(master_container, "ViewObject"):
-            master_container.ViewObject.Visibility = False
+            master_container.ViewObject.Visibility = True
             
         master_shape_obj = create_shape_object(f"master_shape_{label}")
         master_shape_obj.Shape = master_obj.Shape.copy()
@@ -252,6 +254,8 @@ class ShapePreparer:
         # This aligns the shape with the boundary (which is already centered at 0,0)
         source_centroid = master_container.SourceCentroid
         master_shape_obj.Placement = FreeCAD.Placement(source_centroid.negative(), FreeCAD.Rotation())
+        if hasattr(master_shape_obj, "ViewObject"):
+            master_shape_obj.ViewObject.Visibility = True
         master_container.addObject(master_shape_obj)
 
         if temp_shape_wrapper.polygon:
@@ -279,19 +283,16 @@ class ShapePreparer:
         FreeCAD.Console.PrintMessage(f"Arranging {len(masters_to_place)} master shapes at y_offset={y_offset:.1f}\n")
         
         for container, shape_wrapper in masters_to_place:
-            # Get the SourceCentroid - this tells us where the shape's center is in world space
-            source_centroid = getattr(container, "SourceCentroid", FreeCAD.Vector(0, 0, 0))
-            
-            # To place the shape's CENTER at (current_x, y_offset), we set the container position
-            # to (target_position - source_centroid), since the shape geometry is at source_centroid
-            container_pos = FreeCAD.Vector(current_x - source_centroid.x, y_offset - source_centroid.y, 0)
+            # Since child shapes are centered at container origin (with -source_centroid placement),
+            # the container placement should just be the target position directly
+            container_pos = FreeCAD.Vector(current_x, y_offset, 0)
             container.Placement = FreeCAD.Placement(container_pos, FreeCAD.Rotation())
             
             # bounds is (min_x, min_y, width, height) of the Shapely polygon (centered at 0,0)
             bounds = shape_wrapper.bounding_box()
             width = bounds[2] if bounds else 100
             
-            FreeCAD.Console.PrintMessage(f"  -> Master '{container.Label}': target_x={current_x:.1f}, source_centroid={source_centroid}, container_pos={container_pos}\n")
+            FreeCAD.Console.PrintMessage(f"  -> Master '{container.Label}': pos=({current_x:.1f}, {y_offset:.1f})\n")
             current_x += width + spacing * 2
 
     def _create_nesting_instances(self, master_shapes_map, quantities, master_shape_obj_map, master_geometry_cache, ui_settings, parts_group):
