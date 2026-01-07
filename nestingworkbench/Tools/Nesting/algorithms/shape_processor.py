@@ -160,21 +160,13 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
 
     profile_2d = get_2d_profile_from_obj(shape_obj, up_direction)
     
-    # The profile is already centered at origin (done in get_2d_profile_from_obj)
-    # We need to compute the original world-space BB center for shape_preparer to use
-    # Get the shape in world coordinates (same as get_2d_profile_from_obj does)
+    # Compute the world-space BB center from the NON-ROTATED shape
+    # The rotation is handled by the placement in shape_preparer
     temp_shape = shape_obj.Shape.copy()
     if shape_obj.Placement and not shape_obj.Placement.isIdentity():
         temp_shape.transformShape(shape_obj.Placement.Matrix)
     
-    # Apply rotation if needed
-    if up_direction != "Z+" and up_direction is not None:
-        rotation = _get_rotation_for_up_direction(up_direction)
-        center = temp_shape.CenterOfMass
-        placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), rotation, center)
-        temp_shape.transformShape(placement.Matrix)
-    
-    # Now get BB center - this is what shape_preparer should use
+    # Get BB center BEFORE rotation - this is the offset for centering
     bb = temp_shape.BoundBox
     source_centroid = FreeCAD.Vector(
         (bb.XMin + bb.XMax) / 2,
