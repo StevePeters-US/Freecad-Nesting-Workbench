@@ -7,6 +7,26 @@ from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
 
+
+def _get_up_direction_rotation(up_direction):
+    """
+    Returns a FreeCAD.Rotation that transforms the given up_direction to Z+.
+    """
+    if up_direction == "Z+" or up_direction is None:
+        return None  # No rotation needed
+    elif up_direction == "Z-":
+        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
+    elif up_direction == "Y+":
+        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
+    elif up_direction == "Y-":
+        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+    elif up_direction == "X+":
+        return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
+    elif up_direction == "X-":
+        return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
+    else:
+        return None
+
 class ShapePreparer:
     """
     Handles the preparation of shapes for nesting.
@@ -45,8 +65,15 @@ class ShapePreparer:
         # --- Step 1: Create the FreeCAD "master" objects for each unique part. ---
         for label, master_obj in master_shapes_map.items():
             try:
-                # Cache Key: (Object Name, Spacing, Resolution)
-                cache_key = (master_obj.Name, spacing, boundary_resolution)
+                # Get up_direction for cache key
+                part_params = quantities.get(label, {'up_direction': 'Z+'})
+                if isinstance(part_params, tuple):
+                    up_direction = 'Z+'
+                else:
+                    up_direction = part_params.get('up_direction', 'Z+')
+                
+                # Cache Key: (Object Name, Spacing, Resolution, UpDirection)
+                cache_key = (master_obj.Name, spacing, boundary_resolution, up_direction)
                 is_reloading = master_obj.Label.startswith("master_shape_")
                 
                 temp_shape_wrapper = None
@@ -222,9 +249,16 @@ class ShapePreparer:
         return temp_master_obj, temp_shape_wrapper
 
     def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, master_shapes_group, is_reloading):
+        # Get part parameters from quantities
+        part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+'})
+        if isinstance(part_params, tuple):
+            up_direction = 'Z+'
+        else:
+            up_direction = part_params.get('up_direction', 'Z+')
+        
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution, up_direction)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
         master_container = self.doc.addObject("App::Part", f"master_{label}")
@@ -259,14 +293,57 @@ class ShapePreparer:
         # Make container visible during nesting (child boundary visibility is toggled by highlighting)
         if hasattr(master_container, "ViewObject"):
             master_container.ViewObject.Visibility = True
-            
-        master_shape_obj = create_shape_object(f"master_shape_{label}")
-        master_shape_obj.Shape = master_obj.Shape.copy()
         
-        # Center the shape at the container's origin by offsetting by -source_centroid
-        # This aligns the shape with the boundary (which is already centered at 0,0)
-        source_centroid = master_container.SourceCentroid
-        master_shape_obj.Placement = FreeCAD.Placement(source_centroid.negative(), FreeCAD.Rotation())
+        # DEBUG: Try using Part::Feature directly instead of custom object
+        master_shape_obj = self.doc.addObject("Part::Feature", f"master_shape_{label}")
+        # Add required properties manually since we're not using ShapeObject
+        if not hasattr(master_shape_obj, "ShowBounds"):
+            master_shape_obj.addProperty("App::PropertyBool", "ShowBounds", "Display", "").ShowBounds = False
+        if not hasattr(master_shape_obj, "BoundaryObject"):
+            master_shape_obj.addProperty("App::PropertyLink", "BoundaryObject", "Nesting", "")
+        
+        # Rotate the shape geometry if up_direction is not Z+
+        original_shape = master_obj.Shape.copy()
+        FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' with up_direction='{up_direction}'\n")
+        FreeCAD.Console.PrintMessage(f"     Original BoundBox: {original_shape.BoundBox}\n")
+        
+        if up_direction != "Z+" and up_direction is not None:
+            # Get rotation for this up_direction
+            rotation = _get_up_direction_rotation(up_direction)
+            if rotation:
+                center = original_shape.CenterOfMass
+                FreeCAD.Console.PrintMessage(f"     Applying rotation around center {center}\n")
+                placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), rotation, center)
+                # First rotate around original center
+                rotated_shape = original_shape.transformed(placement.Matrix)
+                # Copy to bake the transformation into actual geometry
+                rotated_shape = rotated_shape.copy()
+                
+                # Now translate so the center is at origin
+                new_center = rotated_shape.CenterOfMass
+                translation = FreeCAD.Vector(-new_center.x, -new_center.y, -new_center.z)
+                rotated_shape.translate(translation)
+                
+                FreeCAD.Console.PrintMessage(f"     Shape rotated and centered! Final BoundBox: {rotated_shape.BoundBox}\n")
+                FreeCAD.Console.PrintMessage(f"     Final CenterOfMass: {rotated_shape.CenterOfMass}\n")
+            else:
+                FreeCAD.Console.PrintWarning(f"     No rotation returned for up_direction='{up_direction}'\n")
+                rotated_shape = original_shape
+        else:
+            rotated_shape = original_shape
+        
+        master_shape_obj.Shape = rotated_shape
+        
+        # For Z+ shapes, center at origin using source_centroid offset
+        # For rotated shapes, the geometry is already centered at origin (no placement needed)
+        if up_direction == "Z+" or up_direction is None:
+            if temp_shape_wrapper.source_centroid:
+                offset_centroid = temp_shape_wrapper.source_centroid
+            else:
+                offset_centroid = rotated_shape.CenterOfMass
+            master_shape_obj.Placement = FreeCAD.Placement(offset_centroid.negative(), FreeCAD.Rotation())
+        # else: geometry is already centered, no placement needed
+            
         if hasattr(master_shape_obj, "ViewObject"):
             master_shape_obj.ViewObject.Visibility = True
         master_container.addObject(master_shape_obj)
@@ -327,10 +404,12 @@ class ShapePreparer:
                 quantity = part_params[0]
                 part_rotation_steps = part_params[1]
                 fill_sheet = False
+                up_direction = 'Z+'
             else:
                 quantity = part_params.get('quantity', 0)
                 part_rotation_steps = part_params.get('rotation_steps', global_rotation_steps)
                 fill_sheet = part_params.get('fill_sheet', False)
+                up_direction = part_params.get('up_direction', 'Z+')
             
             master_shape_obj = master_shape_obj_map.get(id(original_obj))
             master_wrapper = master_geometry_cache.get(id(original_obj))
@@ -350,7 +429,8 @@ class ShapePreparer:
                 shape_instance.instance_num = i + 1
                 shape_instance.id = f"{lookup_label}_{shape_instance.instance_num}"
                 shape_instance.rotation_steps = part_rotation_steps
-                shape_instance.fill_sheet = fill_sheet  # Store fill_sheet flag on shape
+                shape_instance.fill_sheet = fill_sheet
+                shape_instance.up_direction = up_direction
 
                 # Create temp copy using addObject (NOT copyObject to avoid link corruption)
                 part_copy = self.doc.addObject("Part::Feature", f"part_{shape_instance.id}")

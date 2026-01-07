@@ -260,8 +260,8 @@ class Sheet:
                             boundary_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
                             boundary_obj.ViewObject.LineWidth = 2.0
 
-                    # Place the shape object inside the container, offsetting it by -source_centroid
-                    # to align it with the boundary object.
+                    # Place the shape object inside the container, offsetting by -source_centroid
+                    # to align it with the boundary (which is centered at 0,0)
                     if shape.source_centroid:
                         shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), FreeCAD.Rotation())
                     else:

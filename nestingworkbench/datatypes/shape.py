@@ -133,9 +133,9 @@ class Shape:
         Calculates the final FreeCAD.Placement for the container.
         
         CLEAN OFFSET DESIGN:
-        - The child shape inside the container has placement = -source_centroid (centered at origin)
-        - The container placement should position the origin at the target (nested) position
-        - So container.Placement.Base = sheet_origin + nested_centroid
+        - The child shape inside the container has its own rotation for up_direction
+        - The container placement only handles XY position and in-plane (Z) rotation
+        - This keeps bounds flat on the sheet
 
         :param sheet_origin: FreeCAD.Vector for the sheet's bottom-left corner.
         :return: A final FreeCAD.Placement object.
@@ -153,11 +153,33 @@ class Shape:
         # Container position = target world position for the shape's center
         container_pos = sheet_origin + nested_centroid
         
+        # Only in-plane Z rotation for the container (keeps bounds flat)
         angle_deg = self._angle
-        rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle_deg)
+        z_rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 0, 1), angle_deg)
         
-        # Rotation center is at origin (where the centered shape is)
-        return FreeCAD.Placement(container_pos, rotation, FreeCAD.Vector(0, 0, 0))
+        # Rotation center is at origin
+        return FreeCAD.Placement(container_pos, z_rotation, FreeCAD.Vector(0, 0, 0))
+    
+    def _get_up_direction_rotation(self):
+        """
+        Returns a FreeCAD.Rotation that transforms the part's up_direction to Z+.
+        """
+        up_dir = getattr(self, 'up_direction', 'Z+')
+        
+        if up_dir == "Z+" or up_dir is None:
+            return FreeCAD.Rotation()  # Identity - no rotation needed
+        elif up_dir == "Z-":
+            return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
+        elif up_dir == "Y+":
+            return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
+        elif up_dir == "Y-":
+            return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
+        elif up_dir == "X+":
+            return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
+        elif up_dir == "X-":
+            return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
+        else:
+            return FreeCAD.Rotation()
 
     def set_rotation(self, angle, reposition=True):
         """
