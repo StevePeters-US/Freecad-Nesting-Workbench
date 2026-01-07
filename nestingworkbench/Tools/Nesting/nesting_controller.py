@@ -279,18 +279,10 @@ class NestingController:
         algo_kwargs = self._prepare_algo_kwargs(ui_params)
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
         
-        # Check if GA mode is enabled
-        generations = algo_kwargs.get('generations', 1)
-        population_size = algo_kwargs.get('population_size', 1)
-        
-        if generations > 1 and population_size > 1:
-            # GA Mode: Use LayoutManager for multiple layouts
-            self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
-                                     rotation_params, algo_kwargs, is_simulating)
-        else:
-            # Standard Mode: Single job
-            self._execute_standard_nesting(target_layout, ui_params, quantities, master_map, 
-                                           rotation_params, algo_kwargs, is_simulating)
+        # 3. Execute nesting using unified GA path
+        # (population=1, generations=1 is equivalent to standard nesting)
+        self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
+                                 rotation_params, algo_kwargs, is_simulating)
     
     def _execute_standard_nesting(self, target_layout, ui_params, quantities, master_map, 
                                    rotation_params, algo_kwargs, is_simulating):
@@ -372,14 +364,13 @@ class NestingController:
                         layout.efficiency = 0
                         continue
                     
-                    # Run nesting with quiet mode (suppress per-part logs)
+                    # Run nesting
                     sheets, unplaced, _ = nest(
                         layout.parts,
                         ui_params['sheet_width'],
                         ui_params['sheet_height'],
                         rotation_steps,
                         is_simulating,
-                        quiet=True,  # Suppress per-part logging in GA mode
                         **algo_kwargs
                     )
                     

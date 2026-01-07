@@ -136,7 +136,7 @@ def _cleanup_highlighting():
         _current_highlighted_master = None
 
 # --- Public Function ---
-def nest(parts, width, height, rotation_steps=1, simulate=False, quiet=False, **kwargs):
+def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
     """
     Convenience function to run the nesting algorithm.
     
@@ -146,7 +146,6 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, quiet=False, **
         height: Sheet height
         rotation_steps: Number of rotation steps
         simulate: If True, shows simulation with callbacks
-        quiet: If True, suppresses per-part logging (for GA fitness evaluation)
         **kwargs: Additional arguments for the nester
     """
     global _trial_viz_obj
@@ -167,20 +166,16 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, quiet=False, **
         raise NestingDependencyError("The selected algorithm requires the 'Shapely' library, which is not installed.")
 
     # If simulation is enabled, add callbacks to kwargs
-    # (quiet mode only suppresses logging, not simulation visualization)
     if simulate:
         kwargs['trial_callback'] = _draw_trial_bounds
         kwargs['part_start_callback'] = _on_part_start
         kwargs['part_end_callback'] = _on_part_end
 
-    # Pass quiet mode to nester (only affects logging, not callbacks)
-    kwargs['quiet'] = quiet
-
     # The controller now passes a fresh list of all parts to be nested.
     nester = nesting_strategy.Nester(width, height, rotation_steps, **kwargs)
 
-    # If simulation is enabled and not quiet, pass a callback that can draw the sheet state.
-    if simulate and not quiet:
+    # If simulation is enabled, pass a callback that can draw the sheet state.
+    if simulate:
         nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), QtGui.QApplication.processEvents())
 
     result = nester.nest(parts_to_process)
