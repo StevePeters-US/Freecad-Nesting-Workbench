@@ -47,19 +47,30 @@ def get_2d_profile_from_obj(obj, up_direction="Z+"):
         up_direction: Which direction should be treated as "up" when projecting to 2D.
                       One of "Z+", "Z-", "Y+", "Y-", "X+", "X-" (default: "Z+")
     """
-    shape = obj.Shape
+    # Get shape in world coordinates (apply source object's placement)
+    shape = obj.Shape.copy()
+    if obj.Placement and not obj.Placement.isIdentity():
+        shape.transformShape(obj.Placement.Matrix)
     
     # If we need to rotate the shape to align the up direction with Z+
     rotation = _get_rotation_for_up_direction(up_direction)
     needs_rotation = up_direction != "Z+" and up_direction is not None
     
     if needs_rotation:
-        # Create a rotated copy of the shape
+        # Rotate the shape around its center
         center = shape.CenterOfMass
         placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), rotation, center)
-        shape = shape.copy()
         shape.transformShape(placement.Matrix)
         FreeCAD.Console.PrintMessage(f"  -> Rotated shape for up_direction={up_direction}\n")
+    
+    # Always center the shape using bounding box center (for both rotated and non-rotated)
+    bb = shape.BoundBox
+    translation = FreeCAD.Vector(
+        -(bb.XMin + bb.XMax) / 2,
+        -(bb.YMin + bb.YMax) / 2,
+        -(bb.ZMin + bb.ZMax) / 2
+    )
+    shape.translate(translation)
 
     # Special case for sketches - already 2D
     if obj.isDerivedFrom("Sketcher::SketchObject") and not needs_rotation:
@@ -71,61 +82,41 @@ def get_2d_profile_from_obj(obj, up_direction="Z+"):
         else:
             raise ValueError(f"Sketch '{obj.Label}' contains no wires to form a face.")
 
-    # Try to find an existing XY-aligned planar face first (simpler and faster)
-    if shape.Faces:
-        bottom_face = None
-        min_z = float('inf')
-        
-        for face in shape.Faces:
-            try:
-                if face.Surface.isPlanar():
-                    normal = face.normalAt(0, 0)
-                    tolerance = 0.01
-                    is_parallel_to_xy = abs(abs(normal.z) - 1.0) < tolerance
-                    
-                    if is_parallel_to_xy:
-                        if face.BoundBox.ZMin < min_z:
-                            min_z = face.BoundBox.ZMin
-                            bottom_face = face
-            except:
-                continue
-        
-        if bottom_face:
-            return bottom_face
-    
-    # Fallback: Project the entire shape onto the XY plane to get a silhouette
-    # This captures all features visible from the Z direction
+    # Convert shape to mesh and project all mesh vertices onto XY plane
     try:
-        FreeCAD.Console.PrintMessage(f"  -> Using projection for '{obj.Label}'\n")
+        FreeCAD.Console.PrintMessage(f"  -> Meshing shape for '{obj.Label}'\n")
         
-        # Project onto XY plane (Z direction)
-        projection_dir = FreeCAD.Vector(0, 0, 1)
+        from shapely.geometry import MultiPoint, LineString, Polygon as ShapelyPolygon
         
-        # Create a projected wire using makeProjection
-        projected_edges = []
-        for edge in shape.Edges:
-            try:
-                # Project each edge onto XY plane
-                proj = edge.makeParallelProjection(Part.Plane(), projection_dir)
-                if proj and proj.Edges:
-                    projected_edges.extend(proj.Edges)
-            except:
-                continue
+        # Tessellate the shape to get mesh vertices
+        # This handles curved surfaces by creating triangle vertices
+        mesh = shape.tessellate(0.5)  # tolerance in mm
+        vertices = mesh[0]  # List of (x, y, z) tuples
         
-        if projected_edges:
-            # Try to create a face from the projected edges
-            try:
-                sorted_edges = Part.sortEdges(projected_edges)
-                wires = [Part.Wire(edges) for edges in sorted_edges if edges]
-                if wires:
-                    # Use the largest wire as the outer boundary
-                    outer_wire = max(wires, key=lambda w: Part.Face(w).Area if w.isClosed() else 0)
-                    if outer_wire.isClosed():
-                        return Part.Face(outer_wire)
-            except:
-                pass
+        if len(vertices) >= 3:
+            # Project all mesh vertices to XY plane
+            points_2d = [(v[0], v[1]) for v in vertices]
+            
+            # Create convex hull from all projected points
+            multi_point = MultiPoint(points_2d)
+            hull = multi_point.convex_hull
+            
+            # Handle degenerate cases (thin shapes become LineString)
+            if isinstance(hull, LineString):
+                # Buffer the line to create a thin polygon
+                hull = hull.buffer(0.1)  # 0.1mm thickness
+                FreeCAD.Console.PrintMessage(f"  -> Thin shape detected, buffering line\n")
+            
+            if hasattr(hull, 'exterior') and hull.is_valid:
+                coords = list(hull.exterior.coords)
+                if len(coords) >= 4:  # Need at least 4 points (3 + closing point)
+                    # Create a FreeCAD face from the hull
+                    fc_points = [FreeCAD.Vector(x, y, 0) for x, y in coords]
+                    wire = Part.makePolygon(fc_points)
+                    return Part.Face(wire)
         
-        # Alternative: use BoundBox as last resort
+        # Fallback: use BoundBox
+        FreeCAD.Console.PrintWarning(f"  -> Using bounding box for '{obj.Label}'\n")
         bb = shape.BoundBox
         points = [
             FreeCAD.Vector(bb.XMin, bb.YMin, 0),
@@ -135,7 +126,6 @@ def get_2d_profile_from_obj(obj, up_direction="Z+"):
             FreeCAD.Vector(bb.XMin, bb.YMin, 0)
         ]
         wire = Part.makePolygon(points)
-        FreeCAD.Console.PrintWarning(f"  -> Using bounding box for '{obj.Label}'\n")
         return Part.Face(wire)
         
     except Exception as e:
@@ -170,17 +160,30 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
 
     profile_2d = get_2d_profile_from_obj(shape_obj, up_direction)
     
-    # The 2D profile's center - this is used for BOTH:
-    # 1. Centering the polygon at origin
-    # 2. Offsetting the rotated 3D shape inside the container
-    # This ensures bounds and shape stay aligned
-    source_centroid = profile_2d.CenterOfMass
-
-    # Create a copy of the profile and move it to the origin.
-    normalized_profile = profile_2d.copy()
-    normalized_profile.translate(-source_centroid)
+    # The profile is already centered at origin (done in get_2d_profile_from_obj)
+    # We need to compute the original world-space BB center for shape_preparer to use
+    # Get the shape in world coordinates (same as get_2d_profile_from_obj does)
+    temp_shape = shape_obj.Shape.copy()
+    if shape_obj.Placement and not shape_obj.Placement.isIdentity():
+        temp_shape.transformShape(shape_obj.Placement.Matrix)
     
-    outer_wire = normalized_profile.OuterWire
+    # Apply rotation if needed
+    if up_direction != "Z+" and up_direction is not None:
+        rotation = _get_rotation_for_up_direction(up_direction)
+        center = temp_shape.CenterOfMass
+        placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), rotation, center)
+        temp_shape.transformShape(placement.Matrix)
+    
+    # Now get BB center - this is what shape_preparer should use
+    bb = temp_shape.BoundBox
+    source_centroid = FreeCAD.Vector(
+        (bb.XMin + bb.XMax) / 2,
+        (bb.YMin + bb.YMax) / 2,
+        (bb.ZMin + bb.ZMax) / 2
+    )
+    
+    # Profile is already centered, just use it directly
+    outer_wire = profile_2d.OuterWire
     if not outer_wire:
         raise ValueError("2D Profile has no outer wire.")
 
@@ -205,7 +208,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
             raise ValueError("Outer wire did not produce a usable polygon.")
 
     # --- Process Inner Wires (Holes) ---
-    inner_wires = [w for w in normalized_profile.Wires if not w.isSame(outer_wire)]
+    inner_wires = [w for w in profile_2d.Wires if not w.isSame(outer_wire)]
     hole_contours = []
     for inner_wire in inner_wires:
         hole_points = [(v.x, v.y) for v in inner_wire.discretize(Distance=discretize_distance)]

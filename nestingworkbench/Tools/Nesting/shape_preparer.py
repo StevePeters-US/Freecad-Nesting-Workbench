@@ -302,15 +302,26 @@ class ShapePreparer:
         if not hasattr(master_shape_obj, "BoundaryObject"):
             master_shape_obj.addProperty("App::PropertyLink", "BoundaryObject", "Nesting", "")
         
-        # Use original geometry - Placement will handle centering and rotation
+        # Get shape in world coordinates (apply source object's placement)
         original_shape = master_obj.Shape.copy()
+        if master_obj.Placement and not master_obj.Placement.isIdentity():
+            original_shape.transformShape(master_obj.Placement.Matrix)
         FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' with up_direction='{up_direction}'\n")
         
         master_shape_obj.Shape = original_shape
         
-        # Apply offset to center the shape relative to the container's origin
-        # Use the 3D shape's center, not the 2D profile centroid (which is in rotated coordinates)
-        offset = original_shape.CenterOfMass.negative()
+        # Use source_centroid from shape_processor for consistent centering
+        # This is the world-space BB center (after rotation if applicable)
+        if temp_shape_wrapper.source_centroid:
+            offset = temp_shape_wrapper.source_centroid.negative()
+        else:
+            bb = original_shape.BoundBox
+            offset = FreeCAD.Vector(
+                -(bb.XMin + bb.XMax) / 2,
+                -(bb.YMin + bb.YMax) / 2,
+                -(bb.ZMin + bb.ZMax) / 2
+            )
+        FreeCAD.Console.PrintMessage(f"     Using offset: ({-offset.x:.2f}, {-offset.y:.2f})\n")
         
         # Get up_direction rotation
         up_rotation = FreeCAD.Rotation()
@@ -340,10 +351,12 @@ class ShapePreparer:
             boundary_obj = temp_shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), None)
             if boundary_obj:
                 master_container.addObject(boundary_obj)
+                # Bounds are centered at origin - no placement needed
                 boundary_obj.Placement = FreeCAD.Placement()
                 master_shape_obj.BoundaryObject = boundary_obj
                 master_shape_obj.ShowBounds = False
                 if hasattr(boundary_obj, "ViewObject"): boundary_obj.ViewObject.Visibility = False
+                FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
         
         master_shapes_group.addObject(master_container)
         return master_shape_obj, temp_shape_wrapper
