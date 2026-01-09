@@ -83,11 +83,18 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
     if obj.isDerivedFrom("Sketcher::SketchObject") and not needs_rotation:
         if shape.Wires:
             try:
-                return Part.Face(shape.Wires[0])
-            except Part.OCCError as e:
-                raise ValueError(f"Could not create a face from the sketch '{obj.Label}': {e}")
-        else:
-            raise ValueError(f"Sketch '{obj.Label}' contains no wires to form a face.")
+                # Discretize sketch wire to points
+                w = shape.Wires[0]
+                # Default deflection for sketches?
+                pts = [(v.x, v.y) for v in w.discretize(Deflection=0.01)] 
+                if len(pts) > 2:
+                     from shapely.geometry import Polygon as ShapelyPolygon
+                     if pts[0] != pts[-1]: pts.append(pts[0])
+                     return ShapelyPolygon(pts)
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"Could not convert sketch '{obj.Label}' to polygon: {e}\n")
+        
+        raise ValueError(f"Sketch '{obj.Label}' contains no usable wires.")
 
     # Convert shape to mesh and project all mesh vertices onto XY plane
     try:
@@ -118,17 +125,17 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
                 p3 = vertices[facet[2]]
                 
                 # Round coordinates to avoid precision issues with coincident edges
-                # 4 decimal places = 0.1 micron precision, sufficient for wood/CNC
-                p1_xy = (round(p1[0], 4), round(p1[1], 4))
-                p2_xy = (round(p2[0], 4), round(p2[1], 4))
-                p3_xy = (round(p3[0], 4), round(p3[1], 4))
+                # REMOVED rounding to support high-resolution meshes (avoid collapsing micro-triangles)
+                p1_xy = (p1[0], p1[1])
+                p2_xy = (p2[0], p2[1])
+                p3_xy = (p3[0], p3[1])
 
                 # Create triangle polygon
                 # Check for degenerate triangles (collinear points)
                 poly = ShapelyPolygon([p1_xy, p2_xy, p3_xy])
                 
                 # Buffer(0) helps fix self-intersection or invalidity issues
-                if poly.is_valid and not poly.is_empty and poly.area > 1e-6:
+                if poly.is_valid and not poly.is_empty and poly.area > 1e-9:
                      cleaned = poly.buffer(0)
                      if not cleaned.is_empty:
                          if isinstance(cleaned, ShapelyPolygon):
@@ -173,20 +180,9 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
                         
                         if isinstance(merged, ShapelyPolygon):
                             if hasattr(merged, 'exterior') and merged.is_valid:
-                                coords = list(merged.exterior.coords)
-                                if len(coords) >= 4:
-                                    fc_points = [FreeCAD.Vector(x, y, 0) for x, y in coords]
-                                    wire = Part.makePolygon(fc_points)
-                                    
-                                    wires_list = [wire]
-                                    for interior in merged.interiors:
-                                        h_coords = list(interior.coords)
-                                        if len(h_coords) >= 4:
-                                            h_fc_points = [FreeCAD.Vector(x,y,0) for x,y in h_coords]
-                                            wires_list.append(Part.makePolygon(h_fc_points))
-                                    
-                                    # Fix: Part.Face takes a list of wires, not a Compound
-                                    return Part.Face(wires_list)
+                                # RETURN SHAPELY POLYGON DIRECTLY
+                                # This preserves high-resolution detail without FreeCAD wire conversion limits
+                                return merged
                 except Exception as union_e:
                     FreeCAD.Console.PrintWarning(f"  -> Union failed for '{obj.Label}': {union_e}. Falling back to convex hull.\n")
 
@@ -200,24 +196,12 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
              hull = hull.buffer(0.1)
 
         if hasattr(hull, 'exterior') and hull.is_valid:
-             coords = list(hull.exterior.coords)
-             if len(coords) >= 4:
-                 fc_points = [FreeCAD.Vector(x, y, 0) for x, y in coords]
-                 wire = Part.makePolygon(fc_points)
-                 return Part.Face(wire)
+             return hull
         
         # Absolute Fallback: use BoundBox
         FreeCAD.Console.PrintWarning(f"  -> Using bounding box for '{obj.Label}'\n")
         bb = shape.BoundBox
-        points = [
-            FreeCAD.Vector(bb.XMin, bb.YMin, 0),
-            FreeCAD.Vector(bb.XMax, bb.YMin, 0),
-            FreeCAD.Vector(bb.XMax, bb.YMax, 0),
-            FreeCAD.Vector(bb.XMin, bb.YMax, 0),
-            FreeCAD.Vector(bb.XMin, bb.YMin, 0)
-        ]
-        wire = Part.makePolygon(points)
-        return Part.Face(wire)
+        return shapely.geometry.box(bb.XMin, bb.YMin, bb.XMax, bb.YMax)
         
     except Exception as e:
         FreeCAD.Console.PrintError(f"  -> Projection failed: {e}\n")
@@ -266,58 +250,35 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
         (bb.ZMin + bb.ZMax) / 2
     )
     
-    # Profile is already centered, just use it directly
-    outer_wire = profile_2d.OuterWire
-    if not outer_wire:
-        raise ValueError("2D Profile has no outer wire.")
-
-    # Discretize the wire to convert it into a series of points for Shapely.
-    # We now use the explicit 'deflection' parameter from UI
+    # Profile is already a Shapely Polygon (centered)
+    # Re-verify validity just in case
+    if not profile_2d.is_valid:
+         profile_2d = make_valid(profile_2d)
+         if isinstance(profile_2d, MultiPolygon):
+             profile_2d = max(profile_2d.geoms, key=lambda p: p.area)
     
-    # --- Process Outer Wire ---
-    # use Deflection instead of Distance
-    points = [(v.x, v.y) for v in outer_wire.discretize(Deflection=deflection)]
-    if len(points) < 3:
-        raise ValueError("Not enough points in outer wire to form a polygon.")
-    if points[0] != points[-1]:
-        points.append(points[0])
-    
-    outer_polygon = Polygon(points)
-    if not outer_polygon.is_valid:
-        outer_polygon = make_valid(outer_polygon)
-        if isinstance(outer_polygon, MultiPolygon):
-             outer_polygon = max(outer_polygon.geoms, key=lambda p: p.area)
-        if outer_polygon.geom_type != 'Polygon':
-            raise ValueError("Outer wire did not produce a usable polygon.")
-
-    # --- Process Inner Wires (Holes) ---
-    inner_wires = [w for w in profile_2d.Wires if not w.isSame(outer_wire)]
-    hole_contours = []
-    for inner_wire in inner_wires:
-        hole_points = [(v.x, v.y) for v in inner_wire.discretize(Deflection=deflection)]
-        if len(hole_points) < 3:
-            continue
-        if hole_points[0] != hole_points[-1]:
-            hole_points.append(hole_points[0])
-        
-        hole_poly = Polygon(hole_points)
-        if not hole_poly.is_valid:
-            hole_poly = make_valid(hole_poly)
-            if isinstance(hole_poly, MultiPolygon):
-                hole_poly = max(hole_poly.geoms, key=lambda p: p.area)
-        
-        if hole_poly.is_valid and hole_poly.geom_type == 'Polygon':
-             hole_contours.append(hole_poly.exterior.coords)
+    if profile_2d.is_empty:
+        raise ValueError("2D Profile is empty.")
 
     # --- Create final polygon with holes ---
-    final_polygon_unbuffered = Polygon(outer_polygon.exterior.coords, hole_contours)
+    # Since get_2d_profile_from_obj now returns a full Shapely Polygon,
+    # we can use it directly as the unbuffered base.
+    # No need to re-discretize or reconstruct holes manualy!
+    final_polygon_unbuffered = profile_2d
 
     # Buffer the polygon for spacing.
     buffered_polygon = final_polygon_unbuffered.buffer(spacing / 2.0, join_style=1)
     
     # Simplify the buffered polygon to reduce vertex count.
     # Use explicitly passed simplification tolerance
+    original_points = len(buffered_polygon.exterior.coords)
     buffered_polygon = buffered_polygon.simplify(simplification, preserve_topology=True)
+    final_points = len(buffered_polygon.exterior.coords)
+    
+    # Also simplify the unbuffered polygon for consistent visualization
+    final_polygon_unbuffered = final_polygon_unbuffered.simplify(simplification, preserve_topology=True)
+    
+    FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
 
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")
