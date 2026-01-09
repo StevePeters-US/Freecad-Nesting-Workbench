@@ -43,7 +43,7 @@ class ShapePreparer:
         Main entry point to prepare parts.
         
         Args:
-            ui_global_settings (dict): { 'spacing': float, 'boundary_resolution': float, 'rotation_steps': int, 'add_labels': bool, 'font_path': str }
+            ui_global_settings (dict): { 'spacing': float, 'deflection': float, 'simplification': float, 'rotation_steps': int, 'add_labels': bool, 'font_path': str }
             quantities (dict): { label: (quantity, rotation_steps) }
             master_shapes_map (dict): { label: FreeCADObject }
             layout_obj (App::DocumentObjectGroup): The layout group.
@@ -53,7 +53,8 @@ class ShapePreparer:
             list[Shape]: List of prepared Shape objects for the nester.
         """
         spacing = ui_global_settings['spacing']
-        boundary_resolution = ui_global_settings['boundary_resolution']
+        deflection = ui_global_settings.get('deflection', 0.05)
+        simplification = ui_global_settings.get('simplification', 0.1)
         
         # --- Create or Retrieve the hidden MasterShapes group ---
         master_shapes_group = self._get_or_create_master_group(layout_obj)
@@ -72,8 +73,9 @@ class ShapePreparer:
                 else:
                     up_direction = part_params.get('up_direction', 'Z+')
                 
-                # Cache Key: (Object Name, Spacing, Resolution, UpDirection)
-                cache_key = (master_obj.Name, spacing, boundary_resolution, up_direction)
+                # Cache Key: (Object Name, Spacing, Deflection, Simplification, UpDirection)
+                # Updated cache key to respect new parameters
+                cache_key = (master_obj.Name, spacing, deflection, simplification, up_direction)
                 is_reloading = master_obj.Label.startswith("master_shape_")
                 
                 temp_shape_wrapper = None
@@ -85,11 +87,11 @@ class ShapePreparer:
                 
                 if is_reloading:
                     master_shape_obj, temp_shape_wrapper = self._create_temp_from_reloading(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj, master_shapes_group
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group
                     )
                 else:
                     master_shape_obj, temp_shape_wrapper = self._handle_new_master(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, master_shapes_group, is_reloading
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading
                     )
 
                 if master_shape_obj and temp_shape_wrapper:
@@ -97,9 +99,6 @@ class ShapePreparer:
                     master_geometry_cache[id(master_obj)] = temp_shape_wrapper
                     
                     # Need container for sorting/placing
-                    # If reloading, master_obj IS the inner ShapeObject. Parent is container.
-                    # If new, we created a container.
-                    # _handle_new_master returns the shape object. We need to find the container.
                     if master_shape_obj.InList:
                         masters_to_place.append((master_shape_obj.InList[0], temp_shape_wrapper))
 
@@ -139,12 +138,9 @@ class ShapePreparer:
             master_shapes_group.ViewObject.Visibility = True
         return master_shapes_group
 
-    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, layout_obj, master_shapes_group):
+    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group):
         """
         Creates a temporary copy of an existing master shape for use in the sandbox.
-        
-        CLEAN OFFSET DESIGN: Reads SourceCentroid from the original container instead of
-        deriving it. This ensures consistency between initial nesting and re-nesting.
         """
         original_label = label.replace("master_shape_", "")
         
@@ -161,13 +157,10 @@ class ShapePreparer:
         master_shapes_group.addObject(temp_container)
         
         # *** CLEAN OFFSET DESIGN ***
-        # Copy SourceCentroid from the original container - this is THE source of truth
         temp_container.addProperty("App::PropertyVector", "SourceCentroid", "Nesting", "Original geometry center")
         if original_container and hasattr(original_container, "SourceCentroid"):
             temp_container.SourceCentroid = original_container.SourceCentroid
         else:
-            # Fallback: calculate from geometry (less ideal but works)
-            # Use BoundBox of the Shape directly (it is already the transformed original)
             bb = master_obj.Shape.BoundBox
             temp_container.SourceCentroid = FreeCAD.Vector(
                  (bb.XMin + bb.XMax) / 2,
@@ -218,14 +211,14 @@ class ShapePreparer:
                 wires.sort(key=lambda w: w.Length, reverse=True)
                 
                 if wires:
-                    outer_pts = [(v.x, v.y) for v in wires[0].discretize(Deflection=0.01)]
+                    outer_pts = [(v.x, v.y) for v in wires[0].discretize(Deflection=deflection)]
                     if outer_pts:
                         if outer_pts[0] != outer_pts[-1]: 
                             outer_pts.append(outer_pts[0])
                         poly = Polygon(outer_pts)
                         holes = []
                         for w in wires[1:]:
-                            h_pts = [(v.x, v.y) for v in w.discretize(Deflection=0.01)]
+                            h_pts = [(v.x, v.y) for v in w.discretize(Deflection=deflection)]
                             if h_pts[0] != h_pts[-1]: 
                                 h_pts.append(h_pts[0])
                             if len(h_pts) > 2: 
@@ -235,7 +228,6 @@ class ShapePreparer:
                         
                         temp_shape_wrapper = Shape(temp_master_obj)
                         temp_shape_wrapper.polygon = final_poly
-                        # Use the stored SourceCentroid - THE source of truth
                         temp_shape_wrapper.source_centroid = temp_container.SourceCentroid
                         
                         self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
@@ -246,7 +238,7 @@ class ShapePreparer:
         # 6. Recalculate if reuse failed
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(temp_master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, boundary_resolution)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification)
             # Update the container's SourceCentroid with the recalculated value
             if temp_shape_wrapper.source_centroid:
                 temp_container.SourceCentroid = temp_shape_wrapper.source_centroid
@@ -254,7 +246,7 @@ class ShapePreparer:
 
         return temp_master_obj, temp_shape_wrapper
 
-    def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, boundary_resolution, cache_key, master_shapes_group, is_reloading):
+    def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading):
         # Get part parameters from quantities
         part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+'})
         if isinstance(part_params, tuple):
@@ -264,7 +256,7 @@ class ShapePreparer:
         
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, boundary_resolution, up_direction)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
         master_container = self.doc.addObject("App::Part", f"master_{label}")

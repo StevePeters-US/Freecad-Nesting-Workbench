@@ -55,9 +55,22 @@ class NestingPanel(QtGui.QWidget):
         self.sheet_width_input = QtGui.QDoubleSpinBox(); self.sheet_width_input.setRange(1, 10000); self.sheet_width_input.setValue(600)
         self.sheet_height_input = QtGui.QDoubleSpinBox(); self.sheet_height_input.setRange(1, 10000); self.sheet_height_input.setValue(600)
         self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
-        self.boundary_resolution_input = QtGui.QSpinBox(); self.boundary_resolution_input.setRange(10, 500); self.boundary_resolution_input.setValue(300)
-        self.boundary_resolution_input.setToolTip("Number of points per curve for boundary creation. Higher values are more accurate but slower.")
         
+        # --- Advanced Boundary Settings ---
+        self.deflection_input = QtGui.QDoubleSpinBox(); self.deflection_input.setRange(0.001, 1.0); self.deflection_input.setValue(0.05); self.deflection_input.setSingleStep(0.01); self.deflection_input.setDecimals(3)
+        self.deflection_input.setToolTip("Maximum deviation from original curve (mm). Lower = Smoother used for boundary creation.")
+        
+        self.simplification_input = QtGui.QDoubleSpinBox(); self.simplification_input.setRange(0.001, 1.0); self.simplification_input.setValue(0.1); self.simplification_input.setSingleStep(0.01); self.simplification_input.setDecimals(3)
+        self.simplification_input.setToolTip("Tolerance for removing redundant points (mm). Higher = Fewer points used for optimization.")
+
+        self.info_button = QtGui.QPushButton("Make default (20)")
+        self.info_button.setToolTip("Show info about Deflection and Simplification")
+        self.info_button.clicked.connect(self.show_boundary_info)
+
+        # Load persisted settings immediately
+        self.load_persisted_settings()
+
+
         self.shape_table = QtGui.QTableWidget()
         self.shape_table.setColumnCount(6)
         self.shape_table.setHorizontalHeaderLabels(["Shape", "Quantity", "Rotations", "Override", "Up Dir", "Fill"])
@@ -165,7 +178,16 @@ class NestingPanel(QtGui.QWidget):
         form_layout.addRow("Sheet Width:", self.sheet_width_input)
         form_layout.addRow("Sheet Height:", self.sheet_height_input)
         form_layout.addRow("Part Spacing:", self.part_spacing_input)
-        form_layout.addRow("Boundary Resolution:", self.boundary_resolution_input)
+        
+        # Advanced Curve Settings
+        curve_settings_layout = QtGui.QHBoxLayout()
+        curve_settings_layout.addWidget(QtGui.QLabel("Deflect:"))
+        curve_settings_layout.addWidget(self.deflection_input)
+        curve_settings_layout.addWidget(QtGui.QLabel("Simplify:"))
+        curve_settings_layout.addWidget(self.simplification_input)
+        curve_settings_layout.addWidget(self.info_button)
+        
+        form_layout.addRow("Curve Quality:", curve_settings_layout)
 
 
         form_layout.addRow(self.minkowski_settings_group)
@@ -250,6 +272,10 @@ class NestingPanel(QtGui.QWidget):
             self.sheet_height_input.setValue(layout_group.SheetHeight)
         if hasattr(layout_group, 'PartSpacing'):
             self.part_spacing_input.setValue(layout_group.PartSpacing)
+        if hasattr(layout_group, 'Deflection'):
+            self.deflection_input.setValue(layout_group.Deflection)
+        if hasattr(layout_group, 'Simplification'):
+            self.simplification_input.setValue(layout_group.Simplification)
         if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
             self.selected_font_path = layout_group.FontFile
             self.font_label.setText(os.path.basename(layout_group.FontFile))
@@ -581,3 +607,25 @@ class NestingPanel(QtGui.QWidget):
             QtGui.QApplication.processEvents()
         except RuntimeError:
             pass
+
+    def load_persisted_settings(self):
+        """Loads settings from FreeCAD preferences."""
+        prefs = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/NestingWorkbench")
+        self.sheet_width_input.setValue(prefs.GetFloat("SheetWidth", 600.0))
+        self.sheet_height_input.setValue(prefs.GetFloat("SheetHeight", 600.0))
+        self.part_spacing_input.setValue(prefs.GetFloat("PartSpacing", 12.5))
+        self.deflection_input.setValue(prefs.GetFloat("Deflection", 0.05))
+        self.simplification_input.setValue(prefs.GetFloat("Simplification", 0.1))
+        
+    def show_boundary_info(self):
+        msg = (
+            "<b>Deflection (Curve Quality):</b><br>"
+            "Controls how smoothly curves are approximated. It is the maximum distance (in mm) "
+            "between the true curve and the straight line segment approximating it.<br>"
+            "<i>Smaller value (e.g. 0.01) = Smoother curves, more points.</i><br>"
+            "<i>Larger value (e.g. 0.1) = Coarser curves, fewer points.</i><br><br>"
+            "<b>Simplification (Optimization):</b><br>"
+            "Controls how aggressively redundant points are removed after initial creation.<br>"
+            "<i>Should specificially correspond to your machine's tolerance.</i>"
+        )
+        QtGui.QMessageBox.information(self, "Boundary Settings Info", msg)

@@ -96,12 +96,16 @@ def _find_master_container_for_part(part):
     
     # Search in Layout_temp first (active nesting), then other layouts
     for obj in doc.Objects:
-        if hasattr(obj, "Group") and (obj.Label.startswith("Layout_temp") or obj.Label.startswith("Layout")):
-            for child in obj.Group:
-                if child.Label == "MasterShapes" and hasattr(child, "Group"):
-                    for master in child.Group:
-                        if master.Label in master_names:
-                            return master
+        try:
+            if hasattr(obj, "Group") and (obj.Label.startswith("Layout_temp") or obj.Label.startswith("Layout")):
+                for child in obj.Group:
+                    if child.Label == "MasterShapes" and hasattr(child, "Group"):
+                        for master in child.Group:
+                            if master.Label in master_names:
+                                return master
+        except RuntimeError:
+            # Object might be deleted/invalid, skip it
+            continue
     return None
 
 def _highlight_master(master_container, highlight):

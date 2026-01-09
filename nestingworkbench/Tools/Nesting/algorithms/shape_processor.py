@@ -37,7 +37,7 @@ def _get_rotation_for_up_direction(up_direction):
         return FreeCAD.Rotation()
 
 
-def get_2d_profile_from_obj(obj, up_direction="Z+"):
+def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
     """
     Extracts a usable 2D profile from a FreeCAD object by projecting it onto the XY plane.
     This captures the full silhouette of the shape from the specified viewing direction.
@@ -46,6 +46,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+"):
         obj: FreeCAD object to extract profile from
         up_direction: Which direction should be treated as "up" when projecting to 2D.
                       One of "Z+", "Z-", "Y+", "Y-", "X+", "X-" (default: "Z+")
+        tessellation_quality: Max deviation for meshing (mm).
     """
     # Get shape in world coordinates (apply source object's placement)
     shape = obj.Shape.copy()
@@ -96,10 +97,8 @@ def get_2d_profile_from_obj(obj, up_direction="Z+"):
         
         # Tessellate the shape to get mesh vertices
         # This handles curved surfaces by creating triangle vertices
-        # Tessellate the shape to get mesh vertices
-        # This handles curved surfaces by creating triangle vertices
         # Use finer mesh for better resolution as requested (0.1mm instead of 0.5mm)
-        mesh = shape.tessellate(0.1)
+        mesh = shape.tessellate(tessellation_quality)
         vertices = mesh[0]  # List of (x, y, z) tuples
         
         if len(vertices) >= 3 and hasattr(mesh[1], '__iter__'):
@@ -227,7 +226,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+"):
     raise ValueError(f"Unsupported object '{obj.Label}' or no valid 2D geometry found.")
 
 
-def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution=300, up_direction="Z+"):
+def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=0.1, up_direction="Z+"):
     """
     Processes a FreeCAD object to generate a shapely-based boundary and populates
     the geometric properties of the provided Shape object. The created boundary is
@@ -237,7 +236,8 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     :param shape_to_populate: The Shape object to populate with geometry.
     :param shape_obj: The FreeCAD object to process.
     :param spacing: The spacing/buffer to add around the shape.
-    :param resolution: Number of points for discretizing curves.
+    :param deflection: Max deviation for curve creation (mm).
+    :param simplification: Tolerance for smoothing (mm).
     :param up_direction: Which direction is "up" for 2D projection ("Z+", "Z-", "Y+", "Y-", "X+", "X-").
     """
     from ..nesting_logic import SHAPELY_AVAILABLE
@@ -250,7 +250,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     from shapely.affinity import translate
     from shapely.validation import make_valid
 
-    profile_2d = get_2d_profile_from_obj(shape_obj, up_direction)
+    profile_2d = get_2d_profile_from_obj(shape_obj, up_direction, deflection)
     
     # Compute the world-space BB center from the NON-ROTATED shape
     # The rotation is handled by the placement in shape_preparer
@@ -272,15 +272,11 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
         raise ValueError("2D Profile has no outer wire.")
 
     # Discretize the wire to convert it into a series of points for Shapely.
-    # We map the UI 'resolution' (e.g. 50-1000, default ~300) to a Deflection tolerance.
-    # A resolution of 300 gives ~0.05mm deflection (High Quality).
-    # Higher resolution value = Smaller deflection = Higher quality.
-    safe_resolution = float(resolution) if resolution > 10 else 10.0
-    deflection_tol = 15.0 / safe_resolution
+    # We now use the explicit 'deflection' parameter from UI
     
     # --- Process Outer Wire ---
     # use Deflection instead of Distance
-    points = [(v.x, v.y) for v in outer_wire.discretize(Deflection=deflection_tol)]
+    points = [(v.x, v.y) for v in outer_wire.discretize(Deflection=deflection)]
     if len(points) < 3:
         raise ValueError("Not enough points in outer wire to form a polygon.")
     if points[0] != points[-1]:
@@ -298,7 +294,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     inner_wires = [w for w in profile_2d.Wires if not w.isSame(outer_wire)]
     hole_contours = []
     for inner_wire in inner_wires:
-        hole_points = [(v.x, v.y) for v in inner_wire.discretize(Deflection=deflection_tol)]
+        hole_points = [(v.x, v.y) for v in inner_wire.discretize(Deflection=deflection)]
         if len(hole_points) < 3:
             continue
         if hole_points[0] != hole_points[-1]:
@@ -320,9 +316,8 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     buffered_polygon = final_polygon_unbuffered.buffer(spacing / 2.0, join_style=1)
     
     # Simplify the buffered polygon to reduce vertex count.
-    # Use a tolerance relative to the deflection to keep curves smooth.
-    # usually 2x deflection is a good balance between point count and smoothness.
-    buffered_polygon = buffered_polygon.simplify(deflection_tol * 2.0, preserve_topology=True)
+    # Use explicitly passed simplification tolerance
+    buffered_polygon = buffered_polygon.simplify(simplification, preserve_topology=True)
 
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")
@@ -371,6 +366,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, resolution
     shape_to_populate.polygon = final_buffered_polygon
     shape_to_populate.original_polygon = final_buffered_polygon
     shape_to_populate.spacing = spacing
-    shape_to_populate.resolution = float(resolution)
+    shape_to_populate.deflection = float(deflection)
+    shape_to_populate.simplification = float(simplification)
     shape_to_populate.unbuffered_polygon = final_unbuffered_polygon
     shape_to_populate.source_centroid = source_centroid + rotated_offset

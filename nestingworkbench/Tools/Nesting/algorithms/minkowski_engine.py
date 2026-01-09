@@ -81,7 +81,8 @@ class MinkowskiEngine:
                 part_to_place_master_label, 
                 relative_angle, 
                 part_to_place.spacing,
-                part_to_place.resolution
+                part_to_place.deflection,
+                part_to_place.simplification
             )
             
             # Get Master NFP
