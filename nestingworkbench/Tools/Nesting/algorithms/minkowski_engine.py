@@ -74,6 +74,7 @@ class MinkowskiEngine:
             
             # Normalize angle
             relative_angle = (angle - placed_angle) % 360.0
+            if abs(relative_angle - 360.0) < 1e-5: relative_angle = 0.0
             relative_angle = round(relative_angle, 4)
             
             nfp_cache_key = (
@@ -89,7 +90,7 @@ class MinkowskiEngine:
             nfp_data = Shape.nfp_cache.get(nfp_cache_key)
             if not nfp_data:
                 # Calculate if missing (synchronous)
-                FreeCAD.Console.PrintMessage(f"NFP cache miss: {placed_label} vs {part_to_place_master_label} @{relative_angle}deg\n")
+                # FreeCAD.Console.PrintMessage(f"NFP cache miss: {placed_label} vs {part_to_place_master_label} @{relative_angle}deg\n")
                 nfp_data = self._calculate_and_cache_nfp(
                     p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
                 )

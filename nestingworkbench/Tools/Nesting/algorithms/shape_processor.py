@@ -278,7 +278,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     # Also simplify the unbuffered polygon for consistent visualization
     final_polygon_unbuffered = final_polygon_unbuffered.simplify(simplification, preserve_topology=True)
     
-    FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
+    # FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
 
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")
