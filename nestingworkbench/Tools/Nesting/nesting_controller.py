@@ -225,7 +225,7 @@ class NestingJob:
         self._set_prop(layout_obj, "App::PropertyLength", "SheetWidth", p['sheet_width'])
         self._set_prop(layout_obj, "App::PropertyLength", "SheetHeight", p['sheet_height'])
         self._set_prop(layout_obj, "App::PropertyLength", "PartSpacing", p['spacing'])
-        self._set_prop(layout_obj, "App::PropertyLength", "MaterialThickness", p['material_thickness'])
+        self._set_prop(layout_obj, "App::PropertyLength", "SheetThickness", p['sheet_thickness'])
         self._set_prop(layout_obj, "App::PropertyFloat", "Deflection", p.get('deflection', 0.05))
         self._set_prop(layout_obj, "App::PropertyFloat", "Simplification", p.get('simplification', 0.1))
         self._set_prop(layout_obj, "App::PropertyFile", "FontFile", p['font_path'])
@@ -615,7 +615,7 @@ class NestingController:
             'sheet_width': self.ui.sheet_width_input.value(),
             'sheet_height': self.ui.sheet_height_input.value(),
             'spacing': self.ui.part_spacing_input.value(),
-            'material_thickness': self.ui.material_thickness_input.value(),
+            'sheet_thickness': self.ui.sheet_thickness_input.value(),
             'deflection': self.ui.deflection_input.value(),
             'simplification': self.ui.simplification_input.value(),
             'rotation_steps': self.ui.rotation_steps_spinbox.value(),
@@ -638,7 +638,7 @@ class NestingController:
         prefs.SetFloat("SheetWidth", float(settings['sheet_width']))
         prefs.SetFloat("SheetHeight", float(settings['sheet_height']))
         prefs.SetFloat("PartSpacing", float(settings['spacing']))
-        prefs.SetFloat("MaterialThickness", float(settings['material_thickness']))
+        prefs.SetFloat("SheetThickness", float(settings['sheet_thickness']))
         prefs.SetFloat("Deflection", float(settings['deflection']))
         prefs.SetFloat("Simplification", float(settings['simplification']))
         prefs.SetInt("RotationSteps", int(settings['rotation_steps']))

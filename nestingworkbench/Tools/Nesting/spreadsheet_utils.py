@@ -32,8 +32,8 @@ def create_layout_spreadsheet(doc, group, ui_params, sheet_efficiencies=None):
     sheet_data.set('B3', str(ui_params.get('sheet_h', 0)))
     sheet_data.set('A4', 'PartSpacing')
     sheet_data.set('B4', str(ui_params.get('spacing', 0)))
-    sheet_data.set('A5', 'MaterialThickness')
-    sheet_data.set('B5', str(ui_params.get('material_thickness', 3.0)))
+    sheet_data.set('A5', 'SheetThickness')
+    sheet_data.set('B5', str(ui_params.get('sheet_thickness', 3.0)))
     sheet_data.set('A6', 'FontFile')
     sheet_data.set('B6', ui_params.get('font_path', ''))
 
