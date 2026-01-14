@@ -77,9 +77,6 @@ class NestingPanel(QtGui.QWidget):
         self.info_button.setToolTip("Show info about Deflection and Simplification")
         self.info_button.clicked.connect(self.show_boundary_info)
 
-        # Load persisted settings immediately
-        self.load_persisted_settings()
-
 
         self.shape_table = QtGui.QTableWidget()
         self.shape_table.setColumnCount(6)
@@ -158,6 +155,8 @@ class NestingPanel(QtGui.QWidget):
         self.add_labels_checkbox = QtGui.QCheckBox("Add Identifier Labels"); self.add_labels_checkbox.setChecked(True)
         self.label_height_input = QtGui.QDoubleSpinBox(); self.label_height_input.setRange(0, 1000); self.label_height_input.setValue(25.0)
         self.label_height_input.setToolTip("The height (Z-offset) for the identifier labels.")
+        self.label_size_input = QtGui.QDoubleSpinBox(); self.label_size_input.setRange(1, 100); self.label_size_input.setValue(10.0)
+        self.label_size_input.setToolTip("The text size for identifier labels in mm.")
         self.simulate_nesting_checkbox = QtGui.QCheckBox("Simulate Nesting (slower)"); self.simulate_nesting_checkbox.setChecked(True)
         self.sound_checkbox = QtGui.QCheckBox("Play sound on completion"); self.sound_checkbox.setChecked(True)
         
@@ -180,6 +179,8 @@ class NestingPanel(QtGui.QWidget):
         # --- Layout Assembly ---
         label_options_layout = QtGui.QHBoxLayout()
         label_options_layout.addWidget(self.add_labels_checkbox)
+        label_options_layout.addWidget(QtGui.QLabel("Size:"))
+        label_options_layout.addWidget(self.label_size_input)
         label_options_layout.addWidget(QtGui.QLabel("Height (Z):"))
         label_options_layout.addWidget(self.label_height_input)
         label_options_layout.addStretch()
@@ -232,9 +233,14 @@ class NestingPanel(QtGui.QWidget):
         # Connect signals
 
 
-        # Link label height input to the add labels checkbox
-        self.add_labels_checkbox.stateChanged.connect(self.label_height_input.setEnabled)
-        self.label_height_input.setEnabled(self.add_labels_checkbox.isChecked())
+        # Link label inputs to the add labels checkbox
+        def toggle_label_inputs(state):
+            enabled = state == QtCore.Qt.Checked
+            self.label_size_input.setEnabled(enabled)
+            self.label_height_input.setEnabled(enabled)
+        
+        self.add_labels_checkbox.stateChanged.connect(toggle_label_inputs)
+        toggle_label_inputs(QtCore.Qt.Checked if self.add_labels_checkbox.isChecked() else QtCore.Qt.Unchecked)
 
         # Connect the nesting controller
         from .nesting_controller import NestingController
@@ -244,6 +250,9 @@ class NestingPanel(QtGui.QWidget):
         self.show_bounds_checkbox.stateChanged.connect(self.controller.toggle_bounds_visibility)
         self.add_parts_button.clicked.connect(self.add_selected_shapes)
         self.remove_parts_button.clicked.connect(self.remove_selected_shapes)
+        
+        # Load persisted settings after all widgets are created
+        self.load_persisted_settings()
 
 
 
@@ -292,6 +301,8 @@ class NestingPanel(QtGui.QWidget):
         if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
             self.selected_font_path = layout_group.FontFile
             self.font_label.setText(os.path.basename(layout_group.FontFile))
+        if hasattr(layout_group, 'LabelSize'):
+            self.label_size_input.setValue(layout_group.LabelSize)
         if hasattr(layout_group, 'Generations'):
             self.minkowski_generations_input.setValue(layout_group.Generations)
         if hasattr(layout_group, 'PopulationSize'):
@@ -628,6 +639,7 @@ class NestingPanel(QtGui.QWidget):
         self.sheet_height_input.setValue(prefs.GetFloat("SheetHeight", 600.0))
         self.part_spacing_input.setValue(prefs.GetFloat("PartSpacing", 12.5))
         self.sheet_thickness_input.setValue(prefs.GetFloat("SheetThickness", 3.0))
+        self.label_size_input.setValue(prefs.GetFloat("LabelSize", 10.0))
         self.deflection_input.setValue(prefs.GetFloat("Deflection", 0.05))
         self.simplification_input.setValue(prefs.GetFloat("Simplification", 0.1))
         

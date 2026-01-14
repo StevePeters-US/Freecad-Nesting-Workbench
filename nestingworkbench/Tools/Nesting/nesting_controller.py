@@ -232,6 +232,7 @@ class NestingJob:
         self._set_prop(layout_obj, "App::PropertyBool", "ShowBounds", p['show_bounds'])
         self._set_prop(layout_obj, "App::PropertyBool", "AddLabels", p['add_labels'])
         self._set_prop(layout_obj, "App::PropertyLength", "LabelHeight", p['label_height'])
+        self._set_prop(layout_obj, "App::PropertyFloat", "LabelSize", p['label_size'])
         self._set_prop(layout_obj, "App::PropertyInteger", "GlobalRotationSteps", p['rotation_steps'])
         self._set_prop(layout_obj, "App::PropertyInteger", "Generations", p.get('generations', 1))
         self._set_prop(layout_obj, "App::PropertyInteger", "PopulationSize", p.get('population_size', 1))
@@ -623,6 +624,7 @@ class NestingController:
             'font_path': getattr(self.ui, 'selected_font_path', None),
             'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
             'label_height': self.ui.label_height_input.value(),
+            'label_size': self.ui.label_size_input.value(),
             'generations': self.ui.minkowski_generations_input.value(),
             'population_size': self.ui.minkowski_population_size_input.value()
         }
@@ -645,6 +647,7 @@ class NestingController:
         prefs.SetBool("AddLabels", bool(settings['add_labels']))
         prefs.SetBool("ShowBounds", bool(settings['show_bounds']))
         prefs.SetFloat("LabelHeight", float(settings['label_height']))
+        prefs.SetFloat("LabelSize", float(settings['label_size']))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
 

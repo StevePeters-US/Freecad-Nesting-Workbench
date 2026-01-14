@@ -289,7 +289,7 @@ class Sheet:
                         # Do NOT delete existing objects by name as they might belong to other layouts.
                         label_obj = create_label_object(label_name)
                         
-                        shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('spacing', 0) * 0.6)
+                        shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('label_size', 10.0))
                         label_obj.Shape = shapestring_geom.Shape
                         doc.removeObject(shapestring_geom.Name)
                         
