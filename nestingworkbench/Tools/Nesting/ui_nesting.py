@@ -54,8 +54,8 @@ class NestingPanel(QtGui.QWidget):
 
         self.sheet_width_input = QtGui.QDoubleSpinBox(); self.sheet_width_input.setRange(1, 10000); self.sheet_width_input.setValue(600)
         self.sheet_height_input = QtGui.QDoubleSpinBox(); self.sheet_height_input.setRange(1, 10000); self.sheet_height_input.setValue(600)
-        self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
         self.sheet_thickness_input = QtGui.QDoubleSpinBox(); self.sheet_thickness_input.setRange(0.1, 1000); self.sheet_thickness_input.setValue(3.0)
+        self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
         
         # --- Advanced Boundary Settings ---
         self.deflection_input = QtGui.QDoubleSpinBox(); self.deflection_input.setRange(0.001, 1.0); self.deflection_input.setValue(0.05); self.deflection_input.setSingleStep(0.01); self.deflection_input.setDecimals(3)
@@ -187,8 +187,8 @@ class NestingPanel(QtGui.QWidget):
 
         form_layout.addRow("Sheet Width:", self.sheet_width_input)
         form_layout.addRow("Sheet Height:", self.sheet_height_input)
-        form_layout.addRow("Part Spacing:", self.part_spacing_input)
         form_layout.addRow("Sheet Thickness:", self.sheet_thickness_input)
+        form_layout.addRow("Part Spacing:", self.part_spacing_input)
         
         # Advanced Curve Settings
         curve_settings_layout = QtGui.QHBoxLayout()

@@ -37,28 +37,38 @@ class CAMManager:
             FreeCAD.Console.PrintError("Please ensure the CAM workbench is installed and enabled in FreeCAD 1.1+.\n")
             return
         
-        # Get layout parameters from spreadsheet
+        # Get layout parameters from layout properties (preferred) or spreadsheet (fallback)
         sheet_width = 600.0  # Default values
         sheet_height = 600.0
-        material_thickness = 10.0
+        sheet_thickness = 3.0
         
+        # Try to read from layout group properties first (most reliable)
         if self.layout_group:
-            spreadsheet = self.layout_group.getObject("LayoutParameters")
-            if spreadsheet:
-                try:
-                    # Read sheet dimensions
-                    width_val = spreadsheet.get('B2')
-                    if width_val:
-                        sheet_width = float(width_val)
-                    height_val = spreadsheet.get('B3')
-                    if height_val:
-                        sheet_height = float(height_val)
-                    # Read material thickness  
-                    thickness_val = spreadsheet.get('B5')
-                    if thickness_val:
-                        material_thickness = float(thickness_val)
-                except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"Could not read parameters from spreadsheet: {e}\n")
+            if hasattr(self.layout_group, 'SheetWidth'):
+                sheet_width = float(self.layout_group.SheetWidth)
+            if hasattr(self.layout_group, 'SheetHeight'):
+                sheet_height = float(self.layout_group.SheetHeight)
+            if hasattr(self.layout_group, 'SheetThickness'):
+                sheet_thickness = float(self.layout_group.SheetThickness)
+            
+            # Fallback to spreadsheet if properties don't exist
+            if not hasattr(self.layout_group, 'SheetWidth'):
+                spreadsheet = self.layout_group.getObject("LayoutParameters")
+                if spreadsheet:
+                    try:
+                        # Read sheet dimensions
+                        width_val = spreadsheet.get('B2')
+                        if width_val:
+                            sheet_width = float(width_val)
+                        height_val = spreadsheet.get('B3')
+                        if height_val:
+                            sheet_height = float(height_val)
+                        # Read sheet thickness  
+                        thickness_val = spreadsheet.get('B5')
+                        if thickness_val:
+                            sheet_thickness = float(thickness_val)
+                    except Exception as e:
+                        FreeCAD.Console.PrintWarning(f"Could not read parameters from spreadsheet: {e}\\n")
         
         # Find the sheet boundary and all nested parts
         sheet_boundary = None
@@ -102,7 +112,7 @@ class CAMManager:
         new_stock = PathStock.CreateBox(job)
         new_stock.Length = sheet_width
         new_stock.Width = sheet_height
-        new_stock.Height = material_thickness
+        new_stock.Height = sheet_thickness
         job.Stock = new_stock
         
         # Set up the ViewProvider Proxy to enable proper tree view nesting
@@ -124,4 +134,4 @@ class CAMManager:
         # Recompute to finalize the job
         self.doc.recompute()
         
-        FreeCAD.Console.PrintMessage(f"Created CAM job '{job_name}' for {sheet_group.Label} with {len(parts_to_machine)} parts (sheet: {sheet_width}x{sheet_height}x{material_thickness}mm)\n")
+        FreeCAD.Console.PrintMessage(f"Created CAM job '{job_name}' for {sheet_group.Label} with {len(parts_to_machine)} parts (sheet: {sheet_width}x{sheet_height}x{sheet_thickness}mm)\n")
