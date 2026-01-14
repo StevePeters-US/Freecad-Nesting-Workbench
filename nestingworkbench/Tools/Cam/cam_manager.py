@@ -169,6 +169,13 @@ class CAMManager:
                 new_stock.Length = sheet_width
                 new_stock.Width = sheet_height
                 new_stock.Height = sheet_thickness
+                
+                # Position stock at sheet origin with Z=0 at top of stock
+                # Stock bottom is at Z = -thickness, top at Z = 0 (for CNC milling convention)
+                new_stock.Placement = FreeCAD.Placement(
+                    FreeCAD.Vector(0, 0, -sheet_thickness),  # Position: X=0, Y=0, Z=-thickness
+                    FreeCAD.Rotation()  # No rotation
+                )
                 job.Stock = new_stock
                 
                 # Set post processor to GRBL
