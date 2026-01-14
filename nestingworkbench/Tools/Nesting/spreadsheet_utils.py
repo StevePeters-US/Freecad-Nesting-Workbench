@@ -32,13 +32,15 @@ def create_layout_spreadsheet(doc, group, ui_params, sheet_efficiencies=None):
     sheet_data.set('B3', str(ui_params.get('sheet_h', 0)))
     sheet_data.set('A4', 'PartSpacing')
     sheet_data.set('B4', str(ui_params.get('spacing', 0)))
-    sheet_data.set('A5', 'FontFile')
-    sheet_data.set('B5', ui_params.get('font_path', ''))
+    sheet_data.set('A5', 'MaterialThickness')
+    sheet_data.set('B5', str(ui_params.get('material_thickness', 3.0)))
+    sheet_data.set('A6', 'FontFile')
+    sheet_data.set('B6', ui_params.get('font_path', ''))
 
     if sheet_efficiencies:
-        sheet_data.set('A6', '--- Sheet Efficiencies ---')
+        sheet_data.set('A7', '--- Sheet Efficiencies ---')
         for i, efficiency in enumerate(sheet_efficiencies):
-            sheet_data.set(f'A{7+i}', f'Sheet {i+1} Efficiency (%)')
-            sheet_data.set(f'B{7+i}', f'{efficiency:.2f}')
+            sheet_data.set(f'A{8+i}', f'Sheet {i+1} Efficiency (%)')
+            sheet_data.set(f'B{8+i}', f'{efficiency:.2f}')
 
     group.addObject(sheet_data)

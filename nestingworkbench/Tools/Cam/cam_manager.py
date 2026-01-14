@@ -6,7 +6,6 @@ and managing CAM jobs from the nested layouts.
 """
 
 import FreeCAD
-import Path
 
 class CAMManager:
     """Manages the creation of FreeCAD CAM jobs from nested layouts."""
@@ -16,66 +15,75 @@ class CAMManager:
 
     def create_cam_job(self):
         """Main method to create the CAM job."""
-        views_folder_name = f"{self.layout_group.Label}_2D_Views"
-        views_folder = self.doc.getObject(views_folder_name)
+        if not self.layout_group:
+             FreeCAD.Console.PrintError("No layout group provided.\n")
+             return
 
-        if not views_folder:
-            FreeCAD.Console.PrintError(f"Could not find the 2D views folder: {views_folder_name}\n")
+        # Iterate over the layout group to find sheet groups directly
+        for obj in self.layout_group.Group:
+            # We assume groups starting with "Sheet_" are the sheet containers
+            if obj.isDerivedFrom("App::DocumentObjectGroup") and obj.Label.startswith("Sheet_"):
+                self._create_job_for_sheet(obj)
+
+    def _create_job_for_sheet(self, sheet_group):
+        """Creates a CAM job for a single sheet using 3D parts."""
+        # Import CAM modules (FreeCAD 1.1+)
+        try:
+            from CAM.Path.Main import Job as PathJob
+            from CAM.Path.Main.Gui import Job as PathJobGui
+        except ImportError as e:
+            FreeCAD.Console.PrintError(f"Failed to import CAM modules. Error: {e}\n")
+            FreeCAD.Console.PrintError("Please ensure the CAM workbench is installed and enabled in FreeCAD 1.1+.\n")
             return
-
-        for sheet_view_folder in views_folder.Group:
-            if sheet_view_folder.isDerivedFrom("App::DocumentObjectGroup"):
-                self._create_job_for_sheet(sheet_view_folder)
-
-    def _create_job_for_sheet(self, sheet_view_folder):
-        """Creates a CAM job for a single sheet."""
-        # Get the sheet number from the label
-        sheet_num = int(sheet_view_folder.Label.split('_')[1])
-
-        # Find the original sheet group
-        sheet_group_name = f"Sheet_{sheet_num}"
-        sheet_group = self.layout_group.getObject(sheet_group_name)
-
-        if not sheet_group:
-            FreeCAD.Console.PrintError(f"Could not find the original sheet group: {sheet_group_name}\n")
-            return
-
-        # Find the sheet object
+        
+        # Get material thickness from layout spreadsheet
+        material_thickness = 3.0  # Default value
+        if self.layout_group:
+            spreadsheet = self.layout_group.getObject("LayoutParameters")
+            if spreadsheet:
+                try:
+                    thickness_value = spreadsheet.get('B5')
+                    if thickness_value:
+                        material_thickness = float(thickness_value)
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"Could not read material thickness from spreadsheet: {e}\n")
+        
+        # Find the sheet object (Stock)
         sheet_object = None
+        
         for obj in sheet_group.Group:
-            if obj.isDerivedFrom("Part::Box"):
-                sheet_object = obj
-                break
-
+            if obj.Label.startswith("Sheet_Boundary"):
+                 sheet_object = obj
+                 break
+        
         if not sheet_object:
-            FreeCAD.Console.PrintError(f"Could not find the sheet object in group: {sheet_group_name}\n")
+            FreeCAD.Console.PrintError(f"Could not find sheet object in {sheet_group.Label}.\n")
             return
 
-        # Create a new job
-        job = Path.Create('Job')
-        job.Label = f"CAM_Job_{sheet_view_folder.Label}"
-
-        # Set the stock
+        # Create a new CAM job for this sheet
+        job_name = f"CAM_Job_{sheet_group.Label}"
+        job = PathJob.Create(job_name, [sheet_object], None)
+        
+        # Configure the stock to match the sheet dimensions
         stock = job.Stock
-        stock.Base = sheet_object
         stock.ExtXneg = 0
         stock.ExtXpos = 0
         stock.ExtYneg = 0
         stock.ExtYpos = 0
-        stock.ExtZneg = 0
+        stock.ExtZneg = material_thickness
         stock.ExtZpos = 0
 
-        # Create a tool controller and tool
-        tool_controller = job.Tools.addToolController('Default')
-        tool = tool_controller.addTool('EndMill', 'Tool')
-        tool.Diameter = 3.175
+        # Set up the ViewProvider Proxy to enable proper tree view nesting
+        # This is critical - without this, the tree view won't show children
+        try:
+            import FreeCADGui
+            if FreeCADGui.ActiveDocument and job.ViewObject:
+                # Assign the ViewProvider class to enable claimChildren()
+                job.ViewObject.Proxy = PathJobGui.ViewProvider(job.ViewObject)
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"Could not set ViewProvider: {e}\n")
 
-        # Create profile operations
-        for obj in sheet_view_folder.Group:
-            if obj.isDerivedFrom("Part::Part2DObject"):
-                op = Path.Create('Profile')
-                op.ToolController = tool_controller
-                op.Base = (obj, [])
-                job.Operations.addOperation(op)
-
+        # Recompute to finalize the job
         self.doc.recompute()
+        
+        FreeCAD.Console.PrintMessage(f"Created CAM job '{job_name}' for {sheet_group.Label} (thickness: {material_thickness}mm)\n")

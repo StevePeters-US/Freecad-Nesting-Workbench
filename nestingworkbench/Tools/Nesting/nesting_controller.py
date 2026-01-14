@@ -614,6 +614,7 @@ class NestingController:
             'sheet_width': self.ui.sheet_width_input.value(),
             'sheet_height': self.ui.sheet_height_input.value(),
             'spacing': self.ui.part_spacing_input.value(),
+            'material_thickness': self.ui.material_thickness_input.value(),
             'deflection': self.ui.deflection_input.value(),
             'simplification': self.ui.simplification_input.value(),
             'rotation_steps': self.ui.rotation_steps_spinbox.value(),
@@ -636,6 +637,7 @@ class NestingController:
         prefs.SetFloat("SheetWidth", float(settings['sheet_width']))
         prefs.SetFloat("SheetHeight", float(settings['sheet_height']))
         prefs.SetFloat("PartSpacing", float(settings['spacing']))
+        prefs.SetFloat("MaterialThickness", float(settings['material_thickness']))
         prefs.SetFloat("Deflection", float(settings['deflection']))
         prefs.SetFloat("Simplification", float(settings['simplification']))
         prefs.SetInt("RotationSteps", int(settings['rotation_steps']))

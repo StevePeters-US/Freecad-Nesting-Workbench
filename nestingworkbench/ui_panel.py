@@ -38,6 +38,7 @@ class PackerUI(QtGui.QWidget):
         self.sheet_width_input = QtGui.QDoubleSpinBox(); self.sheet_width_input.setRange(1, 10000); self.sheet_width_input.setValue(600)
         self.sheet_height_input = QtGui.QDoubleSpinBox(); self.sheet_height_input.setRange(1, 10000); self.sheet_height_input.setValue(600)
         self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
+        self.material_thickness_input = QtGui.QDoubleSpinBox(); self.material_thickness_input.setRange(0.1, 1000); self.material_thickness_input.setValue(3.0)
         
         self.shape_table = QtGui.QTableWidget()
         self.shape_table.setColumnCount(2)
@@ -113,6 +114,7 @@ class PackerUI(QtGui.QWidget):
         form_layout.addRow("Sheet Width:", self.sheet_width_input)
         form_layout.addRow("Sheet Height:", self.sheet_height_input)
         form_layout.addRow("Part Spacing:", self.part_spacing_input)
+        form_layout.addRow("Material Thickness:", self.material_thickness_input)
         form_layout.addRow("Algorithm:", self.algorithm_dropdown)
         form_layout.addRow(self.gravity_settings_group)
         form_layout.addRow("Rotation:", self.rotation_dropdown)
@@ -176,7 +178,10 @@ class PackerUI(QtGui.QWidget):
             self.sheet_width_input.setValue(spreadsheet.get('B2'))
             self.sheet_height_input.setValue(spreadsheet.get('B3'))
             self.part_spacing_input.setValue(spreadsheet.get('B4'))
-            font_path = spreadsheet.get('B5')
+            material_thickness = spreadsheet.get('B5')
+            if material_thickness:
+                self.material_thickness_input.setValue(float(material_thickness))
+            font_path = spreadsheet.get('B6')
             if font_path and os.path.exists(font_path):
                 self.selected_font_path = font_path
                 self.font_label.setText(os.path.basename(font_path))
