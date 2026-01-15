@@ -9,6 +9,8 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtCore
 import time
+import math
+import traceback
 from .ui_transform import TransformToolUI
 
 class TransformToolObserver:
@@ -28,6 +30,11 @@ class TransformToolObserver:
         self.original_visibilities = {}
         self.callback_ids = []  # Store callback IDs for cleanup
         self.last_log_time = 0
+        self.selected_obj = None
+        self.mode = "IDLE" # IDLE, TRANSLATE, ROTATE
+        self.is_mouse_down = False
+        self.is_implicit_drag = False
+        self.drag_start_screen_pos = (0,0)
 
         # Get the selected layout group
         selection = FreeCADGui.Selection.getSelection()
@@ -38,9 +45,9 @@ class TransformToolObserver:
             return
 
         # Store original placements and manage visibility
-        print(f"DEBUG: Traversing Layout Group: {self.layout_group.Label}")
+        # print(f"DEBUG: Traversing Layout Group: {self.layout_group.Label}")
         for sheet_group in self.layout_group.Group:
-            print(f"DEBUG: Checking sheet_group: {sheet_group.Label} (Type: {sheet_group.TypeId})")
+            # print(f"DEBUG: Checking sheet_group: {sheet_group.Label} (Type: {sheet_group.TypeId})")
             if sheet_group.isDerivedFrom("App::DocumentObjectGroup"):
                 # Ensure sheet boundary is visible
                 sheet_boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
@@ -48,12 +55,12 @@ class TransformToolObserver:
                     self.original_visibilities[sheet_boundary] = sheet_boundary.ViewObject.Visibility
                     sheet_boundary.ViewObject.Visibility = True
                 
-                print(f"DEBUG: Sheet Group content count: {len(sheet_group.Group)}")
+                # print(f"DEBUG: Sheet Group content count: {len(sheet_group.Group)}")
                 for sub_group in sheet_group.Group: # e.g., Shapes_1, Text_1
-                    print(f"DEBUG: Checking sub_group: {sub_group.Label} (Type: {sub_group.TypeId})")
+                    # print(f"DEBUG: Checking sub_group: {sub_group.Label} (Type: {sub_group.TypeId})")
                     if sub_group.isDerivedFrom("App::DocumentObjectGroup"):
                         if sub_group.Label.startswith("Shapes_"):
-                            print(f"DEBUG: Found Shapes group: {sub_group.Label}")
+                            # print(f"DEBUG: Found Shapes group: {sub_group.Label}")
                             for obj in sub_group.Group: # e.g., nested_PartA_1
                                 # print(f"DEBUG: Inspecting obj: {obj.Label} Proxy: {obj.Proxy.__class__.__name__ if hasattr(obj, 'Proxy') else 'None'}")
                                 
@@ -104,87 +111,208 @@ class TransformToolObserver:
             self.callback_ids.append(("SoMouseButtonEvent", cb_id))
             cb_id = self.view.addEventCallback("SoLocation2Event", self._make_callback("SoLocation2Event"))
             self.callback_ids.append(("SoLocation2Event", cb_id))
+            cb_id = self.view.addEventCallback("SoKeyboardEvent", self._make_callback("SoKeyboardEvent"))
+            self.callback_ids.append(("SoKeyboardEvent", cb_id))
             FreeCAD.Console.PrintMessage("Transform Tool: Activated. Click and drag parts to move them.\n")
 
 
-    def eventCallback(self, event_type, event):
-        """The main callback method for handling mouse events."""
+    def eventCallback(self, event_type, event_dict):
+        """The main callback method for handling mouse and keyboard events."""
         try:
             if not self.layout_group:
-                return False # Do not handle events if no layout is selected
+                return False 
 
-            if event_type == "SoMouseButtonEvent":
-                if event["State"] == "DOWN" and event["Button"] == "BUTTON1":
-                    pos = event["Position"]
-                    # pos is a tuple (x, y)
-                    print(f"DEBUG: Clicked at {pos}")
-                    info = self.view.getObjectInfo((pos[0], pos[1]))
-                    # print(f"DEBUG: Info keys: {info.keys() if info else 'None'}")
-                    if info and "Object" in info:
-                        if "ParentObject" in info:
-                            print(f"DEBUG: ParentObject: {info['ParentObject']}")
-
-                        raw_obj = info["Object"]
-                        clicked_obj = raw_obj
-                        
-                        # Handle case where Object is just the name string
-                        if isinstance(raw_obj, str):
-                            # print(f"DEBUG: 'Object' info is string: {raw_obj}. resolving...")
-                            if self.layout_group and hasattr(self.layout_group, 'Document'):
-                                clicked_obj = self.layout_group.Document.getObject(raw_obj)
-                            else:
-                                clicked_obj = FreeCAD.ActiveDocument.getObject(raw_obj)
-                        
-                        print(f"DEBUG: Clicked Object Label: {clicked_obj.Label if hasattr(clicked_obj, 'Label') else 'No Label'}")
-                        print(f"DEBUG: Clicked Object Name: {clicked_obj.Name if hasattr(clicked_obj, 'Name') else 'No Name'}")
-                        
-                        parent_obj_from_click = info.get("ParentObject") if info else None
-                        
-                        obj_to_drag = self.get_draggable_parent(clicked_obj, parent_obj_from_click)
-                        print(f"DEBUG: Draggable Parent: {obj_to_drag.Label if obj_to_drag and hasattr(obj_to_drag, 'Label') else 'None'}")
-                        
-                        if obj_to_drag:
-                            self.pressed = True
-                            self.obj_to_move = obj_to_drag
-                            self.start_pos = self.view.getPoint(pos[0], pos[1])
-                            self.start_placement = self.obj_to_move.Placement.copy()
-                            return True # Event handled
-
-                elif event["State"] == "UP" and event["Button"] == "BUTTON1":
-                    if self.pressed and self.obj_to_move:
-                        self.pressed = False
-                        self.obj_to_move = None
-                        self.start_pos = None
-                        self.start_placement = None
-                        return True # Event handled
-
-            elif event_type == "SoLocation2Event":
-                if self.pressed and self.obj_to_move:
-                    pos = event["Position"]
-                    
-                    # Throttled logging
-                    current_time = time.time()
-                    if current_time - self.last_log_time > 0.25:
-                        print(f"DEBUG: Dragging at {pos}")
-                        self.last_log_time = current_time
-
-                    current_pos = self.view.getPoint(pos[0], pos[1])
-                    
-                    # Project movement onto the XY plane
-                    move_vec = current_pos - self.start_pos
-                    move_vec.z = 0
-
-                    new_placement = self.start_placement.copy()
-                    new_placement.Base += move_vec
-                    self.obj_to_move.Placement = new_placement
-                    return True # Event handled
+            # event = event_dict["Event"] # ERROR: Dictionary does not contain 'Event' key wrapper
             
-            return False # Event not handled
+            # --- KEYBOARD HANDLING ---
+            if event_type == "SoKeyboardEvent" and event_dict["State"] == "DOWN":
+                key = event_dict["Key"]
+                
+                # Handling Key Strings from FreeCAD
+                key = str(key).upper()
+                
+                # ESC - Cancel
+                if key == "ESCAPE": 
+                    self.cancel_operation()
+                    return True
+                
+                # G - Grab/Translate
+                if key == "G": 
+                    if self.selected_obj:
+                        self.set_mode("TRANSLATE")
+                        return True
+                
+                # R - Rotate
+                if key == "R": 
+                    if self.selected_obj:
+                        self.set_mode("ROTATE")
+                        return True
+                    
+                # ENTER or RETURN - Confirm
+                if key in ["RETURN", "ENTER"]: 
+                    self.finish_operation()
+                    return True
+
+            # --- MOUSE BUTTON HANDLING ---
+            if event_type == "SoMouseButtonEvent":
+                if event_dict["Button"] == "BUTTON1": # Left Button
+                    pos = event_dict["Position"] 
+                    
+                    if event_dict["State"] == "DOWN":
+                        self.handle_click(pos)
+                        return True
+                    else: # UP
+                        self.handle_release()
+                        return True
+
+            # --- MOUSE MOVE HANDLING ---
+            elif event_type == "SoLocation2Event":
+                pos = event_dict["Position"]
+                snap = event_dict.get("Ctrl", False) or event_dict.get("Control", False)
+                self.handle_move(pos, snap)
+                
+                if self.mode != "IDLE": return True
+            
+            return False
 
         except Exception:
-            import traceback
-            traceback.print_exc()
+            # traceback.print_exc()
             return False
+
+    def handle_click(self, pos):
+        """On mouse down: Select object and start interaction."""
+        
+        # If we are already in a mode (G/R active), a click confirms it
+        if self.mode in ["TRANSLATE", "ROTATE"]:
+             self.finish_operation()
+             return
+
+        clicked_obj = self.pick_object(pos)
+        
+        if clicked_obj:
+            self.selected_obj = clicked_obj
+            FreeCAD.Console.PrintMessage(f"Selected: {clicked_obj.Label}\n")
+            
+            # Prepare for potential drag
+            self.drag_start_screen_pos = pos
+            self.start_pos = self.view.getPoint(pos[0], pos[1]) # 3D point
+            self.start_placement = self.selected_obj.Placement.copy()
+            self.is_mouse_down = True
+            self.is_implicit_drag = False # Will become true if moved
+                
+        else:
+            # Clicked on empty space
+            self.selected_obj = None
+            self.is_mouse_down = True # Track even if no object
+
+    def handle_move(self, pos, snap=False):
+        if self.mode == "IDLE":
+             if self.is_mouse_down and self.selected_obj:
+                 # Check drag threshold
+                 dx = pos[0] - self.drag_start_screen_pos[0]
+                 dy = pos[1] - self.drag_start_screen_pos[1]
+                 dist = math.sqrt(dx*dx + dy*dy)
+                 if dist > 5: # 5 pixels threshold
+                     self.set_mode("TRANSLATE")
+                     self.is_implicit_drag = True
+        
+        if not self.selected_obj: return
+        
+        if self.mode == "TRANSLATE":
+            if not self.start_pos: return
+            
+            current_pos = self.view.getPoint(pos[0], pos[1])
+            move_vec = current_pos - self.start_pos
+            move_vec.z = 0 # Project to XY plane for 2D nesting
+            
+            # TODO: Add Translation Snapping (Grid) if requested later
+            
+            new_placement = self.start_placement.copy()
+            new_placement.Base += move_vec
+            self.selected_obj.Placement = new_placement
+            
+        elif self.mode == "ROTATE":
+            if not self.start_placement: return
+            
+            # Calculate rotation based on X delta from click
+            delta_x = pos[0] - self.drag_start_screen_pos[0]
+            sensitivity = 0.5 # Degrees per pixel
+            angle_deg = -delta_x * sensitivity # Inverted to match standard expectation
+            
+            # Snap logic (CTRL key)
+            if snap:
+                step = 45.0
+                angle_deg = round(angle_deg / step) * step
+            
+            rot = FreeCAD.Rotation(FreeCAD.Vector(0,0,1), angle_deg)
+            
+            # Apply individual rotation
+            orig_rot = self.start_placement.Rotation
+            new_rot = rot.multiply(orig_rot)
+            
+            new_placement = self.start_placement.copy()
+            new_placement.Rotation = new_rot
+            self.selected_obj.Placement = new_placement
+
+    def handle_release(self):
+        self.is_mouse_down = False
+        
+        if self.is_implicit_drag:
+            # If we were dragging with mouse down, release confirms it
+            self.finish_operation()
+            self.is_implicit_drag = False
+
+    def set_mode(self, mode):
+        self.mode = mode
+        if mode in ["TRANSLATE", "ROTATE"]:
+             FreeCAD.Console.PrintMessage(f"Mode: {mode} (Click/Enter to Confirm, Esc to Cancel)\n")
+             # Setup start state if not already
+             if not hasattr(self, 'start_placement') or not self.start_placement:
+                 if self.selected_obj:
+                    self.start_placement = self.selected_obj.Placement.copy()
+             
+             # Capture screen pos if not set (e.g. key press without click)
+             if not hasattr(self, 'drag_start_screen_pos') or not self.drag_start_screen_pos:
+                 if hasattr(self, 'last_known_screen_pos'):
+                     self.drag_start_screen_pos = self.last_known_screen_pos
+                 else:
+                     self.drag_start_screen_pos = (0,0) # Fallback
+
+    def cancel_operation(self):
+        if self.selected_obj and hasattr(self, 'start_placement') and self.start_placement:
+             self.selected_obj.Placement = self.start_placement
+             FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
+        
+        self.mode = "IDLE"
+        self.start_placement = None
+        self.start_pos = None
+        self.is_implicit_drag = False
+        self.is_mouse_down = False
+
+    def finish_operation(self):
+        if self.selected_obj:
+            # FreeCAD.Console.PrintMessage(f"Operation Confirmed for {self.selected_obj.Label}.\n")
+            pass
+        self.mode = "IDLE"
+        self.start_placement = None
+        self.start_pos = None
+        self.is_implicit_drag = False
+
+    def pick_object(self, pos):
+        """Helper to find the draggable object at screen pos."""
+        info = self.view.getObjectInfo(pos)
+        if info and "Object" in info:
+             clicked_obj = info["Object"]
+             # Resolve strings
+             if isinstance(clicked_obj, str):
+                 if self.layout_group and hasattr(self.layout_group, 'Document'):
+                     clicked_obj = self.layout_group.Document.getObject(clicked_obj)
+                 else:
+                     clicked_obj = FreeCAD.ActiveDocument.getObject(clicked_obj)
+             
+             parent_obj_from_click = info.get("ParentObject")
+             return self.get_draggable_parent(clicked_obj, parent_obj_from_click)
+        return None
 
     def _make_callback(self, event_type):
         """Creates a callback wrapper that passes the event type to eventCallback."""
@@ -220,26 +348,26 @@ class TransformToolObserver:
             
             # LINK MATCHing
             if hasattr(tracked_obj, "LinkedObject") and tracked_obj.LinkedObject == obj:
-                print(f"DEBUG: Matched via LinkedObject: {tracked_obj.Label} -> {obj.Label}")
+                # print(f"DEBUG: Matched via LinkedObject: {tracked_obj.Label} -> {obj.Label}")
                 return tracked_obj
 
             # PARENT CONTAINMENT MATCHING (For App::Part)
-            # Check if clicked object is inside tracked_obj's Group (recursive check might be too expensive, usually direct child)
+            # Check if clicked object is inside tracked_obj's Group
             if hasattr(tracked_obj, "Group") and obj in tracked_obj.Group:
-                 print(f"DEBUG: Matched via Group Containment: {tracked_obj.Label} contains {obj.Label}")
+                 # print(f"DEBUG: Matched via Group Containment: {tracked_obj.Label} contains {obj.Label}")
                  return tracked_obj
             
             # PARENT OBJECT FROM CLICK INFO MATCHING
             if parent_obj_from_click and tracked_obj == parent_obj_from_click:
-                 print(f"DEBUG: Matched via ParentObject info: {tracked_obj.Label}")
+                 # print(f"DEBUG: Matched via ParentObject info: {tracked_obj.Label}")
                  return tracked_obj
 
             # NAME MATCHING (Fallback)
             if hasattr(tracked_obj, 'Name') and hasattr(obj, 'Name') and tracked_obj.Name == obj.Name:
-                print(f"DEBUG: Matched by Name: {tracked_obj.Name}")
+                # print(f"DEBUG: Matched by Name: {tracked_obj.Name}")
                 return tracked_obj
         
-        return None # Not a draggable object
+        return None
 
     def is_object_in_layout(self, obj):
         """Check if an object is a child of the selected layout group."""

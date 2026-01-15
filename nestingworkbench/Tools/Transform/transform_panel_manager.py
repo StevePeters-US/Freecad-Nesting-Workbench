@@ -37,5 +37,5 @@ class TransformTaskPanel:
             self.observer.cleanup()
         # Use an absolute import from the workbench's root package 'Nesting'
         # to break a potential circular dependency.
-        from commands.command_transform_parts import TransformPartsCommand
+        from nesting_commands.command_transform_parts import TransformPartsCommand
         TransformPartsCommand._task_panel = None
