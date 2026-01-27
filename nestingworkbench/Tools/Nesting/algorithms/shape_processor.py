@@ -37,7 +37,7 @@ def _get_rotation_for_up_direction(up_direction):
         return FreeCAD.Rotation()
 
 
-def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
+def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, simplification=1.0):
     """
     Extracts a usable 2D profile from a FreeCAD object by projecting it onto the XY plane.
     This captures the full silhouette of the shape from the specified viewing direction.
@@ -47,6 +47,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
         up_direction: Which direction should be treated as "up" when projecting to 2D.
                       One of "Z+", "Z-", "Y+", "Y-", "X+", "X-" (default: "Z+")
         tessellation_quality: Max deviation for meshing (mm).
+        simplification: Tolerance for simplifying the polygon (mm). Applied early to reduce point count.
     """
     # Get shape in world coordinates (apply source object's placement)
     shape = obj.Shape.copy()
@@ -180,6 +181,15 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
                         
                         if isinstance(merged, ShapelyPolygon):
                             if hasattr(merged, 'exterior') and merged.is_valid:
+                                # Apply EARLY simplification to reduce point count before buffering
+                                # This is crucial for performance - the merged polygon from triangles
+                                # can have thousands of points which makes later operations very slow.
+                                if simplification > 0:
+                                    pre_simplify = len(merged.exterior.coords)
+                                    merged = merged.simplify(simplification, preserve_topology=True)
+                                    post_simplify = len(merged.exterior.coords)
+                                    FreeCAD.Console.PrintMessage(f"  -> Early simplify: {pre_simplify} -> {post_simplify} vertices\n")
+                                
                                 # RETURN SHAPELY POLYGON DIRECTLY
                                 # This preserves high-resolution detail without FreeCAD wire conversion limits
                                 return merged
@@ -210,7 +220,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1):
     raise ValueError(f"Unsupported object '{obj.Label}' or no valid 2D geometry found.")
 
 
-def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=0.1, up_direction="Z+"):
+def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=1.0, up_direction="Z+"):
     """
     Processes a FreeCAD object to generate a shapely-based boundary and populates
     the geometric properties of the provided Shape object. The created boundary is
@@ -234,7 +244,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     from shapely.affinity import translate
     from shapely.validation import make_valid
 
-    profile_2d = get_2d_profile_from_obj(shape_obj, up_direction, deflection)
+    profile_2d = get_2d_profile_from_obj(shape_obj, up_direction, deflection, simplification)
     
     # Compute the world-space BB center from the NON-ROTATED shape
     # The rotation is handled by the placement in shape_preparer
@@ -278,7 +288,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     # Also simplify the unbuffered polygon for consistent visualization
     final_polygon_unbuffered = final_polygon_unbuffered.simplify(simplification, preserve_topology=True)
     
-    # FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
+    FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
 
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")

@@ -226,8 +226,8 @@ class NestingJob:
         self._set_prop(layout_obj, "App::PropertyLength", "SheetHeight", p['sheet_height'])
         self._set_prop(layout_obj, "App::PropertyLength", "PartSpacing", p['spacing'])
         self._set_prop(layout_obj, "App::PropertyLength", "SheetThickness", p['sheet_thickness'])
-        self._set_prop(layout_obj, "App::PropertyFloat", "Deflection", p.get('deflection', 0.05))
-        self._set_prop(layout_obj, "App::PropertyFloat", "Simplification", p.get('simplification', 0.1))
+        self._set_prop(layout_obj, "App::PropertyFloat", "DeflectionAngle", p.get('deflection_angle', 30))  # Save angle in degrees
+        self._set_prop(layout_obj, "App::PropertyFloat", "Simplification", p.get('simplification', 1.0))
         self._set_prop(layout_obj, "App::PropertyFile", "FontFile", p['font_path'])
         self._set_prop(layout_obj, "App::PropertyBool", "ShowBounds", p['show_bounds'])
         self._set_prop(layout_obj, "App::PropertyBool", "AddLabels", p['add_labels'])
@@ -612,12 +612,19 @@ class NestingController:
         return target
 
     def _collect_ui_params(self):
+        # Convert deflection angle (degrees) to linear deflection (mm)
+        # Formula: deflection_mm = angle / 200.0
+        # This gives: 10° → 0.05mm, 20° → 0.1mm, 40° → 0.2mm
+        deflection_angle = self.ui.deflection_input.value()
+        deflection_mm = deflection_angle / 200.0
+        
         settings_dict = {
             'sheet_width': self.ui.sheet_width_input.value(),
             'sheet_height': self.ui.sheet_height_input.value(),
             'spacing': self.ui.part_spacing_input.value(),
             'sheet_thickness': self.ui.sheet_thickness_input.value(),
-            'deflection': self.ui.deflection_input.value(),
+            'deflection': deflection_mm,  # Linear deflection for processing
+            'deflection_angle': deflection_angle,  # Angle for persistence
             'simplification': self.ui.simplification_input.value(),
             'rotation_steps': self.ui.rotation_steps_spinbox.value(),
             'add_labels': self.ui.add_labels_checkbox.isChecked(),
@@ -641,7 +648,7 @@ class NestingController:
         prefs.SetFloat("SheetHeight", float(settings['sheet_height']))
         prefs.SetFloat("PartSpacing", float(settings['spacing']))
         prefs.SetFloat("SheetThickness", float(settings['sheet_thickness']))
-        prefs.SetFloat("Deflection", float(settings['deflection']))
+        prefs.SetFloat("DeflectionAngle", float(settings.get('deflection_angle', 10)))  # Save angle, not mm
         prefs.SetFloat("Simplification", float(settings['simplification']))
         prefs.SetInt("RotationSteps", int(settings['rotation_steps']))
         prefs.SetBool("AddLabels", bool(settings['add_labels']))

@@ -43,7 +43,7 @@ class Shape:
         self.rotation_steps = 1 # The definitive number of rotation steps for this part.
         self.spacing = 0 # The spacing used for the nesting operation.
         self.deflection = 0.05 # The deflection tolerance used.
-        self.simplification = 0.1 # The simplification tolerance used.
+        self.simplification = 1.0 # The simplification tolerance used.
         self.up_direction = "Z+" # The up direction for 2D projection
         self.fill_sheet = False # If True, use to fill remaining space
         

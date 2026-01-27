@@ -58,24 +58,30 @@ class NestingPanel(QtGui.QWidget):
         self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
         
         # --- Advanced Boundary Settings ---
-        self.deflection_input = QtGui.QDoubleSpinBox(); self.deflection_input.setRange(0.001, 1.0); self.deflection_input.setValue(0.05); self.deflection_input.setSingleStep(0.01); self.deflection_input.setDecimals(3)
+        # Deflection is now specified as an angle (degrees) for more intuitive control
+        # Internally converted to linear deflection: deflection_mm = angle / 200.0
+        self.deflection_input = QtGui.QDoubleSpinBox()
+        self.deflection_input.setRange(1, 90)
+        self.deflection_input.setValue(30)  # 30° default for faster processing
+        self.deflection_input.setSingleStep(1)
+        self.deflection_input.setDecimals(0)
+        self.deflection_input.setSuffix("°")
         self.deflection_input.setToolTip(
-            "<b>Deflection (Curve Quality):</b><br>"
-            "Controls how smoothly curves are approximated.<br>"
-            "Smaller = Smoother (more points, slower).<br>"
-            "Larger = Coarser (fewer points, faster)."
+            "<b>Curve Angle (Tessellation Quality):</b><br>"
+            "Maximum angular deviation when approximating curves.<br><br>"
+            "<b>Smaller (5-10°):</b> Smoother curves, more points, slower.<br>"
+            "<b>Larger (20-45°):</b> Coarser curves, fewer points, faster.<br><br>"
+            "<i>Tip: 10° is good for most parts. Use 5° for precision, 30°+ for speed.</i>"
         )
         
-        self.simplification_input = QtGui.QDoubleSpinBox(); self.simplification_input.setRange(0.001, 10.0); self.simplification_input.setValue(0.1); self.simplification_input.setSingleStep(0.01); self.simplification_input.setDecimals(3)
+        self.simplification_input = QtGui.QDoubleSpinBox(); self.simplification_input.setRange(0.001, 10.0); self.simplification_input.setValue(1.0); self.simplification_input.setSingleStep(0.1); self.simplification_input.setDecimals(3)
         self.simplification_input.setToolTip(
-            "<b>Simplification (Optimization):</b><br>"
-            "Tolerance for removing redundant points.<br>"
-            "Higher = Fewer points, faster nesting."
+            "<b>Simplification (Point Reduction):</b><br>"
+            "Tolerance (mm) for removing redundant boundary points.<br><br>"
+            "<b>Smaller (0.1-0.5):</b> More detailed boundaries, slower nesting.<br>"
+            "<b>Larger (1.0-5.0):</b> Simpler boundaries, faster nesting.<br><br>"
+            "<i>Tip: Set this to your machine's precision tolerance (e.g., 1mm for routers).</i>"
         )
-
-        self.info_button = QtGui.QPushButton("Make default (20)")
-        self.info_button.setToolTip("Show info about Deflection and Simplification")
-        self.info_button.clicked.connect(self.show_boundary_info)
 
 
         self.shape_table = QtGui.QTableWidget()
@@ -193,13 +199,12 @@ class NestingPanel(QtGui.QWidget):
         
         # Advanced Curve Settings
         curve_settings_layout = QtGui.QHBoxLayout()
-        curve_settings_layout.addWidget(QtGui.QLabel("Deflect:"))
+        curve_settings_layout.addWidget(QtGui.QLabel("Curve:"))
         curve_settings_layout.addWidget(self.deflection_input)
         curve_settings_layout.addWidget(QtGui.QLabel("Simplify:"))
         curve_settings_layout.addWidget(self.simplification_input)
-        curve_settings_layout.addWidget(self.info_button)
         
-        form_layout.addRow("Curve Quality:", curve_settings_layout)
+        form_layout.addRow("Bounds Resolution:", curve_settings_layout)
 
 
         form_layout.addRow(self.minkowski_settings_group)
@@ -294,8 +299,13 @@ class NestingPanel(QtGui.QWidget):
             self.part_spacing_input.setValue(layout_group.PartSpacing)
         if hasattr(layout_group, 'SheetThickness'):
             self.sheet_thickness_input.setValue(layout_group.SheetThickness)
-        if hasattr(layout_group, 'Deflection'):
-            self.deflection_input.setValue(layout_group.Deflection)
+        # Load deflection angle (new format) or convert old deflection mm to angle
+        if hasattr(layout_group, 'DeflectionAngle'):
+            self.deflection_input.setValue(layout_group.DeflectionAngle)
+        elif hasattr(layout_group, 'Deflection'):
+            # Backward compatibility: convert old Deflection (mm) to angle
+            deflection_angle = layout_group.Deflection * 200.0
+            self.deflection_input.setValue(deflection_angle)
         if hasattr(layout_group, 'Simplification'):
             self.simplification_input.setValue(layout_group.Simplification)
         if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
@@ -640,18 +650,15 @@ class NestingPanel(QtGui.QWidget):
         self.part_spacing_input.setValue(prefs.GetFloat("PartSpacing", 12.5))
         self.sheet_thickness_input.setValue(prefs.GetFloat("SheetThickness", 3.0))
         self.label_size_input.setValue(prefs.GetFloat("LabelSize", 10.0))
-        self.deflection_input.setValue(prefs.GetFloat("Deflection", 0.05))
-        self.simplification_input.setValue(prefs.GetFloat("Simplification", 0.1))
+        # Load deflection angle (new format) or use default of 30°
+        deflection_angle = prefs.GetFloat("DeflectionAngle", 0)
+        if deflection_angle == 0:
+            # Backward compatibility: convert old Deflection (mm) to angle, or use 30° default
+            old_deflection = prefs.GetFloat("Deflection", 0)
+            if old_deflection > 0:
+                deflection_angle = old_deflection * 200.0  # Inverse of mm = angle/200
+            else:
+                deflection_angle = 30  # Default
+        self.deflection_input.setValue(deflection_angle)
+        self.simplification_input.setValue(prefs.GetFloat("Simplification", 1.0))
         
-    def show_boundary_info(self):
-        msg = (
-            "<b>Deflection (Curve Quality):</b><br>"
-            "Controls how smoothly curves are approximated. It is the maximum distance (in mm) "
-            "between the true curve and the straight line segment approximating it.<br>"
-            "<i>Smaller value (e.g. 0.01) = Smoother curves, more points.</i><br>"
-            "<i>Larger value (e.g. 0.1) = Coarser curves, fewer points.</i><br><br>"
-            "<b>Simplification (Optimization):</b><br>"
-            "Controls how aggressively redundant points are removed after initial creation.<br>"
-            "<i>Should specificially correspond to your machine's tolerance.</i>"
-        )
-        QtGui.QMessageBox.information(self, "Boundary Settings Info", msg)
