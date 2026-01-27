@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- 3D cube representation -->
+  <path d="M32 8 L52 20 L52 44 L32 56 L12 44 L12 20 Z" 
+        fill="none" stroke="#666" stroke-width="2" stroke-dasharray="4,2"/>
+  
+  <!-- 2D silhouette (filled hexagon) -->
+  <path d="M32 16 L46 26 L46 42 L32 52 L18 42 L18 26 Z" 
+        fill="#3399ff" fill-opacity="0.7" stroke="#0066cc" stroke-width="2"/>
+  
+  <!-- Arrow indicating projection -->
+  <path d="M32 4 L32 12" stroke="#333" stroke-width="2" marker-end="url(#arrowhead)"/>
+  
+  <defs>
+    <marker id="arrowhead" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+      <polygon points="0 0, 6 3, 0 6" fill="#333"/>
+    </marker>
+  </defs>
+</svg>

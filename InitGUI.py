@@ -58,13 +58,15 @@ class NestingWorkbench(FreeCADGui.Workbench):
         from nesting_commands import command_transform_parts
         from nesting_commands import command_export_sheets
         from nesting_commands import command_create_cam_job
+        from nesting_commands import command_create_silhouette
         
         self.appendToolbar("Nesting", [
             'Nesting_Run',
             'Nesting_StackSheets',
             'Nesting_TransformParts',
             'Nesting_Export',
-            'Nesting_CreateCAMJob'
+            'Nesting_CreateCAMJob',
+            'Nesting_CreateSilhouette'
         ])
 
     def Activated(self):
