@@ -466,6 +466,12 @@ class NestingController:
                 if best_layout.layout_group and hasattr(best_layout.layout_group, "ViewObject"):
                     best_layout.layout_group.ViewObject.Visibility = True
                 
+                # Hide MasterShapes group to keep view clean
+                if best_layout.layout_group and hasattr(best_layout.layout_group, "Group"):
+                    for child in best_layout.layout_group.Group:
+                        if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
+                            child.ViewObject.Visibility = False
+                
                 best_layout.layout_group.Label = "Layout_temp"
                 self.current_job = NestingJob.__new__(NestingJob)
                 self.current_job.doc = self.doc

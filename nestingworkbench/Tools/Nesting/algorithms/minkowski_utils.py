@@ -135,7 +135,8 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
     poly2_convex_parts = decompose_if_needed(master_poly2, logger)
 
     # --- Transform Convex Parts ---
-    # --- Transform Convex Parts ---
+    # CRITICAL: Use the MASTER polygon's centroid for all transformations
+    # to keep the decomposed convex parts in their correct relative positions.
     c1 = master_poly1.centroid
     c2 = master_poly2.centroid
 
@@ -145,7 +146,9 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
         use_origin = c1 if (rot_origin1 is None or rot_origin1 == 'centroid') else rot_origin1
         p_new = rotate(p, angle1, origin=use_origin)
         if reflect1:
-            p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
+            # CRITICAL FIX: Reflect around the MASTER centroid, not (0,0)
+            # This keeps all convex parts in correct relative positions after reflection
+            p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(c1.x, c1.y))
         poly1_convex_transformed.append(p_new)
 
     poly2_convex_transformed = []
@@ -154,7 +157,9 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
         use_origin = c2 if (rot_origin2 is None or rot_origin2 == 'centroid') else rot_origin2
         p_new = rotate(p, angle2, origin=use_origin)
         if reflect2:
-            p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(0, 0))
+            # CRITICAL FIX: Reflect around the MASTER centroid, not (0,0)
+            # This keeps all convex parts in correct relative positions after reflection
+            p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(c2.x, c2.y))
         poly2_convex_transformed.append(p_new)
 
     minkowski_parts = []

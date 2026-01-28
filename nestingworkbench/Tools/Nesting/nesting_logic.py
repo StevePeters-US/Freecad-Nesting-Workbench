@@ -166,6 +166,11 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
         **kwargs: Additional arguments for the nester
     """
     global _trial_viz_obj
+    from ...datatypes.shape import Shape
+    
+    # Clear NFP cache to ensure fresh calculations
+    with Shape.nfp_cache_lock:
+        Shape.nfp_cache.clear()
     
     # If simulation is enabled, the nester needs the original list of parts
     # that are linked to the visible FreeCAD objects (fc_object).

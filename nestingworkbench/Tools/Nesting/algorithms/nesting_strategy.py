@@ -122,17 +122,24 @@ class PlacementOptimizer:
         dir_x, dir_y = direction
         
         best = {'metric': float('inf')}
+        valid_count = 0
+        rejected_nfp = 0
+        rejected_bounds = 0
         
         def score_point(pt):
+             nonlocal rejected_nfp, rejected_bounds
              # A. Check NFP Collision (Fastest if cached)
              if prepared_nfp and prepared_nfp.contains(pt): 
+                 rejected_nfp += 1
                  return None
                  
              dx, dy = pt.x - centroid.x, pt.y - centroid.y
              
              # B. Check Bounds
              test_poly = translate(rotated_poly, xoff=dx, yoff=dy)
-             if not bin_polygon.contains(test_poly): return None
+             if not bin_polygon.contains(test_poly):
+                 rejected_bounds += 1
+                 return None
 
              return pt.x * (-dir_x) + pt.y * (-dir_y)
 
@@ -142,6 +149,7 @@ class PlacementOptimizer:
         for pt in ext_cands:
             valid_metric = score_point(pt)
             if valid_metric is not None:
+                valid_count += 1
                 if valid_metric < best['metric']:
                     best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': valid_metric}
         
@@ -274,6 +282,7 @@ class Nester:
         if placed_part:
             # We trust the PlacementOptimizer (and NFP engine) to have found a valid spot.
             placed_part.placement = placed_part.get_final_placement(sheet.get_origin())
-            sheet.add_part(PlacedPart(placed_part))
+            new_placed_part = PlacedPart(placed_part)
+            sheet.add_part(new_placed_part)
             return True
         return False
