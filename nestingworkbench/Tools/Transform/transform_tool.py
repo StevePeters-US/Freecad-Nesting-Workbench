@@ -99,7 +99,7 @@ class TransformToolObserver:
 
         # After changing visibilities, we need to update the GUI to reflect them.
         FreeCADGui.updateGui()
-        
+
         # Debug: list tracked objects
         print("DEBUG: Tracked objects in original_placements:")
         for obj in self.original_placements:

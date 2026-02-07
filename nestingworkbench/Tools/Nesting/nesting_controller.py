@@ -130,13 +130,6 @@ class NestingJob:
         # 2. Check for new MasterShapes in Temp
         temp_masters = next((c for c in self.temp_layout.Group if c.Label.startswith("MasterShapes")), None)
         
-        # DEBUG: What's in temp_masters before commit?
-        if temp_masters:
-            FreeCAD.Console.PrintMessage(f"\n=== DEBUG: Commit - temp_masters has {len(temp_masters.Group)} containers ===\n")
-            for container in temp_masters.Group:
-                children = [c.Label for c in container.Group] if hasattr(container, 'Group') else []
-                FreeCAD.Console.PrintMessage(f"  {container.Label}: {children}\n")
-        
         if temp_masters and len(temp_masters.Group) > 0:
             # We have new masters, replace old ones in Target
             old_masters = next((c for c in self.target_layout.Group if c.Label.startswith("MasterShapes")), None)
@@ -151,13 +144,6 @@ class NestingJob:
             
             self.target_layout.addObject(temp_masters)
             
-            # DEBUG: What's in target after commit?
-            final_masters = next((c for c in self.target_layout.Group if c.Label.startswith("MasterShapes")), None)
-            if final_masters:
-                FreeCAD.Console.PrintMessage(f"\n=== DEBUG: After commit - final_masters has {len(final_masters.Group)} containers ===\n")
-                for container in final_masters.Group:
-                    children = [c.Label for c in container.Group] if hasattr(container, 'Group') else []
-                    FreeCAD.Console.PrintMessage(f"  {container.Label}: {children}\n")
         else:
             # No new masters, if temp has empty master group, delete it
             if temp_masters:

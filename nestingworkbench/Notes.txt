@@ -2,30 +2,7 @@ Notes for Nesting Workbench
 
 
 #TODO
-
-multiple nfps are being made for the same shapes
-
-Nesting tool should only work on one layout object.
-
-Place labels on upper bounds of shapes instead of at a fixed position. Leave the input
-as a default (1mm)
-
-Need a way to cancel simulation. If nest button pressed twice, first instance continues to run.
-
-Symetry optimaztion for rotation checks
-
-
-maximize overlap area 
-check bounds overlap area
-
- Fix Minkowski nesting small objects in voids
-
- simulate Minkowski
- set Minkowski as defaulkt algo
-
- Minkowski performance
-
- Transform tool
+Transform tool
 Add color when mouseover
 hotkey for rotation
 
