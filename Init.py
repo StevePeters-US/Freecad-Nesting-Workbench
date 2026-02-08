@@ -3,5 +3,9 @@ This file initializes the Nesting workbench in FreeCAD.
 It is executed when FreeCAD starts and registers the workbench.
 """
 
-# This line is mandatory for any FreeCAD module
-FreeCAD.addImportPath(__dir__)
+import sys
+import os
+
+path = os.path.dirname(__file__)
+if path not in sys.path:
+    sys.path.append(path)
