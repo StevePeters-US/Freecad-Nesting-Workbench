@@ -168,9 +168,9 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
     global _trial_viz_obj
     from ...datatypes.shape import Shape
     
-    # Clear NFP cache to ensure fresh calculations
-    with Shape.nfp_cache_lock:
-        Shape.nfp_cache.clear()
+    # Only clear NFP cache if explicitly requested by the user (expensive to recompute)
+    if kwargs.pop('clear_nfp_cache', False):
+        Shape.clear_nfp_cache()
     
     # If simulation is enabled, the nester needs the original list of parts
     # that are linked to the visible FreeCAD objects (fc_object).

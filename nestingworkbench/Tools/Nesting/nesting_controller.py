@@ -255,6 +255,9 @@ class NestingController:
             self.current_job.cleanup()
             self.current_job = None
 
+        # Clear stale caches from previous nesting runs
+        Shape.clear_caches()
+
         # 1. Ensure Target Layout Exists (Create default if needed)
         target_layout = self._ensure_target_layout()
         if not target_layout:
@@ -406,6 +409,7 @@ class NestingController:
                 if gen < generations - 1:
                     layouts = [best_layout]  # Start with the winner
                     
+                    import random
                     for i in range(population_size - 1):
                         new_layout = layout_manager.create_layout(
                             f"Layout_GA_{gen+2}_{i+1}",
@@ -413,7 +417,6 @@ class NestingController:
                         )
                         # Shuffle and mutate
                         if new_layout.parts:
-                            import random
                             random.shuffle(new_layout.parts)
                             if rotation_steps > 1:
                                 genetic_utils.mutate_chromosome(new_layout.parts, mutation_rate, rotation_steps)
@@ -703,6 +706,7 @@ class NestingController:
         algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
         algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
         algo_kwargs['spacing'] = ui_params['spacing']
+        algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
         
         if hasattr(self.ui, 'log_message'):
             algo_kwargs['log_callback'] = self.ui.log_message

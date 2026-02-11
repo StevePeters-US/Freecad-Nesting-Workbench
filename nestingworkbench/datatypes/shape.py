@@ -27,6 +27,18 @@ class Shape:
     nfp_cache_lock = threading.Lock()
     decomposition_cache = {}
     
+    @classmethod
+    def clear_caches(cls):
+        """Clears decomposition cache between nesting runs. Does NOT clear NFP cache
+        since NFP calculations are expensive and benefit from persistence."""
+        cls.decomposition_cache.clear()
+
+    @classmethod
+    def clear_nfp_cache(cls):
+        """Clears the NFP cache. Only call when explicitly requested by the user."""
+        with cls.nfp_cache_lock:
+            cls.nfp_cache.clear()
+    
     def __init__(self, source_freecad_object):
         self.source_freecad_object = source_freecad_object
         self.instance_num = 1 # Default, will be overridden on copies
