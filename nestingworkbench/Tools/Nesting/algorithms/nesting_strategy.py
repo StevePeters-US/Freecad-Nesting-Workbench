@@ -67,12 +67,15 @@ class PlacementOptimizer:
             }
             
             for future in as_completed(futures):
-                res = future.result()
-                if res and res['metric'] < best_result['metric']:
-                    best_result = res
-                    # Call trial callback from main thread for each better result found
-                    if self.trial_callback and best_result.get('x') is not None:
-                        self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
+                try:
+                    res = future.result()
+                    if res and res['metric'] < best_result['metric']:
+                        best_result = res
+                        # Call trial callback from main thread for each better result found
+                        if self.trial_callback and best_result.get('x') is not None:
+                            self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
+                except Exception as e:
+                    self.log(f"Error in rotation evaluation thread: {e}")
         
         if best_result.get('x') is not None:
              part.set_rotation(best_result['angle'], reposition=False)
@@ -84,6 +87,10 @@ class PlacementOptimizer:
     def _evaluate_rotation(self, angle, part, placed_parts_grouped, sheet, direction):
         # 1. Get Combined NFP from Engine (Incrementally Cached on Sheet)
         nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+        
+        # Check for NFP calculation failure
+        if nfp_entry is None:
+            return {'metric': float('inf')}
         
         bin_polygon = self.engine.bin_polygon
         

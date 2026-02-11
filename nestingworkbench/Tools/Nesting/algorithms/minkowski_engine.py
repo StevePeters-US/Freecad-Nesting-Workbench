@@ -43,6 +43,7 @@ class MinkowskiEngine:
         Calculates (incrementally) the total forbidden area (Union of NFPs) 
         for a specific part rotation on the sheet.
         Returns dict with 'polygon', 'prepared', and candidate 'points'.
+        Returns None if NFP calculation fails.
         """
         cache_key = (part_to_place.source_freecad_object.Label, round(angle, 4))
         
@@ -96,7 +97,12 @@ class MinkowskiEngine:
                     p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
                 )
             
-            if nfp_data and nfp_data['polygon']:
+            # Check for calculation error
+            if nfp_data and nfp_data.get('error'):
+                self.log(f"Skipping rotation due to NFP error: {nfp_data['error']}")
+                return None
+
+            if nfp_data and nfp_data.get('polygon'):
                 # Transform to sheet absolute position
                 master = nfp_data['polygon']
                 # Rotate
@@ -144,62 +150,79 @@ class MinkowskiEngine:
             if cached_nfp_data:
                 return cached_nfp_data
 
-        poly_A_master = shape_A.original_polygon
-        poly_B_master = part_to_place.original_polygon
-        
-        # Center the master polygons to (0,0) for pure relative NFP calculation
-        # This removes any inherent offset in the FreeCAD shape data
-        cA = poly_A_master.centroid
-        cB = poly_B_master.centroid
-        
-        poly_A_centered = translate(poly_A_master, -cA.x, -cA.y)
-        poly_B_centered = translate(poly_B_master, -cB.x, -cB.y)
-        
-        # Calculate NFP using centered polygons
-        # Target angle_A is usually 0.0 in this context (relative frame)
-        nfp_exterior = minkowski_utils.minkowski_sum(
-            poly_A_centered, angle_A, False, 
-            poly_B_centered, angle_B, True, 
-            self.log
-        )
-        
-        nfp_interiors = []
-        if poly_A_centered and poly_A_centered.interiors:
-            # For holes, B is rotated around its (now 0,0) centroid
-            poly_B_rotated = rotate(poly_B_centered, angle_B, origin=(0,0))
+        try:
+            poly_A_master = shape_A.original_polygon
+            poly_B_master = part_to_place.original_polygon
             
-            for hole in poly_A_centered.interiors:
-                # Holes are also centered relative to A's centroid
-                hole_poly = Polygon(hole.coords)
-                # No need to unrotate/rotate around centroid if angle_A is 0, but effectively:
-                hole_poly_rotated = rotate(hole_poly, angle_A, origin=(0,0))
+            # Center the master polygons to (0,0) for pure relative NFP calculation
+            # This removes any inherent offset in the FreeCAD shape data
+            cA = poly_A_master.centroid
+            cB = poly_B_master.centroid
+            
+            poly_A_centered = translate(poly_A_master, -cA.x, -cA.y)
+            poly_B_centered = translate(poly_B_master, -cB.x, -cB.y)
+            
+            # Calculate NFP using centered polygons
+            # Target angle_A is usually 0.0 in this context (relative frame)
+            nfp_exterior = minkowski_utils.minkowski_sum(
+                poly_A_centered, angle_A, False, 
+                poly_B_centered, angle_B, True, 
+                self.log
+            )
+            
+            nfp_interiors = []
+            if poly_A_centered and poly_A_centered.interiors:
+                # For holes, B is rotated around its (now 0,0) centroid
+                poly_B_rotated = rotate(poly_B_centered, angle_B, origin=(0,0))
                 
-                # Check bounds optimization
-                if (poly_B_rotated.bounds[2] - poly_B_rotated.bounds[0] < hole_poly_rotated.bounds[2] - hole_poly_rotated.bounds[0] and
-                    poly_B_rotated.bounds[3] - poly_B_rotated.bounds[1] < hole_poly_rotated.bounds[3] - hole_poly_rotated.bounds[1] and
-                        poly_B_rotated.area < hole_poly_rotated.area):
+                for hole in poly_A_centered.interiors:
+                    # Holes are also centered relative to A's centroid
+                    hole_poly = Polygon(hole.coords)
+                    # No need to unrotate/rotate around centroid if angle_A is 0, but effectively:
+                    hole_poly_rotated = rotate(hole_poly, angle_A, origin=(0,0))
                     
-                    ifp_raw = minkowski_utils.minkowski_difference(hole_poly_rotated, 0, poly_B_centered, angle_B, self.log)
+                    # Check bounds optimization
+                    if (poly_B_rotated.bounds[2] - poly_B_rotated.bounds[0] < hole_poly_rotated.bounds[2] - hole_poly_rotated.bounds[0] and
+                        poly_B_rotated.bounds[3] - poly_B_rotated.bounds[1] < hole_poly_rotated.bounds[3] - hole_poly_rotated.bounds[1] and
+                            poly_B_rotated.area < hole_poly_rotated.area):
+                        
+                        ifp_raw = minkowski_utils.minkowski_difference(hole_poly_rotated, 0, poly_B_centered, angle_B, self.log)
+                        
+                        if ifp_raw and ifp_raw.area > 0:
+                            if ifp_raw.geom_type == 'Polygon':
+                                nfp_interiors.append(ifp_raw.exterior)
+                            elif ifp_raw.geom_type == 'MultiPolygon':
+                                for p in ifp_raw.geoms:
+                                    nfp_interiors.append(p.exterior)
+            
+            master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
+            
+            nfp_data = None
+            if master_nfp:
+                nfp_data = {"polygon": master_nfp}
+                if self.discretize_edges:
+                    nfp_data["exterior_points"] = self._discretize_edge(master_nfp.exterior)
+                    nfp_data["interior_points"] = [self._discretize_edge(interior) for interior in master_nfp.interiors]
+                else:
+                    nfp_data["exterior_points"] = [Point(x, y) for x, y in master_nfp.exterior.coords]
+                    nfp_data["interior_points"] = [[Point(x, y) for x, y in interior.coords] for interior in master_nfp.interiors]
                     
-                    if ifp_raw and ifp_raw.area > 0:
-                        if ifp_raw.geom_type == 'Polygon':
-                            nfp_interiors.append(ifp_raw.exterior)
-                        elif ifp_raw.geom_type == 'MultiPolygon':
-                            for p in ifp_raw.geoms:
-                                nfp_interiors.append(p.exterior)
-        
-        master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
-        
-        nfp_data = None
-        if master_nfp:
-            nfp_data = {"polygon": master_nfp}
-            if self.discretize_edges:
-                nfp_data["exterior_points"] = self._discretize_edge(master_nfp.exterior)
-                nfp_data["interior_points"] = [self._discretize_edge(interior) for interior in master_nfp.interiors]
-            else:
-                nfp_data["exterior_points"] = [Point(x, y) for x, y in master_nfp.exterior.coords]
-                nfp_data["interior_points"] = [[Point(x, y) for x, y in interior.coords] for interior in master_nfp.interiors]
- 
+            # Cache failure or empty dict as well to avoid re-calc?
+            # If master_nfp is None, nfp_data is None.
+            # Returning None implies valid "no restriction" or just not computed?
+            # Actually, standard behavior was returning None -> no nfp restriction.
+            # We preserve that behavior for successful but empty result.
+            if nfp_data is None:
+                 nfp_data = {} # Cache empty dict to signify specialized "no nfp" (e.g. invalid inputs but no error?)
+                 # Actually, if master_nfp was None, we probably shouldn't cache a failure unless we know it.
+                 # Let's stick to original logic: if master_nfp is None, nfp_data is None.
+                 # But wait, we want to cache it.
+                 pass
+
+        except Exception as e:
+            self.log(f"Error calculating NFP for {cache_key}: {e}")
+            nfp_data = {'error': str(e)}
+
         with Shape.nfp_cache_lock:
             Shape.nfp_cache[cache_key] = nfp_data
         
