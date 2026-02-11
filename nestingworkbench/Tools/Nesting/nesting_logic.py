@@ -200,7 +200,10 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
     if simulate:
         nester.update_callback = lambda part, sheet: (sheet.draw(FreeCAD.ActiveDocument, {}, transient_part=part), QtGui.QApplication.processEvents())
 
+    import time
+    start_time = time.monotonic()
     result = nester.nest(parts_to_process)
+    elapsed = time.monotonic() - start_time
     
     # Cleanup trial visualization and highlighting
     if simulate:
@@ -217,7 +220,7 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
     # Calculate and display packing efficiency
     _calculate_efficiency(sheets)
 
-    return sheets, unplaced, steps
+    return sheets, unplaced, steps, elapsed
 
 def _calculate_efficiency(sheets):
     """Calculates and displays sheet packing efficiency."""

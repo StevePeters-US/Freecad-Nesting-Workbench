@@ -309,6 +309,7 @@ class NestingController:
         best_layout = None
         best_efficiency = 0
         generations_without_improvement = 0
+        total_nesting_time = 0
         
         try:
             for gen in range(generations):
@@ -340,7 +341,7 @@ class NestingController:
                         continue
                     
                     # Run nesting
-                    sheets, unplaced, _ = nest(
+                    sheets, unplaced, _, elapsed = nest(
                         layout.parts,
                         ui_params['sheet_width'],
                         ui_params['sheet_height'],
@@ -348,6 +349,7 @@ class NestingController:
                         is_simulating,
                         **algo_kwargs
                     )
+                    total_nesting_time += elapsed
                     
                     layout.sheets = sheets
                     
@@ -427,8 +429,6 @@ class NestingController:
             
             # STEP 4: Final result - winner becomes Layout_temp
             FreeCAD.Console.PrintMessage(f"\n=== Best Solution: {best_efficiency:.1f}% efficiency ===\n")
-            if hasattr(best_layout, 'contact_score'):
-                FreeCAD.Console.PrintMessage(f"    Contact score: {best_layout.contact_score:.1f}\n")
             
             # Show and rename best layout, set as current job's temp_layout
             if best_layout:
@@ -453,7 +453,9 @@ class NestingController:
                     sheets=best_layout.sheets
                 )
                 
-                msg = f"GA Complete: {best_efficiency:.1f}% efficiency, {len(best_layout.sheets)} sheets"
+                # Print final summary at the very end of the report
+                c_score = f", Contact: {best_layout.contact_score:.1f}" if hasattr(best_layout, 'contact_score') else ""
+                msg = f"GA Complete: {best_efficiency:.1f}% efficiency, {len(best_layout.sheets)} sheets{c_score}, Time: {total_nesting_time:.2f}s"
                 self.ui.status_label.setText(msg)
                 FreeCAD.Console.PrintMessage(f"{msg}\n--- NESTING DONE ---\n")
                 if self.ui.sound_checkbox.isChecked(): QtGui.QApplication.beep()
