@@ -6,26 +6,9 @@ import Draft
 from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
+from ...freecad_helpers import get_up_direction_rotation
 
 
-def _get_up_direction_rotation(up_direction):
-    """
-    Returns a FreeCAD.Rotation that transforms the given up_direction to Z+.
-    """
-    if up_direction == "Z+" or up_direction is None:
-        return None  # No rotation needed
-    elif up_direction == "Z-":
-        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
-    elif up_direction == "Y+":
-        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
-    elif up_direction == "Y-":
-        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
-    elif up_direction == "X+":
-        return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
-    elif up_direction == "X-":
-        return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
-    else:
-        return None
 
 class ShapePreparer:
     """
@@ -197,7 +180,11 @@ class ShapePreparer:
             temp_container.ViewObject.Visibility = True
 
         # 4. Copy Quantity property
-        quantity, _ = quantities.get(original_label, (1, 1))
+        part_params = quantities.get(original_label, {'quantity': 1})
+        if isinstance(part_params, tuple):
+            quantity = part_params[0]
+        else:
+            quantity = part_params.get('quantity', 1)
         temp_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
 
         # 5. Build Shape wrapper using the stored SourceCentroid
@@ -333,17 +320,7 @@ class ShapePreparer:
         FreeCAD.Console.PrintMessage(f"     Using offset: ({-offset.x:.2f}, {-offset.y:.2f})\n")
         
         # Get up_direction rotation
-        up_rotation = FreeCAD.Rotation()
-        if up_direction == "Z-":
-            up_rotation = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
-        elif up_direction == "Y+":
-            up_rotation = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
-        elif up_direction == "Y-":
-            up_rotation = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
-        elif up_direction == "X+":
-            up_rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
-        elif up_direction == "X-":
-            up_rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
+        up_rotation = get_up_direction_rotation(up_direction)
         
         # Compose placement: first translate to origin, then rotate around origin
         translate_to_origin = FreeCAD.Placement(offset, FreeCAD.Rotation())

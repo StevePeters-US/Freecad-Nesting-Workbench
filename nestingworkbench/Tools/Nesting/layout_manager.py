@@ -14,6 +14,7 @@ import FreeCAD
 import copy
 from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
+from ...freecad_helpers import recursive_delete
 
 
 class Layout:
@@ -162,33 +163,10 @@ class LayoutManager:
         
         # Recursively delete the group and all children
         if group_obj:
-            self._recursive_delete(group_obj)
+            recursive_delete(self.doc, group_obj)
             FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
     
-    def _recursive_delete(self, obj):
-        """
-        Recursively deletes an object and all its children.
-        Must delete children first since FreeCAD doesn't cascade deletes.
-        """
-        if not obj:
-            return
-        
-        try:
-            obj_name = obj.Name
-        except Exception:
-            return  # Object already deleted
-        
-        # First, recursively delete all children (if it's a group)
-        if hasattr(obj, 'Group'):
-            for child in list(obj.Group):  # Copy list to avoid modification during iteration
-                self._recursive_delete(child)
-        
-        # Delete the object itself
-        try:
-            if self.doc.getObject(obj_name):
-                self.doc.removeObject(obj_name)
-        except Exception:
-            pass  # Already deleted
+
     
     def calculate_efficiency(self, layout, sheet_width, sheet_height) -> tuple:
         """

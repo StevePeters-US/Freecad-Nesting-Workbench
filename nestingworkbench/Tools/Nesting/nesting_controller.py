@@ -9,6 +9,7 @@ from PySide import QtGui
 from ...datatypes.shape import Shape
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
+from ...freecad_helpers import recursive_delete
 
 try:
     from .nesting_logic import nest, NestingDependencyError
@@ -125,7 +126,7 @@ class NestingJob:
                 to_remove.append(child)
         
         for child in to_remove:
-            self._recursive_delete(child)
+            recursive_delete(self.doc, child)
             
         # 2. Check for new MasterShapes in Temp
         temp_masters = next((c for c in self.temp_layout.Group if c.Label.startswith("MasterShapes")), None)
@@ -134,7 +135,7 @@ class NestingJob:
             # We have new masters, replace old ones in Target
             old_masters = next((c for c in self.target_layout.Group if c.Label.startswith("MasterShapes")), None)
             if old_masters:
-                self._recursive_delete(old_masters)
+                recursive_delete(self.doc, old_masters)
             
             # Sanitize labels before move
             temp_masters.Label = "MasterShapes"
@@ -147,7 +148,7 @@ class NestingJob:
         else:
             # No new masters, if temp has empty master group, delete it
             if temp_masters:
-                self._recursive_delete(temp_masters)
+                recursive_delete(self.doc, temp_masters)
 
         # 3. Move Sheets from Temp to Target
         sheets_to_move = [c for c in self.temp_layout.Group if c.Label.startswith("Sheet_")]
@@ -167,7 +168,7 @@ class NestingJob:
     def cleanup(self):
         """Destroys the sandbox."""
         if self.temp_layout:
-            self._recursive_delete(self.temp_layout)
+            recursive_delete(self.doc, self.temp_layout)
             self.temp_layout = None
             
         # Safety: Check for any floating PartsToPlace that might have escaped
@@ -179,22 +180,9 @@ class NestingJob:
         
         for name in match_names:
             o = self.doc.getObject(name)
-            if o: self._recursive_delete(o)
+            if o: recursive_delete(self.doc, o)
 
-    def _recursive_delete(self, obj):
-        try:
-            if self.target_layout and obj.Name == self.target_layout.Name: return
-            _ = obj.Name # Check validity
-        except Exception: return
-        
-        if hasattr(obj, "Group"):
-             # Defensive copy of children list
-             children = list(obj.Group)
-             for c in children:
-                 self._recursive_delete(c)
-        try:
-            self.doc.removeObject(obj.Name)
-        except Exception: pass
+
 
     def _apply_placement(self, sheets, parts_to_nest):
         original_parts_map = {part.id: part for part in parts_to_nest}
@@ -497,18 +485,31 @@ class NestingController:
             # Restore visibility of original target
             if target:
                 try: 
-                    # Force visibility on target
-                    if hasattr(target, "ViewObject"):
-                        target.ViewObject.Visibility = True
+                    # Check if target layout is empty (newly created, never committed to)
+                    has_content = any(
+                        child.Label.startswith("Sheet_") or child.Label.startswith("MasterShapes")
+                        for child in (target.Group if hasattr(target, "Group") else [])
+                    )
                     
-                    if hasattr(target, "Group"):
-                        for child in target.Group:
-                            # Show Sheets
-                            if child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
-                                child.ViewObject.Visibility = True
-                            # Hide MasterShapes
-                            if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
-                                child.ViewObject.Visibility = False
+                    if not has_content:
+                        # Empty layout - was created by _ensure_target_layout but never used
+                        recursive_delete(self.doc, target)
+                        if hasattr(self.ui, 'current_layout') and self.ui.current_layout == target:
+                            self.ui.current_layout = None
+                        FreeCAD.Console.PrintMessage("Removed empty target layout.\n")
+                    else:
+                        # Has content - restore visibility
+                        if hasattr(target, "ViewObject"):
+                            target.ViewObject.Visibility = True
+                        
+                        if hasattr(target, "Group"):
+                            for child in target.Group:
+                                # Show Sheets
+                                if child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
+                                    child.ViewObject.Visibility = True
+                                # Hide MasterShapes
+                                if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
+                                    child.ViewObject.Visibility = False
                 except Exception: pass
             
             self.current_job = None
