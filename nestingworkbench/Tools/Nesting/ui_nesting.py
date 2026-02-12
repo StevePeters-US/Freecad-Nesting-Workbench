@@ -24,7 +24,6 @@ class NestingPanel(QtGui.QWidget):
         self.current_layout = None
         self.selected_font_path = ""
         self.initUI()
-        self.load_selection()
         self.set_default_font()
     
     def accept(self):
@@ -253,253 +252,16 @@ class NestingPanel(QtGui.QWidget):
         self.nest_button.clicked.connect(self.controller.execute_nesting)
         self.font_select_button.clicked.connect(self.select_font_file)
         self.show_bounds_checkbox.stateChanged.connect(self.controller.toggle_bounds_visibility)
-        self.add_parts_button.clicked.connect(self.add_selected_shapes)
-        self.remove_parts_button.clicked.connect(self.remove_selected_shapes)
+        self.add_parts_button.clicked.connect(self.controller.add_selected_shapes)
+        self.remove_parts_button.clicked.connect(self.controller.remove_selected_shapes)
         
         # Load persisted settings after all widgets are created
         self.load_persisted_settings()
-
-
-
-
-    def load_selection(self):
-        FreeCAD.Console.PrintMessage("Loading selection into Nesting Panel...\n")
-        selection = FreeCADGui.Selection.getSelection()
-        self.shape_table.setRowCount(0)
-
-        if not selection:
-            FreeCAD.Console.PrintMessage("  -> No selection found.\n")
-            self.status_label.setText("Warning: No shapes selected.")
-            self.nest_button.setEnabled(False)
-            return
-
-        # Check if a layout group is selected
-        first_selected = selection[0]
-        if first_selected.isDerivedFrom("App::DocumentObjectGroup") and first_selected.Label.startswith("Layout_"):
-            FreeCAD.Console.PrintMessage(f"  -> Detected layout selection: {first_selected.Label}\n")
-            self.load_layout(first_selected)
-        else:
-            FreeCAD.Console.PrintMessage(f"  -> Detected {len(selection)} shapes.\n")
-            self.load_shapes(selection)
-
-    def load_layout(self, layout_group):
-        """Loads the parameters and shapes from a layout group."""
-        self.current_layout = layout_group
-        self.nest_button.setEnabled(True)
-        self.selected_shapes_to_process = []
-        self.hidden_originals = []
-
-        # Read parameters directly from the layout group's properties
-        if hasattr(layout_group, 'SheetWidth'):
-            self.sheet_width_input.setValue(layout_group.SheetWidth)
-        if hasattr(layout_group, 'SheetHeight'):
-            self.sheet_height_input.setValue(layout_group.SheetHeight)
-        if hasattr(layout_group, 'PartSpacing'):
-            self.part_spacing_input.setValue(layout_group.PartSpacing)
-        if hasattr(layout_group, 'SheetThickness'):
-            self.sheet_thickness_input.setValue(layout_group.SheetThickness)
-        # Load deflection angle (new format) or convert old deflection mm to angle
-        if hasattr(layout_group, 'DeflectionAngle'):
-            self.deflection_input.setValue(layout_group.DeflectionAngle)
-        elif hasattr(layout_group, 'Deflection'):
-            # Backward compatibility: convert old Deflection (mm) to angle
-            deflection_angle = layout_group.Deflection * 200.0
-            self.deflection_input.setValue(deflection_angle)
-        if hasattr(layout_group, 'Simplification'):
-            self.simplification_input.setValue(layout_group.Simplification)
-        if hasattr(layout_group, 'FontFile') and os.path.exists(layout_group.FontFile):
-            self.selected_font_path = layout_group.FontFile
-            self.font_label.setText(os.path.basename(layout_group.FontFile))
-        if hasattr(layout_group, 'LabelSize'):
-            self.label_size_input.setValue(layout_group.LabelSize)
-        if hasattr(layout_group, 'Generations'):
-            self.minkowski_generations_input.setValue(layout_group.Generations)
-        if hasattr(layout_group, 'PopulationSize'):
-            self.minkowski_population_size_input.setValue(layout_group.PopulationSize)
-
-        # Get the shapes from the layout
-        master_shapes_group = None
-        for child in layout_group.Group:
-            if child.Label.startswith("MasterShapes"):
-                master_shapes_group = child
-                break
         
-        if master_shapes_group:
-            # The master shapes are now copies inside this group.
-            # We need to find the actual ShapeObject inside each 'master_' container,
-            # as that is what the processing logic expects.
-            shapes_to_load = []
-            quantities = {}
-            rotation_overrides = {}
-            rotation_steps_map = {}
-            up_directions = {}
-            fill_sheet_map = {}
-            
-            for master_container in master_shapes_group.Group:
-                # Use a relaxed check for the container to ensure robust loading.
-                # While we enforce "master_" naming on write, reading should be tolerant
-                # to handle potential legacy or manually modified files.
-                if hasattr(master_container, "Group"):
-                    # The object to load is the 'master_shape_...' object inside the container.
-                    shape_obj = next((child for child in master_container.Group if child.Label.startswith("master_shape_")), None)
-                    # Note: We no longer require Proxy, as it may be lost during copyObject.
-                    # The shape geometry is what we need.
-                    if shape_obj and hasattr(shape_obj, "Shape"):
-                        shapes_to_load.append(shape_obj)
-                        
-                        # Recover properties from container
-                        quantities[shape_obj.Label] = getattr(master_container, "Quantity", 1)
-                        
-                        if hasattr(master_container, "PartRotationOverride"):
-                            rotation_overrides[shape_obj.Label] = master_container.PartRotationOverride
-                        if hasattr(master_container, "PartRotationSteps"):
-                            rotation_steps_map[shape_obj.Label] = master_container.PartRotationSteps
-                        if hasattr(master_container, "UpDirection"):
-                            up_directions[shape_obj.Label] = master_container.UpDirection
-                        if hasattr(master_container, "FillSheet"):
-                            fill_sheet_map[shape_obj.Label] = master_container.FillSheet
-            
-            self.load_shapes(
-                shapes_to_load, 
-                is_reloading_layout=True, 
-                initial_quantities=quantities,
-                initial_overrides=rotation_overrides,
-                initial_rotation_steps=rotation_steps_map,
-                initial_up_directions=up_directions,
-                initial_fill_sheet=fill_sheet_map
-            )
-            
-            # Load Global Rotation Steps if present
-            if hasattr(layout_group, "GlobalRotationSteps"):
-                self.rotation_steps_spinbox.setValue(layout_group.GlobalRotationSteps)
-        else:
-            FreeCAD.Console.PrintMessage(f"  WARNING: No MasterShapes group found!\n")
-            self.status_label.setText("Warning: Could not find 'MasterShapes' group in the selected layout.")
+        # Load initial selection
+        self.controller.load_selection()
 
-    def _extract_parts_from_selection(self, selection):
-        """
-        Extracts parts from Assembly containers only.
-        Regular Part objects are used directly without extracting children.
-        """
-        parts = []
-        
-        def is_assembly(obj):
-            """Check if object is an Assembly container (not a regular Part/Body)."""
-            # Check for common assembly types
-            type_id = obj.TypeId if hasattr(obj, 'TypeId') else ''
-            if 'Assembly' in type_id:
-                return True
-            # Also check for App::Part that's used as an assembly (has Link children)
-            if type_id == 'App::Part' and hasattr(obj, 'Group'):
-                # If it contains links or other assembly-like parts, treat as assembly
-                for child in obj.Group:
-                    child_type = child.TypeId if hasattr(child, 'TypeId') else ''
-                    if 'Link' in child_type or 'Assembly' in child_type:
-                        return True
-            return False
-        
-        def extract_from_assembly(obj):
-            """Recursively extract nestable parts from an assembly."""
-            if hasattr(obj, 'Group'):
-                for child in obj.Group:
-                    # Skip constraints, origins, etc.
-                    child_type = child.TypeId if hasattr(child, 'TypeId') else ''
-                    if 'Constraint' in child_type or 'Origin' in child_type:
-                        continue
-                    # If child is a link, get the linked object
-                    if hasattr(child, 'LinkedObject') and child.LinkedObject:
-                        linked = child.LinkedObject
-                        if hasattr(linked, 'Shape') and linked.Shape and not linked.Shape.isNull():
-                            parts.append(linked)
-                    elif hasattr(child, 'Shape') and child.Shape and not child.Shape.isNull():
-                        # Check if child is also an assembly
-                        if is_assembly(child):
-                            extract_from_assembly(child)
-                        else:
-                            parts.append(child)
-        
-        for obj in selection:
-            if is_assembly(obj):
-                # Extract parts from assembly
-                extract_from_assembly(obj)
-            else:
-                # Use regular part directly
-                parts.append(obj)
-        
-        return parts
-
-    def load_shapes(self, selection, is_reloading_layout=False, initial_quantities=None, 
-                     initial_overrides=None, initial_rotation_steps=None,
-                     initial_up_directions=None, initial_fill_sheet=None):
-        """Loads a selection of shapes into the UI."""
-        self.nest_button.setEnabled(True)
-        
-        # Extract individual parts from assemblies/groups
-        if not is_reloading_layout:
-            extracted = self._extract_parts_from_selection(selection)
-            if extracted:
-                selection = extracted
-                FreeCAD.Console.PrintMessage(f"  -> Extracted {len(selection)} parts from selection.\n")
-        
-        self.selected_shapes_to_process = list(dict.fromkeys(selection)) # Keep unique, preserve order
-        if not is_reloading_layout:
-            self.current_layout = None
-            self.hidden_originals = list(self.selected_shapes_to_process)
-        
-        self.shape_table.setRowCount(len(self.selected_shapes_to_process))
-        for i, obj in enumerate(self.selected_shapes_to_process):
-            # Clean up label if it's a master shape
-            display_label = obj.Label
-            if display_label.startswith("master_shape_"):
-                display_label = display_label.replace("master_shape_", "")
-            
-            qty = 1
-            if initial_quantities and obj.Label in initial_quantities:
-                qty = initial_quantities[obj.Label]
-                
-            steps = 4
-            override = False
-            if initial_rotation_steps and obj.Label in initial_rotation_steps:
-                steps = initial_rotation_steps[obj.Label]
-            if initial_overrides and obj.Label in initial_overrides:
-                override = initial_overrides[obj.Label]
-            
-            up_dir = "Z+"
-            if initial_up_directions and obj.Label in initial_up_directions:
-                up_dir = initial_up_directions[obj.Label]
-                
-            fill = False
-            if initial_fill_sheet and obj.Label in initial_fill_sheet:
-                fill = initial_fill_sheet[obj.Label]
-
-            self._add_part_row(i, display_label, quantity=qty, rotation_steps=steps, 
-                              override_rotation=override, up_direction=up_dir, fill_sheet=fill)
-        
-        self.shape_table.resizeColumnsToContents()
-        self.status_label.setText(f"{len(selection)} unique object(s) selected. Specify quantities and nest.")
-
-    def add_selected_shapes(self):
-        """Adds the currently selected FreeCAD objects to the shape table if they aren't already present."""
-        selection = FreeCADGui.Selection.getSelection()
-        if not selection:
-            self.status_label.setText("Select shapes in the 3D view or tree to add them.")
-            return
-
-        existing_labels = [self.shape_table.item(row, 0).text() for row in range(self.shape_table.rowCount())]
-        
-        added_count = 0
-        for obj in selection:
-            if obj.Label not in existing_labels:
-                row_position = self.shape_table.rowCount()
-                self.shape_table.insertRow(row_position)
-                self._add_part_row(row_position, obj.Label)
-                self.selected_shapes_to_process.append(obj)
-                added_count += 1
-        
-        self.shape_table.resizeColumnsToContents()
-        self.status_label.setText(f"Added {added_count} new shape(s).")
-
-    def _add_part_row(self, row_index, label, quantity=1, rotation_steps=4, override_rotation=False, 
+    def add_part_row(self, row_index, label, quantity=1, rotation_steps=4, override_rotation=False, 
                        up_direction="Z+", fill_sheet=False):
         """Helper function to create and populate a single row in the parts table."""
         label_item = QtGui.QTableWidgetItem(label)
@@ -551,18 +313,6 @@ class NestingPanel(QtGui.QWidget):
         self.shape_table.setCellWidget(row_index, 3, override_checkbox)
         self.shape_table.setCellWidget(row_index, 4, up_dir_combo)
         self.shape_table.setCellWidget(row_index, 5, fill_checkbox)
-
-    def remove_selected_shapes(self):
-        """Removes the selected rows from the shape table."""
-        # Get all selected items and find their unique rows. This is more robust
-        # than selectedRows() as it works even if only a single cell is selected.
-        selected_items = self.shape_table.selectedItems()
-        selected_rows = sorted(list(set(item.row() for item in selected_items)), reverse=True)
-        for row in selected_rows:
-            label_to_remove = self.shape_table.item(row, 0).text()
-            self.selected_shapes_to_process = [obj for obj in self.selected_shapes_to_process if obj.Label != label_to_remove]
-            self.shape_table.removeRow(row)
-        self.status_label.setText(f"Removed {len(selected_rows)} shape(s).")
 
     def select_font_file(self):
         """Opens a file dialog to let the user select a font file."""

@@ -9,6 +9,7 @@ import FreeCAD
 import Part
 import os
 import importDXF
+from ...freecad_helpers import get_layout_group, get_sheet_groups, get_all_objects_recursive, recursive_delete
 
 class SheetExporter:
     """
@@ -20,44 +21,9 @@ class SheetExporter:
         if layout_group:
             self.layout_group = layout_group
         else:
-            self.layout_group = self._get_layout_group()
+            self.layout_group = get_layout_group(self.doc)
 
-    def _get_layout_group(self):
-        """Finds the most relevant layout group in the active document."""
-        if not self.doc:
-            return None
-        
-        # Prioritize the temporary group if it exists
-        temp_group = self.doc.getObject("__temp_Layout")
-        if temp_group:
-            return temp_group
-        
-        # Otherwise, find the most recently created final layout
-        groups = [o for o in self.doc.Objects if o.isDerivedFrom("App::DocumentObjectGroup")]
-        packed_groups = sorted([g for g in groups if g.Label.startswith("Layout_")], key=lambda x: x.Name)
-        if packed_groups:
-            return packed_groups[-1]
-            
-        return None
 
-    def _get_sheet_groups(self):
-        """Gets all the direct child Sheet groups from the main layout group."""
-        if not self.layout_group:
-            return []
-        
-        sheet_groups = [obj for obj in self.layout_group.Group if obj.Label.startswith("Sheet_")]
-        sheet_groups.sort(key=lambda g: int(g.Label.split('_')[1]))
-        return sheet_groups
-
-    def _get_all_objects_recursive(self, group):
-        """Recursively finds all objects within a group and its subgroups."""
-        all_objects = []
-        for obj in group.Group:
-            if obj.isDerivedFrom("App::DocumentObjectGroup"):
-                all_objects.extend(self._get_all_objects_recursive(obj))
-            else:
-                all_objects.append(obj)
-        return all_objects
 
     def export_sheets(self, export_dir, delete_generated_objects=True):
         """Main method to create 2D projections of the layout in a new folder."""
@@ -65,7 +31,7 @@ class SheetExporter:
             FreeCAD.Console.PrintMessage("No valid packed layout found to create views from.\n")
             return
 
-        sheet_groups = self._get_sheet_groups()
+        sheet_groups = get_sheet_groups(self.layout_group)
         if not sheet_groups:
             FreeCAD.Console.PrintMessage("No sheets found within the layout group.\n")
             return
@@ -81,7 +47,7 @@ class SheetExporter:
 
         # Process each sheet individually
         for sheet_group in sheet_groups:
-            objects_in_sheet = self._get_all_objects_recursive(sheet_group)
+            objects_in_sheet = get_all_objects_recursive(sheet_group)
             
             # Filter for only the objects we want to project, excluding offset bounds and annotations
             objects_to_project = [
@@ -139,23 +105,7 @@ class SheetExporter:
 
         # Delete the generated 2D views if requested
         if delete_generated_objects:
-            self._recursive_delete(self.doc, views_folder)
+            recursive_delete(self.doc, views_folder)
             FreeCAD.Console.PrintMessage("Deleted temporary 2D views folder.\n")
 
-    def _recursive_delete(self, doc, obj_to_delete):
-        """Helper to recursively delete all objects inside a group."""
-        # Create a static list of children to iterate over
-        children = list(obj_to_delete.Group)
-        for child in children:
-            if child.isDerivedFrom("App::DocumentObjectGroup"):
-                self._recursive_delete(doc, child)
-            else:
-                try:
-                    doc.removeObject(child.Name)
-                except Exception:
-                    pass
-        # Finally, delete the (now empty) group itself
-        try:
-            doc.removeObject(obj_to_delete.Name)
-        except Exception:
-            pass
+

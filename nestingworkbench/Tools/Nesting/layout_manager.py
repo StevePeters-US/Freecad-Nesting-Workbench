@@ -14,6 +14,7 @@ import FreeCAD
 import copy
 from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
+from ...freecad_helpers import recursive_delete
 
 
 class Layout:
@@ -149,7 +150,7 @@ class LayoutManager:
         try:
             if layout.layout_group:
                 group_obj = layout.layout_group
-        except:
+        except Exception:
             pass
         
         layout_label = layout.name if hasattr(layout, 'name') else "unknown"
@@ -162,33 +163,10 @@ class LayoutManager:
         
         # Recursively delete the group and all children
         if group_obj:
-            self._recursive_delete(group_obj)
+            recursive_delete(self.doc, group_obj)
             FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
     
-    def _recursive_delete(self, obj):
-        """
-        Recursively deletes an object and all its children.
-        Must delete children first since FreeCAD doesn't cascade deletes.
-        """
-        if not obj:
-            return
-        
-        try:
-            obj_name = obj.Name
-        except:
-            return  # Object already deleted
-        
-        # First, recursively delete all children (if it's a group)
-        if hasattr(obj, 'Group'):
-            for child in list(obj.Group):  # Copy list to avoid modification during iteration
-                self._recursive_delete(child)
-        
-        # Delete the object itself
-        try:
-            if self.doc.getObject(obj_name):
-                self.doc.removeObject(obj_name)
-        except:
-            pass  # Already deleted
+
     
     def calculate_efficiency(self, layout, sheet_width, sheet_height) -> tuple:
         """
@@ -231,7 +209,7 @@ class LayoutManager:
                 max_x = max(p.shape.bounding_box()[0] + p.shape.bounding_box()[2] for p in last_sheet.parts)
                 max_y = max(p.shape.bounding_box()[1] + p.shape.bounding_box()[3] for p in last_sheet.parts)
                 fitness += (max_x - min_x) * (max_y - min_y)
-            except:
+            except Exception:
                 pass
         
         # Contact score: reward parts that touch each other
@@ -288,7 +266,7 @@ class LayoutManager:
                             elif hasattr(intersection, 'area'):
                                 # For area-based contact, use sqrt to normalize
                                 total_contact += intersection.area ** 0.5
-                        except:
+                        except Exception:
                             # Simple fallback: just count the contact
                             total_contact += 10.0
         

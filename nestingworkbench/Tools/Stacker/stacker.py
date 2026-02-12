@@ -7,6 +7,7 @@ finding, stacking, and unstacking the generated sheet layouts.
 
 import FreeCAD
 import ast
+from ...freecad_helpers import get_layout_group, get_sheet_groups, get_all_objects_recursive
 
 class SheetStacker:
     """Handles the logic for finding, stacking, and unstacking sheet layouts."""
@@ -15,45 +16,9 @@ class SheetStacker:
         if layout_group:
             self.layout_group = layout_group
         else:
-            self.layout_group = self._get_layout_group()
+            self.layout_group = get_layout_group(self.doc)
 
-    def _get_layout_group(self):
-        """Finds the most relevant layout group in the active document."""
-        if not self.doc:
-            return None
-        
-        # Prioritize the temporary group as it's the one being actively worked on
-        temp_group = self.doc.getObject("__temp_Layout")
-        if temp_group:
-            return temp_group
-        
-        # If no temp group, find the most recently created final layout group
-        groups = [o for o in self.doc.Objects if o.isDerivedFrom("App::DocumentObjectGroup")]
-        packed_groups = sorted([g for g in groups if g.Label.startswith("Layout_")], key=lambda x: x.Name)
-        if packed_groups:
-            return packed_groups[-1]
-            
-        return None
 
-    def _get_sheet_groups(self):
-        """Gets all the direct child Sheet groups from the main layout group."""
-        if not self.layout_group:
-            return []
-        
-        sheet_groups = [obj for obj in self.layout_group.Group if obj.Label.startswith("Sheet_")]
-        # Sort them numerically by their label to ensure correct order
-        sheet_groups.sort(key=lambda g: int(g.Label.split('_')[1]))
-        return sheet_groups
-
-    def _get_all_objects_recursive(self, group):
-        """Recursively finds all objects within a group and its subgroups."""
-        all_objects = []
-        for obj in group.Group:
-            if obj.isDerivedFrom("App::DocumentObjectGroup"):
-                all_objects.extend(self._get_all_objects_recursive(obj))
-            else:
-                all_objects.append(obj)
-        return all_objects
 
     def _get_params_from_layout_group(self):
         """Reads layout parameters from the properties of the layout group."""
@@ -101,7 +66,7 @@ class SheetStacker:
             self.layout_group.addProperty("App::PropertyMap", "OriginalPlacements", "Nesting")
 
         placements_dict = {}
-        all_objects = self._get_all_objects_recursive(self.layout_group)
+        all_objects = get_all_objects_recursive(self.layout_group)
         for obj in all_objects:
             if not hasattr(obj, 'Placement'):
                 continue
@@ -113,7 +78,7 @@ class SheetStacker:
         self.layout_group.OriginalPlacements = placements_dict
 
         total_sheet_width = params["width"] + params["spacing"]
-        sheet_groups = self._get_sheet_groups()
+        sheet_groups = get_sheet_groups(self.layout_group)
 
         if len(sheet_groups) < 2:
             FreeCAD.Console.PrintMessage("Stacking requires two or more sheets.\n")
@@ -131,7 +96,7 @@ class SheetStacker:
             move_vec = target_pos - original_pos
             
             # Apply this transformation to all objects within this sheet's group
-            objects_to_move = self._get_all_objects_recursive(sheet_group)
+            objects_to_move = get_all_objects_recursive(sheet_group)
             for obj in objects_to_move:
                 new_placement = FreeCAD.Placement(move_vec, FreeCAD.Rotation()).multiply(obj.Placement)
                 obj.Placement = new_placement
@@ -146,7 +111,7 @@ class SheetStacker:
             return
             
         placements_dict = self.layout_group.OriginalPlacements
-        all_objects = self._get_all_objects_recursive(self.layout_group)
+        all_objects = get_all_objects_recursive(self.layout_group)
         for obj in all_objects:
             if not hasattr(obj, 'Placement'):
                 continue

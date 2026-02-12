@@ -9,6 +9,7 @@ import Part
 import copy
 import FreeCAD
 import threading
+from ..freecad_helpers import get_up_direction_rotation
 
 try:
     from shapely.affinity import translate, rotate
@@ -25,6 +26,18 @@ class Shape:
     nfp_cache = {}
     nfp_cache_lock = threading.Lock()
     decomposition_cache = {}
+    
+    @classmethod
+    def clear_caches(cls):
+        """Clears decomposition cache between nesting runs. Does NOT clear NFP cache
+        since NFP calculations are expensive and benefit from persistence."""
+        cls.decomposition_cache.clear()
+
+    @classmethod
+    def clear_nfp_cache(cls):
+        """Clears the NFP cache. Only call when explicitly requested by the user."""
+        with cls.nfp_cache_lock:
+            cls.nfp_cache.clear()
     
     def __init__(self, source_freecad_object):
         self.source_freecad_object = source_freecad_object
@@ -161,26 +174,6 @@ class Shape:
         # Rotation center is at origin
         return FreeCAD.Placement(container_pos, z_rotation, FreeCAD.Vector(0, 0, 0))
     
-    def _get_up_direction_rotation(self):
-        """
-        Returns a FreeCAD.Rotation that transforms the part's up_direction to Z+.
-        """
-        up_dir = getattr(self, 'up_direction', 'Z+')
-        
-        if up_dir == "Z+" or up_dir is None:
-            return FreeCAD.Rotation()  # Identity - no rotation needed
-        elif up_dir == "Z-":
-            return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)
-        elif up_dir == "Y+":
-            return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)
-        elif up_dir == "Y-":
-            return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)
-        elif up_dir == "X+":
-            return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)
-        elif up_dir == "X-":
-            return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
-        else:
-            return FreeCAD.Rotation()
 
     def set_rotation(self, angle, reposition=True):
         """

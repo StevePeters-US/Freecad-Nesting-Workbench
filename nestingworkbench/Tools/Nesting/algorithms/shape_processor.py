@@ -8,33 +8,9 @@ buffered boundaries.
 
 import FreeCAD
 import Part
+from ....freecad_helpers import get_up_direction_rotation
 
 
-def _get_rotation_for_up_direction(up_direction):
-    """
-    Returns a FreeCAD.Rotation that transforms the given up_direction to Z+.
-    
-    Args:
-        up_direction: One of "Z+", "Z-", "Y+", "Y-", "X+", "X-"
-    
-    Returns:
-        FreeCAD.Rotation to apply to make the given direction point to Z+
-    """
-    if up_direction == "Z+" or up_direction is None:
-        return FreeCAD.Rotation()  # Identity - no rotation needed
-    elif up_direction == "Z-":
-        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 180)  # Rotate 180° around X
-    elif up_direction == "Y+":
-        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90)  # Rotate -90° around X
-    elif up_direction == "Y-":
-        return FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90)  # Rotate 90° around X
-    elif up_direction == "X+":
-        return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90)  # Rotate 90° around Y
-    elif up_direction == "X-":
-        return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)  # Rotate -90° around Y
-    else:
-        FreeCAD.Console.PrintWarning(f"Unknown up_direction '{up_direction}', using Z+\n")
-        return FreeCAD.Rotation()
 
 
 def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, simplification=1.0):
@@ -55,7 +31,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
         shape.transformShape(obj.Placement.Matrix)
     
     # If we need to rotate the shape to align the up direction with Z+
-    rotation = _get_rotation_for_up_direction(up_direction)
+    rotation = get_up_direction_rotation(up_direction)
     needs_rotation = up_direction != "Z+" and up_direction is not None
     
     if needs_rotation:
@@ -311,7 +287,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     
     # offset_from_origin is the vector in the 2D PROFILE PLANE.
     # It needs to be rotated back to world space.
-    rotation = _get_rotation_for_up_direction(up_direction)
+    rotation = get_up_direction_rotation(up_direction)
     # The inverse rotation is the conjugate (for rotations) or negative angle
     # FreeCAD Rotation objects have .inverted() method? 
     # Or just use the same axis with negative angle.
