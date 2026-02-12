@@ -520,6 +520,10 @@ class NestingController:
         self.ui.shape_table.resizeColumnsToContents()
         self.ui.status_label.setText(f"Added {added_count} new shape(s).")
 
+        # Enable the nest button if any shapes are now in the table
+        if self.ui.shape_table.rowCount() > 0:
+            self.ui.nest_button.setEnabled(True)
+
     def remove_selected_shapes(self):
         """Removes the selected rows from the shape table."""
         selected_items = self.ui.shape_table.selectedItems()
@@ -529,6 +533,10 @@ class NestingController:
             self.ui.selected_shapes_to_process = [obj for obj in self.ui.selected_shapes_to_process if obj.Label != label_to_remove]
             self.ui.shape_table.removeRow(row)
         self.ui.status_label.setText(f"Removed {len(selected_rows)} shape(s).")
+
+        # Disable the nest button if the table is now empty
+        if self.ui.shape_table.rowCount() == 0:
+            self.ui.nest_button.setEnabled(False)
 
     
 
