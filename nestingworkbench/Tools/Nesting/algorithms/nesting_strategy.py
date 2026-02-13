@@ -192,6 +192,7 @@ class Nester:
         self.trial_callback = kwargs.get("trial_callback")  # For visualizing trial placements
         self.part_start_callback = kwargs.get("part_start_callback")  # Called when starting to place a part
         self.part_end_callback = kwargs.get("part_end_callback")  # Called after part is placed
+        self.progress_callback = kwargs.get("progress_callback") # Called with (current, total)
         
         step_size = kwargs.get("step_size", 5.0) 
         self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback)
@@ -252,6 +253,8 @@ class Nester:
         for i, part in enumerate(current_parts):
             if not quiet:
                 self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
+                if self.progress_callback:
+                    self.progress_callback(i + 1, total_parts, f"Placing {part.id}...")
             start_part_time = datetime.now()
             placed = False
             

@@ -229,6 +229,15 @@ class NestingPanel(QtGui.QWidget):
         main_layout.addWidget(self.shape_table)
         main_layout.addLayout(table_button_layout)
         main_layout.addLayout(action_button_layout)
+        
+        # --- Progress Bar ---
+        self.progressBar = QtGui.QProgressBar()
+        self.progressBar.setRange(0, 100)
+        self.progressBar.setValue(0)
+        self.progressBar.setTextVisible(True)
+        self.progressBar.setVisible(False) # Hidden by default
+        main_layout.addWidget(self.progressBar)
+
         main_layout.addWidget(self.status_label)
         main_layout.addStretch()
         
@@ -397,4 +406,27 @@ class NestingPanel(QtGui.QWidget):
                 deflection_angle = 30  # Default
         self.deflection_input.setValue(deflection_angle)
         self.simplification_input.setValue(prefs.GetFloat("Simplification", 1.0))
+        
+    def update_progress(self, current, total, message=None):
+        """Updates the progress bar."""
+        if total > 0:
+            percentage = int((float(current) / float(total)) * 100)
+            self.progressBar.setValue(percentage)
+            self.progressBar.setVisible(True)
+            
+            if message:
+                self.progressBar.setFormat(f"%p% - {message}")
+            else:
+                self.progressBar.setFormat("%p%")
+            
+            # Force UI update
+            QtGui.QApplication.processEvents()
+        else:
+            self.progressBar.setValue(0)
+            self.progressBar.setVisible(False)
+
+    def reset_progress(self):
+        """Resets and hides the progress bar."""
+        self.progressBar.setValue(0)
+        self.progressBar.setVisible(False)
         
