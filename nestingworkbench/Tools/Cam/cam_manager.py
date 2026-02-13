@@ -13,13 +13,14 @@ class CAMManager:
         self.doc = FreeCAD.ActiveDocument
         self.layout_group = layout_group
 
-    def create_cam_job(self, include_parts=True, include_labels=True, include_outlines=False):
+    def create_cam_job(self, include_parts=True, include_labels=True, include_outlines=False, template_path=None):
         """Main method to create the CAM job.
         
         Args:
             include_parts: Include part_* objects (full cuts)
             include_labels: Include label_* objects (engraving)
             include_outlines: Include outline_* objects (silhouettes)
+            template_path: Optional path to a CAM template JSON file
         """
         if not self.layout_group:
              FreeCAD.Console.PrintError("No layout group provided.\\n")
@@ -29,10 +30,10 @@ class CAMManager:
         for obj in self.layout_group.Group:
             # We assume groups starting with "Sheet_" are the sheet containers
             if obj.isDerivedFrom("App::DocumentObjectGroup") and obj.Label.startswith("Sheet_"):
-                self._create_job_for_sheet(obj, include_parts, include_labels, include_outlines)
+                self._create_job_for_sheet(obj, include_parts, include_labels, include_outlines, template_path)
 
 
-    def _create_job_for_sheet(self, sheet_group, include_parts=True, include_labels=True, include_outlines=False):
+    def _create_job_for_sheet(self, sheet_group, include_parts=True, include_labels=True, include_outlines=False, template_path=None):
         """Creates a CAM job for a sheet with proper stock dimensions.
         
         Args:
@@ -40,6 +41,7 @@ class CAMManager:
             include_parts: Include part_* objects (full cuts)
             include_labels: Include label_* objects (engraving)
             include_outlines: Include outline_* objects (silhouettes)
+            template_path: Optional path to a CAM template JSON file
         """
         # Import CAM modules (FreeCAD 1.1+)
         try:
@@ -171,8 +173,19 @@ class CAMManager:
             import FreeCADGui
             from CAM.Path.Main.Gui import Job as PathJobGui
             
-            # Use the GUI create function with openTaskPanel=False so it doesn't pop up a dialog
-            job = PathJobGui.Create(all_models, None, openTaskPanel=False)
+            # Use the GUI create function which handles template usage properly
+            # Arguments for PathJobGui.Create:
+            # base: list of base objects
+            # target: document (None = active)
+            # template: path to template file (None = default empty)
+            # openTaskPanel: boolean
+            
+            # The signature appears to be Create(base, template, openTaskPanel, target=None)
+            # We will pass arguments positionally where appropriate.
+            # If template_path is provided, we pass it. If None, we pass None.
+            # We explicitly pass openTaskPanel=False to suppress the dialog.
+            
+            job = PathJobGui.Create(all_models, template_path, openTaskPanel=False)
             
             if job:
                 # Rename the job to our desired name
@@ -208,14 +221,43 @@ class CAMManager:
                 except Exception as e:
                     FreeCAD.Console.PrintWarning(f"Could not set post processor: {e}\\n")
                 
-                # Ensure models are visible
-                if hasattr(job, 'Model') and job.Model:
-                    if hasattr(job.Model, 'ViewObject') and job.Model.ViewObject:
-                        job.Model.ViewObject.Visibility = True
-                    if hasattr(job.Model, 'Group'):
-                        for model_obj in job.Model.Group:
-                            if hasattr(model_obj, 'ViewObject') and model_obj.ViewObject:
-                                model_obj.ViewObject.Visibility = True
+                # Organize the base objects into a group to clean up the tree
+                try:
+                    group_name = f"CAM_Geometry_{sheet_group.Label}"
+                    # Check if group already exists (unlikely given new job each time, but good practice)
+                    cam_group = self.doc.getObject(group_name)
+                    if not cam_group:
+                        cam_group = self.doc.addObject("App::DocumentObjectGroup", group_name)
+                        cam_group.Label = f"CAM Geometry ({sheet_group.Label})"
+                    
+                    for model in all_models:
+                         cam_group.addObject(model)
+                         # Ensure individual models are visible
+                         if hasattr(model, 'ViewObject') and model.ViewObject:
+                             model.ViewObject.Visibility = True
+                    
+                    # Create a parent group for the sheet's CAM artifacts
+                    parent_group_name = f"CAM_Sheet_{sheet_group.Label}"
+                    parent_group = self.doc.getObject(parent_group_name)
+                    if not parent_group:
+                        parent_group = self.doc.addObject("App::DocumentObjectGroup", parent_group_name)
+                        parent_group.Label = f"CAM ({sheet_group.Label})"
+                    
+                    # Add job and geometry group to parent
+                    parent_group.addObject(job)
+                    parent_group.addObject(cam_group)
+                    
+                    # Ensure the geometry group is visible so user can see what's being cut
+                    if hasattr(cam_group, 'ViewObject') and cam_group.ViewObject:
+                        cam_group.ViewObject.Visibility = True
+                        
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"Could not group CAM geometry: {e}\\n")
+
+                # Recompute to finalize the job
+                self.doc.recompute()
+                
+                FreeCAD.Console.PrintMessage(f"Created CAM job '{job.Label}' for {sheet_group.Label} (stock: {sheet_width}x{sheet_height}x{sheet_thickness}mm)\\n")
                 
                 # Recompute to finalize the job
                 self.doc.recompute()
