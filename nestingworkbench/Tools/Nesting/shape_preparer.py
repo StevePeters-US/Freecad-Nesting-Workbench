@@ -354,7 +354,7 @@ class ShapePreparer:
                         original_shape = Part.Compound([wire])
                     FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"     Could not rebuild 2D shape: {e}, using fallback\n")
+                FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
                 # Fallback: discretize to polygon
                 new_wires = []
                 for wire in master_obj.Shape.Wires:

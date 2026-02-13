@@ -208,6 +208,7 @@ class NestingJob:
             for i, placed_part in enumerate(sheet.parts):
                  original_part = original_parts_map[placed_part.shape.id]
                  # Calculate placement relative to sheet origin
+                 # Calculate placement relative to sheet origin
                  sheet_origin = sheet.get_origin()
                  original_part.placement = placed_part.shape.get_final_placement(sheet_origin)
                  sheet.parts[i].shape = original_part
@@ -614,6 +615,17 @@ class NestingController:
                         is_simulating,
                         **algo_kwargs
                     )
+
+                    # FIX: If not simulating, we need to manually apply the placement
+                    # from the nested copies back to the original layout.parts
+                    # because GA nesting bypasses NestingJob.run
+                    if not is_simulating:
+                         original_parts_map = {p.id: p for p in layout.parts}
+                         for s in sheets:
+                             for i, placed_part in enumerate(s.parts):
+                                  original_part = original_parts_map[placed_part.shape.id]
+                                  original_part.placement = placed_part.shape.get_final_placement(s.get_origin())
+                                  s.parts[i].shape = original_part
                     total_nesting_time += elapsed
                     
                     layout.sheets = sheets
