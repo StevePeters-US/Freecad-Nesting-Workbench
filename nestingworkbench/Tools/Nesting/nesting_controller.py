@@ -282,8 +282,20 @@ class NestingController:
         
         # 3. Execute nesting using unified GA path
         # (population=1, generations=1 is equivalent to standard nesting)
-        self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
-                                 rotation_params, algo_kwargs, is_simulating)
+        
+        # Define progress callback
+        def progress_cb(current, total, message=None):
+            self.ui.update_progress(current, total, message)
+            
+        self.ui.reset_progress()
+        algo_kwargs['progress_callback'] = progress_cb
+        
+        try:
+            self._execute_ga_nesting(target_layout, ui_params, quantities, master_map, 
+                                     rotation_params, algo_kwargs, is_simulating)
+        finally:
+            # Ensure progress bar is reset on finish/error
+            self.ui.reset_progress()
     
     def load_selection(self):
         FreeCAD.Console.PrintMessage("Loading selection via Controller...\n")
@@ -635,6 +647,22 @@ class NestingController:
                         continue
                     
                     # Run nesting
+                    # Pass progress callback for the *current* layout nesting
+                    # Note: We might want to adjust the progress ref to be global across all layouts/gens?
+                    # For now, let's just show progress for the current layout to keep it simple.
+                    # Or better: We can't really do inner progress well inside GA loop without passed context.
+                    # Let's just rely on the existing status update for GA generations.
+                    # BUT for single run (pop=1, gen=1), we want granular progress.
+                    
+                    # If this is a single run, pass the main callback.
+                    # If GA, maybe suppress inner progress?
+                    current_algo_kwargs = algo_kwargs.copy()
+                    if population_size > 1 or generations > 1:
+                         # In GA mode, don't spam the fine-grained progress bar, 
+                         # just use the status label updates we already have in the loop.
+                         if 'progress_callback' in current_algo_kwargs:
+                             del current_algo_kwargs['progress_callback']
+                    
                     sheets, unplaced, _, elapsed = nest(
                         layout.parts,
                         ui_params['sheet_width'],

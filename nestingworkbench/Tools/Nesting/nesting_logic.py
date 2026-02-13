@@ -163,10 +163,13 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
         height: Sheet height
         rotation_steps: Number of rotation steps
         simulate: If True, shows simulation with callbacks
-        **kwargs: Additional arguments for the nester
+        **kwargs: Additional arguments for the nester (including progress_callback)
     """
     global _trial_viz_obj
     from ...datatypes.shape import Shape
+    
+    # Extract progress callback if present (not strictly needed as it goes into kwargs, but good for clarity)
+    # progress_callback = kwargs.get('progress_callback')
     
     # Only clear NFP cache if explicitly requested by the user (expensive to recompute)
     if kwargs.pop('clear_nfp_cache', False):
