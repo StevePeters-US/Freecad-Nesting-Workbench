@@ -297,37 +297,51 @@ class ShapePreparer:
         if not hasattr(master_shape_obj, "BoundaryObject"):
             master_shape_obj.addProperty("App::PropertyLink", "BoundaryObject", "Nesting", "")
         
-        # Get shape geometry for the master.
-        # For Draft/2D objects (Part::Part2DObject), we use the local geometry directly
-        # WITHOUT calling transformShape (which causes BRep coordinate corruption for 2D types).
-        # For regular Part objects, we bake the Placement into the geometry as usual.
-        is_2d_object = master_obj.isDerivedFrom("Part::Part2DObject")
+        # Get shape geometry and center it at (0,0,0) in a SINGLE transformGeometry call.
+        # We combine the Placement baking (world coordinates) and centering into one matrix.
+        # This keeps Placement.Base at (0,0,0) which avoids App::Part container corruption.
         original_shape = master_obj.Shape.copy()
-        if not is_2d_object:
-            if master_obj.Placement and not master_obj.Placement.isIdentity():
-                original_shape.transformShape(master_obj.Placement.Matrix)
-        FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'")
-        if is_2d_object:
-            FreeCAD.Console.PrintMessage(f" [2D: using local geometry]\n")
-        else:
-            FreeCAD.Console.PrintMessage(f"\n")
+        FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
         
-        # CRITICAL: Physically translate the shape geometry so its center is at (0,0,0).
-        # We use shape.translate() instead of a Placement offset because App::Part containers
-        # corrupt non-zero Placement.Base values (they get applied to the Shape coordinates).
-        # By centering the geometry itself, Placement.Base stays at (0,0,0) which is immune
-        # to this corruption.
-        actual_bb = original_shape.BoundBox
-        geo_center = FreeCAD.Vector(
-            (actual_bb.XMin + actual_bb.XMax) / 2,
-            (actual_bb.YMin + actual_bb.YMax) / 2,
-            (actual_bb.ZMin + actual_bb.ZMax) / 2
-        )
-        original_shape.translate(geo_center.negative())
+        # For Draft/2D objects, convert parametric shapes (circles, arcs) to polygon faces.
+        # OCCT parametric curves (Geom_Circle etc.) don't transform reliably via
+        # transformGeometry, but explicit polygon vertices always do.
+        if master_obj.isDerivedFrom("Part::Part2DObject"):
+            try:
+                new_wires = []
+                for wire in original_shape.Wires:
+                    pts = wire.discretize(Number=72)
+                    if len(pts) > 2:
+                        if pts[0] != pts[-1]:
+                            pts.append(pts[0])
+                        new_wires.append(Part.makePolygon(pts))
+                if new_wires:
+                    original_shape = Part.Face(new_wires[0])
+                    FreeCAD.Console.PrintMessage(f"     Converted 2D shape to polygon face ({len(new_wires[0].Vertexes)} vertices)\n")
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"     Could not convert 2D shape to polygon: {e}\n")
+        
+        # Use source_centroid (which includes buffering offset) to match polygon centering.
+        if temp_shape_wrapper.source_centroid:
+            center_point = temp_shape_wrapper.source_centroid
+        else:
+            actual_bb = original_shape.BoundBox
+            center_point = FreeCAD.Vector(
+                (actual_bb.XMin + actual_bb.XMax) / 2,
+                (actual_bb.YMin + actual_bb.YMax) / 2,
+                (actual_bb.ZMin + actual_bb.ZMax) / 2
+            )
+        
+        # Build combined matrix: first apply Placement (bake world coords), then center
+        combined_mat = FreeCAD.Matrix()
+        combined_mat.move(center_point.negative())
+        if master_obj.Placement and not master_obj.Placement.isIdentity():
+            combined_mat = combined_mat.multiply(master_obj.Placement.Matrix)
+        original_shape = original_shape.transformGeometry(combined_mat)
         
         master_shape_obj.Shape = original_shape
         
-        FreeCAD.Console.PrintMessage(f"     Centered from ({geo_center.x:.2f}, {geo_center.y:.2f}) to origin\n")
+        FreeCAD.Console.PrintMessage(f"     Centered from ({center_point.x:.2f}, {center_point.y:.2f}) to origin\n")
         
         # Get up_direction rotation (Placement has NO translation — only rotation)
         up_rotation = get_up_direction_rotation(up_direction)
