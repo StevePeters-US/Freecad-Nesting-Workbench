@@ -228,7 +228,9 @@ class NestingJob:
         self._set_prop(layout_obj, "App::PropertyFloat", "LabelSize", p['label_size'])
         self._set_prop(layout_obj, "App::PropertyInteger", "GlobalRotationSteps", p['rotation_steps'])
         self._set_prop(layout_obj, "App::PropertyInteger", "Generations", p.get('generations', 1))
+        self._set_prop(layout_obj, "App::PropertyInteger", "Generations", p.get('generations', 1))
         self._set_prop(layout_obj, "App::PropertyInteger", "PopulationSize", p.get('population_size', 1))
+        self._set_prop(layout_obj, "App::PropertyBool", "UseGPU", p.get('use_gpu', False))
 
     def _set_prop(self, obj, type_str, name, val):
         if not hasattr(obj, name):
@@ -285,7 +287,9 @@ class NestingController:
         
         # Define progress callback
         def progress_cb(current, total, message=None):
-            self.ui.update_progress(current, total, message)
+            try:
+                self.ui.update_progress(current, total, message)
+            except RuntimeError: pass
             
         self.ui.reset_progress()
         algo_kwargs['progress_callback'] = progress_cb
@@ -353,6 +357,8 @@ class NestingController:
             self.ui.minkowski_generations_input.setValue(layout_group.Generations)
         if hasattr(layout_group, 'PopulationSize'):
             self.ui.minkowski_population_size_input.setValue(layout_group.PopulationSize)
+        if hasattr(layout_group, 'UseGPU'):
+            self.ui.use_gpu_checkbox.setChecked(layout_group.UseGPU)
 
         # Get the shapes from the layout
         master_shapes_group = None
@@ -806,7 +812,9 @@ class NestingController:
             self.doc.recompute()
         except Exception as e:
             FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n")
-            self.ui.status_label.setText(f"Error: {e}")
+            try:
+                self.ui.status_label.setText(f"Error: {e}")
+            except RuntimeError: pass
             # Cleanup all remaining layouts on error
             for layout in layouts:
                 layout_manager.delete_layout(layout)
@@ -968,7 +976,8 @@ class NestingController:
             'label_height': self.ui.label_height_input.value(),
             'label_size': self.ui.label_size_input.value(),
             'generations': self.ui.minkowski_generations_input.value(),
-            'population_size': self.ui.minkowski_population_size_input.value()
+            'population_size': self.ui.minkowski_population_size_input.value(),
+            'use_gpu': self.ui.use_gpu_checkbox.isChecked()
         }
         
         # Save persistence
@@ -990,6 +999,7 @@ class NestingController:
         prefs.SetBool("ShowBounds", bool(settings['show_bounds']))
         prefs.SetFloat("LabelHeight", float(settings['label_height']))
         prefs.SetFloat("LabelSize", float(settings['label_size']))
+        prefs.SetBool("UseGPU", bool(settings.get('use_gpu', False)))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
 
@@ -1052,8 +1062,68 @@ class NestingController:
         algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
         algo_kwargs['spacing'] = ui_params['spacing']
         algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
+        algo_kwargs['use_gpu'] = ui_params.get('use_gpu', False)
         
         if hasattr(self.ui, 'log_message'):
             algo_kwargs['log_callback'] = self.ui.log_message
             
         return algo_kwargs
+
+    def install_taichi(self):
+        """Installs the taichi library using pip in the current environment."""
+        import sys
+        import subprocess
+        
+        reply = QtGui.QMessageBox.question(
+            self.ui, 
+            "Install Taichi?", 
+            "This will attempt to install the 'taichi' library using pip.\n\n"
+            "This may take a moment and requires an internet connection.\n"
+            "FreeCAD might need to be restarted afterwards.\n\n"
+            "Proceed?", 
+            QtGui.QMessageBox.Yes | QtGui.QMessageBox.No
+        )
+        
+        if reply == QtGui.QMessageBox.No:
+            return
+
+        try:
+            self.ui.status_label.setText("Installing Taichi...")
+            if hasattr(self.ui, 'install_taichi_button'):
+                self.ui.install_taichi_button.setEnabled(False)
+            QtGui.QApplication.processEvents()
+            
+            # sys.executable in FreeCAD often points to FreeCAD.exe.
+            # We need the python.exe in the same directory (bin).
+            import os
+            bin_dir = os.path.dirname(sys.executable)
+            python_exe = os.path.join(bin_dir, "python.exe")
+            
+            # Fallback if python.exe not found
+            if not os.path.exists(python_exe):
+                 python_exe = sys.executable 
+
+            # Run pip install
+            # Use --no-warn-script-location to avoid warnings about PATH
+            subprocess.check_call([python_exe, "-m", "pip", "install", "taichi", "--no-warn-script-location"])
+            
+            FreeCAD.Console.PrintMessage("Successfully installed taichi.\n")
+            self.ui.status_label.setText("Taichi Installed!")
+            if hasattr(self.ui, 'install_taichi_button'):
+                self.ui.install_taichi_button.setText("Installed")
+            
+            QtGui.QMessageBox.information(self.ui, "Success", "Taichi installed successfully!\nPlease restart FreeCAD to ensure it loads correctly.")
+            
+        except subprocess.CalledProcessError as e:
+            FreeCAD.Console.PrintError(f"Failed to install taichi: {e}\n")
+            self.ui.status_label.setText("Installation Failed")
+            if hasattr(self.ui, 'install_taichi_button'):
+                self.ui.install_taichi_button.setEnabled(True)
+            QtGui.QMessageBox.critical(self.ui, "Error", f"Failed to install taichi.\nCheck the Report View for details.\n\nError: {e}")
+        except Exception as e:
+            FreeCAD.Console.PrintError(f"Error installing taichi: {e}\n")
+            self.ui.status_label.setText("Error")
+            if hasattr(self.ui, 'install_taichi_button'):
+                self.ui.install_taichi_button.setEnabled(True)
+
+

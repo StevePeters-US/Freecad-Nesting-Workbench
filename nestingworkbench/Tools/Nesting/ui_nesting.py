@@ -133,6 +133,20 @@ class NestingPanel(QtGui.QWidget):
         self.clear_cache_checkbox.setChecked(False)
         self.clear_cache_checkbox.setToolTip("Forces recalculation of No-Fit Polygons. Slower, but resolves potential caching issues.")
         minkowski_form_layout.addRow(self.clear_cache_checkbox)
+
+        # GPU Acceleration Checkbox
+        gpu_layout = QtGui.QHBoxLayout()
+        self.use_gpu_checkbox = QtGui.QCheckBox("Enable GPU Acceleration (Experimental)")
+        self.use_gpu_checkbox.setChecked(False) 
+        self.use_gpu_checkbox.setToolTip("Uses Vector-based GPU acceleration (Taichi) for NFP calculation. Requires 'taichi' library.")
+        gpu_layout.addWidget(self.use_gpu_checkbox)
+        
+        self.install_taichi_button = QtGui.QPushButton("Install Taichi")
+        self.install_taichi_button.setToolTip("Installs 'taichi' library to the current Python environment.")
+        self.install_taichi_button.setMaximumWidth(100)
+        gpu_layout.addWidget(self.install_taichi_button)
+        
+        minkowski_form_layout.addRow(gpu_layout)
         
         # Genetic options for Minkowski
         self.minkowski_population_size_input = QtGui.QSpinBox()
@@ -263,6 +277,17 @@ class NestingPanel(QtGui.QWidget):
         self.show_bounds_checkbox.stateChanged.connect(self.controller.toggle_bounds_visibility)
         self.add_parts_button.clicked.connect(self.controller.add_selected_shapes)
         self.remove_parts_button.clicked.connect(self.controller.remove_selected_shapes)
+        
+        # Connect Taichi install button
+        if hasattr(self, 'install_taichi_button'):
+            self.install_taichi_button.clicked.connect(self.controller.install_taichi)
+            # Check availability to disable/enable
+            try:
+                import taichi
+                self.install_taichi_button.setEnabled(False)
+                self.install_taichi_button.setText("Installed")
+            except ImportError:
+                self.install_taichi_button.setEnabled(True)
         
         # Load persisted settings after all widgets are created
         self.load_persisted_settings()
@@ -406,27 +431,35 @@ class NestingPanel(QtGui.QWidget):
                 deflection_angle = 30  # Default
         self.deflection_input.setValue(deflection_angle)
         self.simplification_input.setValue(prefs.GetFloat("Simplification", 1.0))
+        self.use_gpu_checkbox.setChecked(prefs.GetBool("UseGPU", False))
         
     def update_progress(self, current, total, message=None):
         """Updates the progress bar."""
-        if total > 0:
-            percentage = int((float(current) / float(total)) * 100)
-            self.progressBar.setValue(percentage)
-            self.progressBar.setVisible(True)
-            
-            if message:
-                self.progressBar.setFormat(f"%p% - {message}")
+        try:
+            if total > 0:
+                percentage = int((float(current) / float(total)) * 100)
+                self.progressBar.setValue(percentage)
+                self.progressBar.setVisible(True)
+                
+                if message:
+                    self.progressBar.setFormat(f"%p% - {message}")
+                else:
+                    self.progressBar.setFormat("%p%")
+                
+                # Force UI update
+                QtGui.QApplication.processEvents()
             else:
-                self.progressBar.setFormat("%p%")
-            
-            # Force UI update
-            QtGui.QApplication.processEvents()
-        else:
-            self.progressBar.setValue(0)
-            self.progressBar.setVisible(False)
+                self.progressBar.setValue(0)
+                self.progressBar.setVisible(False)
+        except RuntimeError:
+            pass # Widget deleted
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"UI Update Error: {e}\n")
 
     def reset_progress(self):
         """Resets and hides the progress bar."""
-        self.progressBar.setValue(0)
-        self.progressBar.setVisible(False)
+        try:
+            self.progressBar.setValue(0)
+            self.progressBar.setVisible(False)
+        except RuntimeError: pass
         

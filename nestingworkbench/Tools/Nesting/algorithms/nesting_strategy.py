@@ -194,8 +194,11 @@ class Nester:
         self.part_end_callback = kwargs.get("part_end_callback")  # Called after part is placed
         self.progress_callback = kwargs.get("progress_callback") # Called with (current, total)
         
+        self.progress_callback = kwargs.get("progress_callback") # Called with (current, total)
+        
         step_size = kwargs.get("step_size", 5.0) 
-        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback)
+        use_gpu = kwargs.get("use_gpu", False)
+        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, use_gpu=use_gpu)
         self.optimizer = PlacementOptimizer(self.engine, rotation_steps, self.search_direction, self.log_callback, self.trial_callback)
 
         self.parts_to_place = []
