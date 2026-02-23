@@ -87,15 +87,25 @@ class NestingPanel(QtGui.QWidget):
         self.shape_table.setColumnCount(6)
         self.shape_table.setHorizontalHeaderLabels(["Shape", "Quantity", "Rotations", "Override", "Up Dir", "Fill"])
 
-        # --- Global Rotation Slider ---
+        # --- Discrete Rotation Slider ---
+        # Angles: 360 (1 step), 180 (2), 120 (3), 90 (4), 45 (8), 30 (12), 15 (24), 10 (36), 5 (72), 1 (360)
+        self.rotation_angles = [360, 180, 120, 90, 45, 30, 15, 10, 5, 1]
+        
         self.rotation_steps_slider = QtGui.QSlider(QtCore.Qt.Horizontal)
-        self.rotation_steps_slider.setRange(1, 360) # Minimum 1 rotation step
-        self.rotation_steps_slider.setValue(1)     # Default to 1 rotation step
-        self.rotation_steps_spinbox = QtGui.QSpinBox()
-        self.rotation_steps_spinbox.setRange(1, 360) # Minimum 1 rotation step
-        self.rotation_steps_spinbox.setValue(1)     # Default to 1 rotation step
-        self.rotation_steps_spinbox.valueChanged.connect(self.rotation_steps_slider.setValue)
-        self.rotation_steps_slider.valueChanged.connect(self.rotation_steps_spinbox.setValue)
+        self.rotation_steps_slider.setRange(0, len(self.rotation_angles) - 1) 
+        self.rotation_steps_slider.setValue(0) # Default to 360 (1 step)
+        self.rotation_steps_slider.setTickPosition(QtGui.QSlider.TicksBelow)
+        self.rotation_steps_slider.setTickInterval(1)
+        self.rotation_steps_slider.setSingleStep(1)
+        self.rotation_steps_slider.setPageStep(1)
+        
+        self.rotation_display_label = QtGui.QLabel("360° (1 step)")
+        self.rotation_display_label.setFixedWidth(100) # Prevent jumping layout
+        self.rotation_display_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+
+        self.rotation_steps_slider.valueChanged.connect(self._update_rotation_label)
+        
+
 
 
         # --- Minkowski Packer Settings ---
@@ -227,7 +237,7 @@ class NestingPanel(QtGui.QWidget):
         
         rotation_layout = QtGui.QHBoxLayout()
         rotation_layout.addWidget(self.rotation_steps_slider)
-        rotation_layout.addWidget(self.rotation_steps_spinbox)
+        rotation_layout.addWidget(self.rotation_display_label)
         form_layout.addRow("Global Rotation Steps:", rotation_layout)
 
         form_layout.addRow(self.simulate_nesting_checkbox)
@@ -433,6 +443,19 @@ class NestingPanel(QtGui.QWidget):
         self.simplification_input.setValue(prefs.GetFloat("Simplification", 1.0))
         self.use_gpu_checkbox.setChecked(prefs.GetBool("UseGPU", False))
         
+        # Load Rotation Steps
+        rot_steps = prefs.GetInt("RotationSteps", 0)
+        if rot_steps > 0:
+            target_angle = 360.0 / rot_steps
+            closest_idx = 0
+            min_diff = float('inf')
+            for i, angle in enumerate(self.rotation_angles):
+                diff = abs(angle - target_angle)
+                if diff < min_diff:
+                    min_diff = diff
+                    closest_idx = i
+            self.rotation_steps_slider.setValue(closest_idx)
+        
     def update_progress(self, current, total, message=None):
         """Updates the progress bar."""
         try:
@@ -455,6 +478,12 @@ class NestingPanel(QtGui.QWidget):
             pass # Widget deleted
         except Exception as e:
             FreeCAD.Console.PrintWarning(f"UI Update Error: {e}\n")
+
+    def _update_rotation_label(self, value):
+        """Updates the rotation label when slider changes."""
+        angle = self.rotation_angles[value]
+        steps = int(360 / angle)
+        self.rotation_display_label.setText(f"{angle}° ({steps} steps)")
 
     def reset_progress(self):
         """Resets and hides the progress bar."""

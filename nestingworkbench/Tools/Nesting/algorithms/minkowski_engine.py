@@ -167,6 +167,9 @@ class MinkowskiEngine:
                 return cached_nfp_data
 
         try:
+            # DEBUG LOGGING
+            self.log(f"Calculating NFP on CPU for {cache_key}")
+            
             poly_A_master = shape_A.original_polygon
             poly_B_master = part_to_place.original_polygon
             
@@ -254,6 +257,9 @@ class MinkowskiEngine:
                  return cached_nfp_data
         
         try:
+            # DEBUG LOGGING
+            self.log(f"Calculating NFP on GPU (Taichi) for {cache_key}")
+
             poly_A_master = shape_A.original_polygon
             poly_B_master = part_to_place.original_polygon
             

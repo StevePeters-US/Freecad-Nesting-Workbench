@@ -409,8 +409,20 @@ class NestingController:
             )
             
             # Load Global Rotation Steps if present
+            # Load Global Rotation Steps if present
             if hasattr(layout_group, "GlobalRotationSteps"):
-                self.ui.rotation_steps_spinbox.setValue(layout_group.GlobalRotationSteps)
+                steps = layout_group.GlobalRotationSteps
+                if steps > 0:
+                    target_angle = 360.0 / steps
+                    # Find closest angle in self.ui.rotation_angles
+                    closest_idx = 0
+                    min_diff = float('inf')
+                    for i, angle in enumerate(self.ui.rotation_angles):
+                        diff = abs(angle - target_angle)
+                        if diff < min_diff:
+                            min_diff = diff
+                            closest_idx = i
+                    self.ui.rotation_steps_slider.setValue(closest_idx)
         else:
             FreeCAD.Console.PrintMessage(f"  WARNING: No MasterShapes group found!\n")
             self.ui.status_label.setText("Warning: Could not find 'MasterShapes' group in the selected layout.")
@@ -969,7 +981,8 @@ class NestingController:
             'deflection': deflection_mm,  # Linear deflection for processing
             'deflection_angle': deflection_angle,  # Angle for persistence
             'simplification': self.ui.simplification_input.value(),
-            'rotation_steps': self.ui.rotation_steps_spinbox.value(),
+            # Convert slider index to rotation steps
+            'rotation_steps': int(360 / self.ui.rotation_angles[self.ui.rotation_steps_slider.value()]),
             'add_labels': self.ui.add_labels_checkbox.isChecked(),
             'font_path': getattr(self.ui, 'selected_font_path', None),
             'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
