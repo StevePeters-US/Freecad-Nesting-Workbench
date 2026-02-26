@@ -29,27 +29,6 @@
 
 ---
 
-### TASK-002: Fix `algo_kwargs` vs `current_algo_kwargs` bug in GA nesting
-
-| Field       | Value |
-|-------------|-------|
-| Complexity  | Low |
-| Component   | `nestingworkbench/Tools/Nesting/nesting_controller.py` |
-
-**Context** — In `_execute_ga_nesting()`, line ~677 creates `current_algo_kwargs` by copying `algo_kwargs` and removing `progress_callback` for GA mode. However, line ~690 passes the original `algo_kwargs` (with the callback still present) to `nest()` instead of `current_algo_kwargs`. This means the progress-callback suppression for GA mode never actually takes effect.
-
-**What to do**
-
-1. Open `nesting_controller.py`, find `_execute_ga_nesting()`.
-2. On line ~690, change `**algo_kwargs` to `**current_algo_kwargs`.
-
-**Acceptance criteria**
-
-1. In GA mode (population > 1 or generations > 1), per-part progress spam is suppressed.
-2. In single-run mode (pop=1, gen=1), granular progress still works.
-
----
-
 ### TASK-003: Remove duplicate `progress_callback` assignment in `Nester`
 
 | Field       | Value |

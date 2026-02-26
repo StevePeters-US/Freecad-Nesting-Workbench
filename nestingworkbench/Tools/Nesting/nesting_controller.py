@@ -678,6 +678,7 @@ class NestingController:
                     if population_size > 1 or generations > 1:
                          # In GA mode, don't spam the fine-grained progress bar, 
                          # just use the status label updates we already have in the loop.
+                         current_algo_kwargs['quiet'] = True
                          if 'progress_callback' in current_algo_kwargs:
                              del current_algo_kwargs['progress_callback']
                     
@@ -687,7 +688,7 @@ class NestingController:
                         ui_params['sheet_height'],
                         rotation_steps,
                         is_simulating,
-                        **algo_kwargs
+                        **current_algo_kwargs
                     )
 
                     # FIX: If not simulating, we need to manually apply the placement
