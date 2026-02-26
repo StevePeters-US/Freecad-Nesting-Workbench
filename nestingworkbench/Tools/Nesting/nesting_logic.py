@@ -62,7 +62,7 @@ def _cleanup_trial_viz():
             doc = FreeCAD.ActiveDocument
             if doc and _trial_viz_obj.Name in [o.Name for o in doc.Objects]:
                 doc.removeObject(_trial_viz_obj.Name)
-        except:
+        except Exception:
             pass
         _trial_viz_obj = None
     
@@ -74,9 +74,9 @@ def _cleanup_trial_viz():
             for name in to_remove:
                 try:
                     doc.removeObject(name)
-                except:
+                except Exception:
                     pass
-    except:
+    except Exception:
         pass
 
 # --- Master Shape Highlighting ---

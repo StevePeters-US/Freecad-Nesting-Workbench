@@ -370,7 +370,7 @@ class NestingPanel(QtGui.QWidget):
             default_font_dir = os.path.join(workbench_root, "fonts")
             if not os.path.isdir(default_font_dir):
                 default_font_dir = "" # Fallback if fonts dir doesn't exist
-        except:
+        except Exception:
             default_font_dir = "" # Fallback on any error
 
         file_dialog_result = QtGui.QFileDialog.getOpenFileName(

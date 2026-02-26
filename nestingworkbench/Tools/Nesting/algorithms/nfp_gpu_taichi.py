@@ -13,13 +13,13 @@ if TAICHI_AVAILABLE:
     # We use cpu fallback to avoid crashing if no GPU is found, but ideally we want gpu
     try:
         ti.init(arch=ti.vulkan)
-    except:
+    except Exception:
         try:
             ti.init(arch=ti.cuda)
-        except:
+        except Exception:
              try:
                 ti.init(arch=ti.opengl)
-             except:
+             except Exception:
                 ti.init(arch=ti.cpu)
 
 def is_available():

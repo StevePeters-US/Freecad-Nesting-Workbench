@@ -29,51 +29,6 @@
 
 ---
 
-### TASK-003: Remove duplicate `progress_callback` assignment in `Nester`
-
-| Field       | Value |
-|-------------|-------|
-| Complexity  | Low |
-| Component   | `nestingworkbench/Tools/Nesting/algorithms/nesting_strategy.py` |
-
-**Context** — In `Nester.__init__()`, `self.progress_callback` is assigned twice on consecutive lines (lines 195 and 197). The second assignment overwrites the first. This is harmless but confusing.
-
-**What to do**
-
-1. Open `nesting_strategy.py`, find `Nester.__init__()`.
-2. Delete the duplicate `self.progress_callback = kwargs.get("progress_callback")` on line 197 (keep line 195).
-
-**Acceptance criteria**
-
-1. Only one `self.progress_callback` assignment exists in `__init__`.
-
----
-
-### TASK-004: Replace bare `except:` blocks with specific exception types
-
-| Field       | Value |
-|-------------|-------|
-| Complexity  | Low |
-| Component   | Multiple files |
-
-**Context** — Several files use bare `except:` (no exception type), which swallows all errors silently, including `KeyboardInterrupt` and `SystemExit`. These make debugging extremely difficult.
-
-**What to do**
-
-1. Search the entire project for `except:` (exactly, with no type after it).
-2. Locations include:
-   - `nesting_logic.py` lines 54, 65–66, 78–79 — change to `except Exception:`.
-   - `nesting_controller.py` line 895 — change to `except Exception:`.
-   - `transform_tool.py` line 178 — change to `except Exception:`.
-3. For each, replace `except:` with `except Exception:` (or a more specific type if obvious from context).
-
-**Acceptance criteria**
-
-1. Zero bare `except:` blocks remain in the codebase.
-2. `KeyboardInterrupt` and `SystemExit` are no longer silently caught.
-
----
-
 ### TASK-005: Implement `_ensure_target_layout()` selection inference
 
 | Field       | Value |
@@ -498,3 +453,51 @@ This task is a full redesign. Rename to "Manual Nester" and rebuild the tool to 
 1. A user can select a closed wire/sketch, click "Use Selected Wire", and nest parts inside it.
 2. Parts are placed only within the custom boundary (no overlap with edges).
 3. The custom boundary is drawn in the FreeCAD 3D view.
+
+---
+
+### TASK-017: Add a "Cancel" button to interrupt nesting
+
+| Field       | Value                |
+|-------------|----------------------|
+| Complexity  | Medium               |
+| Component   | `nestingworkbench/Tools/Nesting/ui_nesting.py`, `nesting_controller.py` |
+
+**Context** — Once a large nesting run starts (especially with GA), there's no way to stop it without force-closing FreeCAD. We need a "Cancel" button that is active during the run.
+
+**What to do**
+
+1. Modify the `NestingPanel` to have a `cancel_button` (hidden by default or shown next to "Run Nesting").
+2. Connect it to a `stop_flag` in the `NestingController`.
+3. In `_run_nesting()`, and especially in the `_execute_ga_nesting()` loop, check `self.interrupted` and break if true.
+4. Cleanly handle the UI cleanup when a run is interrupted.
+
+**Acceptance criteria**
+
+1. A "Cancel" button is available during the nesting process.
+2. Clicking the button stops the calculation within 1-2 seconds.
+3. The UI returns to a clean state without crashing.
+
+---
+
+### TASK-018: Add Shapely install instructions and toolbar dependency installer
+
+| Field       | Value                |
+|-------------|----------------------|
+| Complexity  | Low / Medium         |
+| Component   | `nestingworkbench/InitGui.py`, `nestingworkbench/Tools/CheckDeps/` |
+
+**Context** — Shapely is a hard dependency, and Taichi is optional for GPU features. Many users struggle to install these in FreeCAD's internal Python environment. We should provide a way to install them directly from the FreeCAD toolbar.
+
+**What to do**
+
+1. Create a "Check/Install Dependencies" command in the Nesting toolbar.
+2. The command should detect missing libraries (`shapely`, `taichi`, `numpy`).
+3. If missing, offer a "One-Click Install" button that runs `pip install` using FreeCAD's Python executable.
+4. Provide a fallback help dialog with manual install instructions for different OSs (Windows/Linux/OSX).
+
+**Acceptance criteria**
+
+1. A dependency checker is available in the top toolbar.
+2. It can successfully install `shapely` and `taichi` in a clean environment.
+3. Troubleshooting text is provided for manual installation.
