@@ -41,3 +41,24 @@ Archive of completed tasks. Move tasks here from `TODO.md` when they are done.
 1. Identified bare `except:` blocks in `ui_nesting.py`, `nesting_logic.py`, and `nfp_gpu_taichi.py`.
 2. Replaced them with `except Exception:`.
 </details>
+
+- [x] **TASK-014**: Add unit tests for core algorithmic code (**2026-02-26**)
+
+<details>
+<summary>Details</summary>
+
+| Field       | Value |
+|-------------|-------|
+| Complexity  | High |
+| Component   | `tests/` directory |
+
+**Context** — Added a comprehensive testing suite for the core algorithms, using a mock FreeCAD environment to allow tests to run without the full application.
+
+**What was done**
+
+1. Created `tests/conftest.py` with mock `FreeCAD`, `FreeCADGui`, and `Part` modules and Shapely fixtures.
+2. Implemented `tests/test_minkowski_utils.py` for decomposition and Minkowski operations.
+3. Implemented `tests/test_genetic_utils.py` for GA operators (crossover, mutation, selection).
+4. Implemented `tests/test_shape.py` for the `Shape` class geometry and state management.
+5. Verified all 14 tests pass with `pytest`.
+</details>

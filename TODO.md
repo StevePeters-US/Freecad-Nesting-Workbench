@@ -350,50 +350,6 @@ This task is a full redesign. Rename to "Manual Nester" and rebuild the tool to 
 
 ---
 
-### TASK-014: Add unit tests for core algorithmic code
-
-| Field       | Value |
-|-------------|-------|
-| Complexity  | High |
-| Component   | `tests/` (new directory) |
-
-**Context** — There are currently zero automated tests. The algorithmic core (Minkowski, NFP, GA, Shape) can be tested independently of FreeCAD by operating on raw Shapely polygons, making FreeCAD mocking unnecessary for most tests.
-
-**What to do**
-
-1. Create a `tests/` directory at the project root.
-2. Create `tests/conftest.py` with common test fixtures:
-   - A mock `FreeCAD` module (minimal: `Console.PrintMessage = print`, `Vector`, `Rotation`, `Placement`).
-   - Helper functions to create simple Shapely rectangles and L-shapes.
-3. Create the following test files:
-
-   **`tests/test_minkowski_utils.py`**:
-   - Test `minkowski_sum_convex` with two unit squares → result is a 2×2 square centered at (1,1).
-   - Test `decompose_if_needed` with a convex polygon → returns itself; with an L-shape → returns triangles.
-   - Test `minkowski_difference_convex` that a large square eroded by a small one has positive area.
-
-   **`tests/test_genetic_utils.py`**:
-   - Test `ordered_crossover` preserves all part IDs (no duplicates, no missing).
-   - Test `mutate_chromosome` modifies at least one part (with high mutation rate).
-   - Test `tournament_selection` returns a valid chromosome from the population.
-
-   **`tests/test_shape.py`** (mock FreeCAD):
-   - Test `Shape.set_rotation()` rotates the polygon correctly.
-   - Test `Shape.move()` translates the polygon.
-   - Test `Shape.bounding_box()` returns correct `(minx, miny, width, height)`.
-   - Test `Shape.area` matches the Shapely polygon's area.
-
-4. Add a `pytest.ini` or `pyproject.toml` section so `pytest` discovers the `tests/` directory.
-5. Ensure tests can run with `python -m pytest tests/` without FreeCAD installed (mock the import).
-
-**Acceptance criteria**
-
-1. `pytest tests/` passes with ≥ 15 test cases.
-2. Tests run without a FreeCAD installation.
-3. Each test file covers at least the functions listed above.
-
----
-
 ### TASK-015: Implement undo/redo transaction support
 
 | Field       | Value |
