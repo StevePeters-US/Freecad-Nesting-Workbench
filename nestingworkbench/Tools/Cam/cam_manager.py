@@ -258,11 +258,6 @@ class CAMManager:
                 self.doc.recompute()
                 
                 FreeCAD.Console.PrintMessage(f"Created CAM job '{job.Label}' for {sheet_group.Label} (stock: {sheet_width}x{sheet_height}x{sheet_thickness}mm)\\n")
-                
-                # Recompute to finalize the job
-                self.doc.recompute()
-                
-                FreeCAD.Console.PrintMessage(f"Created CAM job '{job.Label}' for {sheet_group.Label} (stock: {sheet_width}x{sheet_height}x{sheet_thickness}mm)\\n")
             else:
                 FreeCAD.Console.PrintError("Failed to create CAM job.\\n")
                 

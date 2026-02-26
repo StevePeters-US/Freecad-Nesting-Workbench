@@ -29,28 +29,6 @@
 
 ---
 
-### TASK-001: Fix duplicate code in `cam_manager.py`
-
-| Field       | Value |
-|-------------|-------|
-| Complexity  | Low |
-| Component   | `nestingworkbench/Tools/Cam/cam_manager.py` |
-
-**Context** — `_create_job_for_sheet()` has copy-paste duplication at the end of the function. Lines ~258–265 contain two identical `self.doc.recompute()` calls and two identical `FreeCAD.Console.PrintMessage(...)` lines, causing every CAM job to print its success message twice and recompute twice.
-
-**What to do**
-
-1. Open `cam_manager.py`, go to `_create_job_for_sheet()`.
-2. Find the two consecutive blocks near the end that both call `self.doc.recompute()` followed by `FreeCAD.Console.PrintMessage(f"Created CAM job...")`.
-3. Delete the second occurrence of both lines (keep one `recompute()` and one `PrintMessage`).
-
-**Acceptance criteria**
-
-1. Only one `doc.recompute()` call remains after CAM job setup.
-2. Only one `PrintMessage` confirmation prints per sheet.
-
----
-
 ### TASK-002: Fix `algo_kwargs` vs `current_algo_kwargs` bug in GA nesting
 
 | Field       | Value |
