@@ -1,23 +1,23 @@
 import FreeCAD
 import FreeCADGui
-from nestingworkbench.Tools.Transform import transform_panel_manager
+from nestingworkbench.Tools.ManualNester import manual_nester_panel_manager
 
-class TransformPartsCommand:
-    """The command to manually transform parts in a layout."""
+class ManualNesterCommand:
+    """The command to manually nest parts in a layout."""
     _task_panel = None
     
     def GetResources(self):
         return {
-            'Pixmap': 'Transform_Icon.png',
-            'MenuText': 'Transform Parts',
-            'ToolTip': 'Activates a tool to manually transform parts in the selected layout.'
+            'Pixmap': 'Transform_Icon.png', # Keeping icon for now
+            'MenuText': 'Manual Nester',
+            'ToolTip': 'Activates a tool to manually nest parts in the selected layout.'
         }
 
     def Activated(self):
         """This method is executed when the command is activated."""
         view = FreeCADGui.ActiveDocument.ActiveView
-        if TransformPartsCommand._task_panel is None:
-            TransformPartsCommand._task_panel = transform_panel_manager.TransformTaskPanel(view)
+        if ManualNesterCommand._task_panel is None:
+            ManualNesterCommand._task_panel = manual_nester_panel_manager.ManualNesterTaskPanel(view)
 
     def IsActive(self):
         """Active only if a document is open and a layout group is selected."""
@@ -31,4 +31,4 @@ class TransformPartsCommand:
 
 
 if FreeCAD.GuiUp:
-    FreeCADGui.addCommand('Nesting_TransformParts', TransformPartsCommand())
+    FreeCADGui.addCommand('Nesting_ManualNester', ManualNesterCommand())

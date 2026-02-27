@@ -62,3 +62,28 @@ Archive of completed tasks. Move tasks here from `TODO.md` when they are done.
 4. Implemented `tests/test_shape.py` for the `Shape` class geometry and state management.
 5. Verified all 14 tests pass with `pytest`.
 </details>
+---
+
+### TASK-019: Manual Nester Axis Constraints (Blender-style)
+
+| Field       | Value                |
+|-------------|----------------------|
+| Complexity  | Medium               |
+| Component   | `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` |
+
+**Context** — To improve precision during manual nesting, we want a control scheme similar to Blender. Users should be able to constrain movement to the X or Y axis using keyboard shortcuts.
+
+**What to do**
+
+- [x] Implement `Shift + X` to constrain translation to the X-axis.
+- [x] Implement `Shift + Y` to constrain translation to the Y-axis.
+- [x] Update the `ManualNesterToolObserver` to handle these modifiers.
+- [x] Provide visual feedback (axis lines) when constraints are active.
+
+**Acceptance criteria**
+
+- [x] Pressing `Shift+X` during a "Grab" (G) operation limits movement to the X axis.
+- [x] Pressing `Shift+Y` limits movement to the Y axis.
+- [x] Pressing the key again or Esc clears the constraint.
+
+---

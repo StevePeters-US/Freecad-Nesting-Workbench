@@ -1,20 +1,20 @@
-# Nesting/nestingworkbench/Tools/Transform/transform_panel_manager.py
+# Nesting/nestingworkbench/Tools/ManualNester/manual_nester_panel_manager.py
 
 """
-This module contains the TransformTaskPanel class, which is responsible for
+This module contains the ManualNesterTaskPanel class, which is responsible for
 creating, showing, and managing the lifecycle of the FreeCAD Task Panel
-for the manual transform tool.
+for the manual nester tool.
 """
 
 import FreeCADGui
-from .ui_transform import TransformToolUI
-from .transform_tool import TransformToolObserver
+from .ui_manual_nester import ManualNesterToolUI
+from .manual_nester_tool import ManualNesterToolObserver
 
-class TransformTaskPanel:
-    """Manages the FreeCAD Task Panel dialog for the transform tool."""
+class ManualNesterTaskPanel:
+    """Manages the FreeCAD Task Panel dialog for the manual nester tool."""
     def __init__(self, view):
-        self.form = TransformToolUI()
-        self.observer = TransformToolObserver(view, self)
+        self.form = ManualNesterToolUI()
+        self.observer = ManualNesterToolObserver(view, self)
         self.task_widget = FreeCADGui.Control.showDialog(self)
 
     def accept(self):
@@ -37,5 +37,5 @@ class TransformTaskPanel:
             self.observer.cleanup()
         # Use an absolute import from the workbench's root package 'Nesting'
         # to break a potential circular dependency.
-        from nesting_commands.command_transform_parts import TransformPartsCommand
-        TransformPartsCommand._task_panel = None
+        from nesting_commands.command_manual_nester import ManualNesterCommand
+        ManualNesterCommand._task_panel = None

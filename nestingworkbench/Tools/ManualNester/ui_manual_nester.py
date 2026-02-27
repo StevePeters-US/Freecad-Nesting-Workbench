@@ -1,19 +1,19 @@
-# Nesting/nestingworkbench/Tools/Transform/ui_transform.py
+# Nesting/nestingworkbench/Tools/ManualNester/ui_manual_nester.py
 
 """
-This module contains the TransformToolUI class, which defines the user interface
-for the transform tool task panel.
+This module contains the ManualNesterToolUI class, which defines the user interface
+for the manual nester tool task panel.
 """
 
 from PySide import QtGui
 
-class TransformToolUI(QtGui.QWidget):
+class ManualNesterToolUI(QtGui.QWidget):
     """
-    Defines the user interface for the transform tool task panel.
+    Defines the user interface for the manual nester tool task panel.
     """
     def __init__(self, parent=None):
-        super(TransformToolUI, self).__init__(parent)
-        self.setWindowTitle("Transform Tool")
+        super(ManualNesterToolUI, self).__init__(parent)
+        self.setWindowTitle("Manual Nester")
         self.initUI()
 
     def initUI(self):

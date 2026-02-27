@@ -99,11 +99,7 @@ This has several problems:
 
 1. In `layout_manager.py`, replace `calculate_efficiency()` with a normalized, multi-objective fitness function. Design with these components:
 
-   a. **Density score** (0–1): `total_parts_area / total_sheet_area`. Higher = better.
-   b. **Free-space penalty** (0–1): On the last sheet, compute `used_bounding_box_area / sheet_area`. The closer to the density score, the less wasted space. Penalize wide gaps between placed parts and the sheet edges.
-   c. **Edge contact ratio** (0–1): For each pair of adjacent parts, compute the length of _shared boundary_ (edges within `spacing` distance that are approximately collinear). Divide by `total_perimeter / 2` to normalize. Higher = better.
-
-2. Combine into: `fitness = -(w_density * density + w_freespace * (1 - freespace_waste) + w_contact * contact_ratio)`. Negative because lower fitness = better. Expose weights as constants at the top of the file (default: `w_density=0.5`, `w_freespace=0.2`, `w_contact=0.3`).
+---
 
 3. In `_calculate_contact_score()`:
    - Replace the 0.5mm hardcoded buffer with `self.spacing` (or pass spacing as a parameter).

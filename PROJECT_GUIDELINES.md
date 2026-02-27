@@ -275,3 +275,21 @@ FreeCAD's object model is **reference‑based**; objects can be deleted by other
 * **Background threading** – move GA loop to a worker thread with progress bar.
 * **Undo integration** – leverage FreeCAD's transaction system for proper undo.
 * **Post‑nesting compaction** – slide parts toward each other after GA placement.
+
+---
+
+## 13 · Manual Nester Controls
+
+The **Manual Nester** uses a Blender-inspired control scheme for efficient part arrangement:
+
+| Key | Action |
+|-----|--------|
+| **G** | **Grab/Translate** – Start moving the selected part with the mouse. |
+| **R** | **Rotate** – Start rotating the selected part based on mouse X-delta. |
+| **Shift + X** | **X-Constraint** – Toggle movement constraint to the X-axis during translation. |
+| **Shift + Y** | **Y-Constraint** – Toggle movement constraint to the Y-axis during translation. |
+| **L-Click / Enter** | **Confirm** – Apply the current translation/rotation. |
+| **Esc / R-Click** | **Cancel** – Revert the part to its previous placement. |
+| **Ctrl (Hold)** | **Snap** – Enable snapping (45° for rotation, Grid for translation). |
+
+---
