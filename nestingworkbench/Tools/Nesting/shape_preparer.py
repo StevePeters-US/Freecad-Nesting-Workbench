@@ -318,68 +318,11 @@ class ShapePreparer:
             )
         
         if is_2d_object:
-            # For Draft/2D objects, rebuild shape by transforming each edge's curve parameters.
-            # OCCT parametric curves (Geom_Circle) don't transform via transformGeometry,
-            # so we reconstruct them at the correct position preserving smooth curves.
             plc = master_obj.Placement
             offset = FreeCAD.Vector(center_point.x, center_point.y, center_point.z)
-            try:
-                new_edges = []
-                for edge in original_shape.Edges:
-                    curve = edge.Curve
-                    if hasattr(curve, 'Radius') and hasattr(curve, 'Center'):
-                        # Circle or Arc: transform center, preserve radius and smoothness
-                        world_center = plc.multVec(curve.Center)
-                        new_center = world_center - offset
-                        new_axis = plc.Rotation.multVec(curve.Axis)
-                        if edge.isClosed():
-                            new_edges.append(Part.makeCircle(curve.Radius, new_center, new_axis))
-                        else:
-                            c = Part.Circle(new_center, new_axis, curve.Radius)
-                            new_edges.append(c.toShape(edge.FirstParameter, edge.LastParameter))
-                    elif len(edge.Vertexes) >= 2:
-                        # Line: transform endpoints
-                        p1 = plc.multVec(edge.Vertexes[0].Point) - offset
-                        p2 = plc.multVec(edge.Vertexes[1].Point) - offset
-                        new_edges.append(Part.makeLine(p1, p2))
-                    else:
-                        # Fallback: discretize unknown curve types
-                        pts = edge.discretize(Number=72)
-                        transformed = [plc.multVec(p) - offset for p in pts]
-                        for i in range(len(transformed) - 1):
-                            new_edges.append(Part.makeLine(transformed[i], transformed[i + 1]))
-                
-                if new_edges:
-                    wire = Part.Wire(new_edges)
-                    try:
-                        original_shape = Part.Face(wire)
-                    except Exception:
-                        original_shape = Part.Compound([wire])
-                    if verbose:
-                        FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
-            except Exception as e:
-                FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
-                # Fallback: discretize to polygon
-                new_wires = []
-                for wire in master_obj.Shape.Wires:
-                    pts = wire.discretize(Number=72)
-                    if len(pts) > 2:
-                        transformed = [plc.multVec(p) - offset for p in pts]
-                        if transformed[0] != transformed[-1]:
-                            transformed.append(transformed[0])
-                        new_wires.append(Part.makePolygon(transformed))
-                if new_wires:
-                    try:
-                        original_shape = Part.Face(new_wires[0])
-                    except Exception:
-                        original_shape = Part.Compound(new_wires)
+            original_shape = self._rebuild_2d_shape(master_obj, original_shape, center_point, plc, offset, verbose, label)
         else:
-            # Regular Part objects: use combined transformGeometry (Placement + centering)
-            combined_mat = FreeCAD.Matrix()
-            combined_mat.move(center_point.negative())
-            if master_obj.Placement and not master_obj.Placement.isIdentity():
-                combined_mat = combined_mat.multiply(master_obj.Placement.Matrix)
-            original_shape = original_shape.transformGeometry(combined_mat)
+            original_shape = self._center_3d_shape(master_obj, original_shape, center_point)
         
         master_shape_obj.Shape = original_shape
         
@@ -394,6 +337,76 @@ class ShapePreparer:
             master_shape_obj.ViewObject.Visibility = True
         master_container.addObject(master_shape_obj)
 
+        self._create_boundary_object(master_container, master_shape_obj, temp_shape_wrapper, verbose)
+        
+        master_shapes_group.addObject(master_container)
+        return master_shape_obj, temp_shape_wrapper
+
+    def _rebuild_2d_shape(self, master_obj, original_shape, center_point, plc, offset, verbose, label):
+        """Rebuilds 2D shape by transforming each edge's curve parameters to preserve smooth curves."""
+        try:
+            new_edges = []
+            for edge in original_shape.Edges:
+                curve = edge.Curve
+                if hasattr(curve, 'Radius') and hasattr(curve, 'Center'):
+                    # Circle or Arc: transform center, preserve radius and smoothness
+                    world_center = plc.multVec(curve.Center)
+                    new_center = world_center - offset
+                    new_axis = plc.Rotation.multVec(curve.Axis)
+                    if edge.isClosed():
+                        new_edges.append(Part.makeCircle(curve.Radius, new_center, new_axis))
+                    else:
+                        c = Part.Circle(new_center, new_axis, curve.Radius)
+                        new_edges.append(c.toShape(edge.FirstParameter, edge.LastParameter))
+                elif len(edge.Vertexes) >= 2:
+                    # Line: transform endpoints
+                    p1 = plc.multVec(edge.Vertexes[0].Point) - offset
+                    p2 = plc.multVec(edge.Vertexes[1].Point) - offset
+                    new_edges.append(Part.makeLine(p1, p2))
+                else:
+                    # Fallback: discretize unknown curve types
+                    pts = edge.discretize(Number=72)
+                    transformed = [plc.multVec(p) - offset for p in pts]
+                    for i in range(len(transformed) - 1):
+                        new_edges.append(Part.makeLine(transformed[i], transformed[i + 1]))
+            
+            if new_edges:
+                wire = Part.Wire(new_edges)
+                try:
+                    rebuilt_shape = Part.Face(wire)
+                except Exception:
+                    rebuilt_shape = Part.Compound([wire])
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
+                return rebuilt_shape
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
+            # Fallback: discretize to polygon
+            new_wires = []
+            for wire in master_obj.Shape.Wires:
+                pts = wire.discretize(Number=72)
+                if len(pts) > 2:
+                    transformed = [plc.multVec(p) - offset for p in pts]
+                    if transformed[0] != transformed[-1]:
+                        transformed.append(transformed[0])
+                    new_wires.append(Part.makePolygon(transformed))
+            if new_wires:
+                try:
+                    return Part.Face(new_wires[0])
+                except Exception:
+                    return Part.Compound(new_wires)
+        return original_shape
+
+    def _center_3d_shape(self, master_obj, original_shape, center_point):
+        """Centers regular Part objects using combined transformGeometry (Placement + centering)."""
+        combined_mat = FreeCAD.Matrix()
+        combined_mat.move(center_point.negative())
+        if master_obj.Placement and not master_obj.Placement.isIdentity():
+            combined_mat = combined_mat.multiply(master_obj.Placement.Matrix)
+        return original_shape.transformGeometry(combined_mat)
+
+    def _create_boundary_object(self, master_container, master_shape_obj, temp_shape_wrapper, verbose):
+        """Creates the boundary shape object from the temp_shape_wrapper and adds it to the master_container."""
         if temp_shape_wrapper.polygon:
             boundary_obj = temp_shape_wrapper.draw_bounds(self.doc, FreeCAD.Vector(0,0,0), None)
             if boundary_obj:
@@ -402,12 +415,10 @@ class ShapePreparer:
                 boundary_obj.Placement = FreeCAD.Placement()
                 master_shape_obj.BoundaryObject = boundary_obj
                 master_shape_obj.ShowBounds = False
-                if hasattr(boundary_obj, "ViewObject"): boundary_obj.ViewObject.Visibility = False
+                if hasattr(boundary_obj, "ViewObject"): 
+                    boundary_obj.ViewObject.Visibility = False
                 if verbose:
                     FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
-        
-        master_shapes_group.addObject(master_container)
-        return master_shape_obj, temp_shape_wrapper
 
     def _arrange_masters(self, masters_to_place, spacing):
         masters_to_place.sort(key=lambda item: item[1].area, reverse=True)

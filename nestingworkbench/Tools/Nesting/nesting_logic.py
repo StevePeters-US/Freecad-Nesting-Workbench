@@ -4,6 +4,7 @@ import Part
 import copy
 
 from .algorithms import nesting_strategy
+from .visualization_manager import VisualizationManager
 
 class NestingDependencyError(Exception):
     """Custom exception for missing optional dependencies like Shapely."""
@@ -17,24 +18,14 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-# Global reference for trial visualization object
-_trial_viz_obj = None
+# Global manager for visualization state
+viz_manager = VisualizationManager()
 
 def _visualize_trial_placement(part, angle, x, y):
     """Draws the boundary polygon at a trial position during simulation."""
-    global _trial_viz_obj
-    
     doc = FreeCAD.ActiveDocument
     if not doc or not FreeCAD.GuiUp:
         return
-    
-    # Get or create the trial visualization object
-    if _trial_viz_obj is None or _trial_viz_obj.Name not in [o.Name for o in doc.Objects]:
-        _trial_viz_obj = doc.addObject("Part::Feature", "TrialBounds")
-        if hasattr(_trial_viz_obj, "ViewObject"):
-            _trial_viz_obj.ViewObject.LineColor = (0.0, 0.5, 1.0)  # Blue
-            _trial_viz_obj.ViewObject.LineWidth = 1.5
-            _trial_viz_obj.ViewObject.Transparency = 50
     
     try:
         # Get the boundary polygon from the part
@@ -47,40 +38,16 @@ def _visualize_trial_placement(part, angle, x, y):
             coords = list(translated_poly.exterior.coords)
             points = [FreeCAD.Vector(c[0], c[1], 0) for c in coords]
             wire = Part.makePolygon(points)
-            _trial_viz_obj.Shape = wire
             
-            # Force UI update
-            QtGui.QApplication.processEvents()
+            # Use the visualization manager to draw
+            viz_manager.draw_trial_placement(doc, wire)
     except Exception as e:
         FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")
 
 def _cleanup_trial_viz():
     """Removes the trial visualization object and simulation sheet boundaries."""
-    global _trial_viz_obj
-    if _trial_viz_obj:
-        try:
-            doc = FreeCAD.ActiveDocument
-            if doc and _trial_viz_obj.Name in [o.Name for o in doc.Objects]:
-                doc.removeObject(_trial_viz_obj.Name)
-        except Exception:
-            pass
-        _trial_viz_obj = None
-    
-    # Clean up simulation sheet boundaries
-    try:
-        doc = FreeCAD.ActiveDocument
-        if doc:
-            to_remove = [o.Name for o in doc.Objects if o.Label.startswith("sim_sheet_boundary_")]
-            for name in to_remove:
-                try:
-                    doc.removeObject(name)
-                except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[nesting_logic] Cleanup failed: {e}\n")
-    except Exception as e:
-        FreeCAD.Console.PrintWarning(f"[nesting_logic] Cleanup failed: {e}\n")
-
-# --- Master Shape Highlighting ---
-_current_highlighted_master = None  # Track the currently highlighted master container
+    doc = FreeCAD.ActiveDocument
+    viz_manager.clear_trial_placement(doc)
 
 def _find_master_container_for_part(part):
     """Finds the master container corresponding to a part being placed."""
@@ -108,37 +75,11 @@ def _find_master_container_for_part(part):
             continue
     return None
 
-def _highlight_master(master_container, highlight):
-    """Sets the highlighting state for a master container's boundary."""
-    if master_container and hasattr(master_container, "Group"):
-        for child in master_container.Group:
-            if hasattr(child, "BoundaryObject") and child.BoundaryObject:
-                boundary = child.BoundaryObject
-                if hasattr(boundary, "ViewObject"):
-                    if highlight:
-                        boundary.ViewObject.Visibility = True
-                        boundary.ViewObject.LineColor = (0.0, 0.8, 0.0)  # Green
-                        boundary.ViewObject.LineWidth = 3.0
-                    else:
-                        boundary.ViewObject.Visibility = False
-                        boundary.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
-                        boundary.ViewObject.LineWidth = 2.0
-
 def _on_part_start(part):
     """Called when starting to place a part - highlight the master shape's boundary if it's a new master."""
-    global _current_highlighted_master
-    
     master_container = _find_master_container_for_part(part)
     if master_container:
-        # Only switch highlighting if it's a different master
-        if _current_highlighted_master != master_container:
-            # Unhighlight the previous master
-            if _current_highlighted_master:
-                _highlight_master(_current_highlighted_master, False)
-            # Highlight the new master
-            _highlight_master(master_container, True)
-            _current_highlighted_master = master_container
-            QtGui.QApplication.processEvents()
+        viz_manager.highlight_master(master_container)
 
 def _on_part_end(part, placed):
     """Called after part is placed - we don't unhighlight here, we wait for a new master type."""
@@ -147,10 +88,7 @@ def _on_part_end(part, placed):
 
 def _cleanup_highlighting():
     """Called after nesting completes to ensure all highlighting is removed."""
-    global _current_highlighted_master
-    if _current_highlighted_master:
-        _highlight_master(_current_highlighted_master, False)
-        _current_highlighted_master = None
+    viz_manager.clear_highlight()
 
 # --- Public Function ---
 def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
@@ -165,7 +103,6 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
         simulate: If True, shows simulation with callbacks
         **kwargs: Additional arguments for the nester (including progress_callback)
     """
-    global _trial_viz_obj
     from ...datatypes.shape import Shape
     
     # Extract progress callback if present (not strictly needed as it goes into kwargs, but good for clarity)

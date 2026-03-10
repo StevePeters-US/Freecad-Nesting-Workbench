@@ -226,144 +226,149 @@ class Sheet:
             self._draw_single_part(doc, transient_part, sheet_origin, ui_params, verbose=verbose)
 
     def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None, parts_to_place_group=None, verbose=False):
-        """Helper to draw a single part, either for final placement or simulation."""
-        if shape:
-            # For final drawing, placement is pre-calculated. For simulation, we calculate it now.
-            final_placement = shape.placement if shape.placement else shape.get_final_placement(sheet_origin)
+        """Helper to draw a single part, dispatching to final or simulation path."""
+        if not shape:
+            return
 
-            shape_obj = shape.fc_object
-            if shape_obj:
-                # FreeCAD.Console.PrintMessage(f"DEBUG:     fc_object '{shape_obj.Label}' found. Proceeding with drawing.\n")
+        # For final drawing, placement is pre-calculated. For simulation, we calculate it now.
+        final_placement = shape.placement if shape.placement else shape.get_final_placement(sheet_origin)
 
-                # During simulation, we just move the existing part.
-                # For final drawing, we create a container.
-                if shapes_group:
-                    # Create a NEW container to hold the part. 
-                    # Do NOT try to reuse an existing container by name, as it might belong to 
-                    # an old layout that is about to be deleted.
-                    # FreeCAD will automatically handle name collisions (e.g. nested_O_1001).
-                    container = doc.addObject("App::Part", f"nested_{shape.id}")
-                    container.Label = f"nested_{shape.id}" # Ensure label matches intended ID
-                    
-                    # Add ShowBounds property
-                    container.addProperty("App::PropertyBool", "ShowBounds", "Nesting", "Show the boundary check logic used")
-                    container.ShowBounds = ui_params.get('show_bounds', False)
+        shape_obj = shape.fc_object
+        if not shape_obj:
+            return
 
-                    shapes_group.addObject(container)
+        if shapes_group:
+            self._draw_final_part(doc, shape, shape_obj, final_placement, ui_params, shapes_group, parts_to_place_group, verbose)
+        else:
+            self._draw_simulation_part(shape_obj, final_placement)
 
-                    # Place the boundary object at the container's origin. It is the reference.
-                    boundary_obj = shape_obj.BoundaryObject
-                    if boundary_obj:
-                        boundary_obj.Placement = FreeCAD.Placement()
-                        container.addObject(boundary_obj)
-                        
-                        if hasattr(boundary_obj, "ViewObject"):
-                            boundary_obj.ViewObject.Visibility = container.ShowBounds
-                            # Set red color for bounds
-                            boundary_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
-                            boundary_obj.ViewObject.LineWidth = 2.0
+    def _draw_final_part(self, doc, shape, shape_obj, final_placement, ui_params, shapes_group, parts_to_place_group=None, verbose=False):
+        """Draw a part for final placement: create container, add labels, set properties."""
+        # Create a NEW container to hold the part.
+        # Do NOT try to reuse an existing container by name, as it might belong to
+        # an old layout that is about to be deleted.
+        # FreeCAD will automatically handle name collisions (e.g. nested_O_1001).
+        container = doc.addObject("App::Part", f"nested_{shape.id}")
+        container.Label = f"nested_{shape.id}" # Ensure label matches intended ID
 
-                    # The shape_obj already has the correct placement (centered + rotated)
-                    # from shape_preparer, so we don't touch it. Just add to container.
+        # Add ShowBounds property
+        container.addProperty("App::PropertyBool", "ShowBounds", "Nesting", "Show the boundary check logic used")
+        container.ShowBounds = ui_params.get('show_bounds', False)
 
-                    if hasattr(shape_obj, "ViewObject"):
-                        shape_obj.ViewObject.Visibility = True
-                    container.addObject(shape_obj)
-                    
-                    if hasattr(container, "ViewObject"):
-                        container.ViewObject.Visibility = True
+        shapes_group.addObject(container)
 
-                    # Unlink from the temporary "PartsToPlace" bin so cleanup doesn't delete them
-                    if parts_to_place_group:
-                        try:
-                            if boundary_obj:
-                                parts_to_place_group.removeObject(boundary_obj)
-                            parts_to_place_group.removeObject(shape_obj)
-                        except Exception:
-                            pass
+        # Place the boundary object at the container's origin. It is the reference.
+        boundary_obj = shape_obj.BoundaryObject
+        if boundary_obj:
+            boundary_obj.Placement = FreeCAD.Placement()
+            container.addObject(boundary_obj)
 
-                    # Apply the final nesting placement to the CONTAINER.
-                    container.Placement = final_placement
-                    
-                    # Debug: Log positions to diagnose bounds-to-shape offset
-                    shape_bb = shape_obj.Shape.BoundBox
-                    shape_visual_center = FreeCAD.Vector(
-                        shape_obj.Placement.Base.x + (shape_bb.XMin + shape_bb.XMax) / 2,
-                        shape_obj.Placement.Base.y + (shape_bb.YMin + shape_bb.YMax) / 2,
-                        0
-                    )
-                    bound_center_str = "N/A"
-                    if boundary_obj:
-                        bbb = boundary_obj.Shape.BoundBox
-                        bound_center_str = f"({(bbb.XMin + bbb.XMax)/2:.2f}, {(bbb.YMin + bbb.YMax)/2:.2f})"
-                    
-                    if verbose:
-                        FreeCAD.Console.PrintMessage(
-                            f"  DRAW {shape.id}: shape_visual=({shape_visual_center.x:.2f}, {shape_visual_center.y:.2f})"
-                            f" bounds_center={bound_center_str}"
-                            f" shape_plc=({shape_obj.Placement.Base.x:.2f}, {shape_obj.Placement.Base.y:.2f})"
-                            f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})\n"
-                        )
+            if hasattr(boundary_obj, "ViewObject"):
+                boundary_obj.ViewObject.Visibility = container.ShowBounds
+                # Set red color for bounds
+                boundary_obj.ViewObject.LineColor = (1.0, 0.0, 0.0)  # Red
+                boundary_obj.ViewObject.LineWidth = 2.0
 
-                    # --- Handle the label object AFTER the container is placed ---
-                    if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
-                        label_name = f"label_{shape.id}"
-                        # Allow FreeCAD to auto-rename if collision exists (e.g. label_Part001)
-                        # Do NOT delete existing objects by name as they might belong to other layouts.
-                        label_obj = create_label_object(label_name)
-                        
-                        shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('label_size', 10.0))
-                        label_obj.Shape = shapestring_geom.Shape
-                        doc.removeObject(shapestring_geom.Name)
-                        
-                        # Add label to the CONTAINER (same scope as part)
-                        container.addObject(label_obj)
-                        
-                        # Calculate local placement relative to the part inside the container
-                        shapestring_center = label_obj.Shape.BoundBox.Center
-                        
-                        # The part is centered at (0,0,0) within the container because we applied 
-                        # shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), ...)
-                        # So the target visual center for the label is simply (0,0, Z_height)
-                        
-                        # Apply inverse rotation to keep text horizontal
-                        part_rotation = final_placement.Rotation
-                        inverse_rotation = part_rotation.inverted()
+        # The shape_obj already has the correct placement (centered + rotated)
+        # from shape_preparer, so we don't touch it. Just add to container.
 
-                        # To center the text correctly, we must rotate the local center offset
-                        target_label_center = FreeCAD.Vector(0, 0, ui_params.get('label_height', 0.1))
-                        shapestring_center_rotated = inverse_rotation.multVec(shapestring_center)
-                        label_placement_base = target_label_center - shapestring_center_rotated
-                        
-                        label_obj.Placement = FreeCAD.Placement(label_placement_base, inverse_rotation)
-                        
-                        # Link label to shape (add property if needed for plain Part::Feature)
-                        if not hasattr(shape_obj, "LabelObject"):
-                            shape_obj.addProperty("App::PropertyLink", "LabelObject", "Nesting", "Link to label")
-                        shape_obj.LabelObject = label_obj
+        if hasattr(shape_obj, "ViewObject"):
+            shape_obj.ViewObject.Visibility = True
+        container.addObject(shape_obj)
 
-                    # Set visibility on the main shape object (add properties if needed)
-                    if not hasattr(shape_obj, "ShowShape"):
-                        shape_obj.addProperty("App::PropertyBool", "ShowShape", "Nesting", "Show shape geometry")
-                    if not hasattr(shape_obj, "ShowBounds"):
-                        shape_obj.addProperty("App::PropertyBool", "ShowBounds", "Nesting", "Show bounds")
-                    if not hasattr(shape_obj, "ShowLabel"):
-                        shape_obj.addProperty("App::PropertyBool", "ShowLabel", "Nesting", "Show label")
-                    
-                    shape_obj.ShowShape = True
-                    shape_obj.ShowBounds = ui_params.get('show_bounds', False)
-                    shape_obj.ShowLabel = ui_params.get('add_labels', False)
-                else:
-                    # Simulation mode: only show and move the boundary object, hide the shape
-                    if hasattr(shape_obj, 'ViewObject'):
-                        shape_obj.ViewObject.Visibility = False
-                    
-                    if hasattr(shape_obj, 'BoundaryObject') and shape_obj.BoundaryObject:
-                        boundary = shape_obj.BoundaryObject
-                        boundary.Placement = final_placement
-                        if hasattr(boundary, 'ViewObject'):
-                            boundary.ViewObject.Visibility = True
-                            boundary.ViewObject.LineColor = (0.0, 0.7, 0.0)  # Green for simulation
-                            boundary.ViewObject.LineWidth = 2.0
-            else:
-                pass # FreeCAD.Console.PrintWarning(f"DEBUG:     fc_object for part '{shape.id}' was None. Skipping drawing.\n")
+        if hasattr(container, "ViewObject"):
+            container.ViewObject.Visibility = True
+
+        # Unlink from the temporary "PartsToPlace" bin so cleanup doesn't delete them
+        if parts_to_place_group:
+            try:
+                if boundary_obj:
+                    parts_to_place_group.removeObject(boundary_obj)
+                parts_to_place_group.removeObject(shape_obj)
+            except Exception:
+                pass
+
+        # Apply the final nesting placement to the CONTAINER.
+        container.Placement = final_placement
+
+        # Debug: Log positions to diagnose bounds-to-shape offset
+        shape_bb = shape_obj.Shape.BoundBox
+        shape_visual_center = FreeCAD.Vector(
+            shape_obj.Placement.Base.x + (shape_bb.XMin + shape_bb.XMax) / 2,
+            shape_obj.Placement.Base.y + (shape_bb.YMin + shape_bb.YMax) / 2,
+            0
+        )
+        bound_center_str = "N/A"
+        if boundary_obj:
+            bbb = boundary_obj.Shape.BoundBox
+            bound_center_str = f"({(bbb.XMin + bbb.XMax)/2:.2f}, {(bbb.YMin + bbb.YMax)/2:.2f})"
+
+        if verbose:
+            FreeCAD.Console.PrintMessage(
+                f"  DRAW {shape.id}: shape_visual=({shape_visual_center.x:.2f}, {shape_visual_center.y:.2f})"
+                f" bounds_center={bound_center_str}"
+                f" shape_plc=({shape_obj.Placement.Base.x:.2f}, {shape_obj.Placement.Base.y:.2f})"
+                f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})\n"
+            )
+
+        # --- Handle the label object AFTER the container is placed ---
+        if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
+            label_name = f"label_{shape.id}"
+            # Allow FreeCAD to auto-rename if collision exists (e.g. label_Part001)
+            # Do NOT delete existing objects by name as they might belong to other layouts.
+            label_obj = create_label_object(label_name)
+
+            shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('label_size', 10.0))
+            label_obj.Shape = shapestring_geom.Shape
+            doc.removeObject(shapestring_geom.Name)
+
+            # Add label to the CONTAINER (same scope as part)
+            container.addObject(label_obj)
+
+            # Calculate local placement relative to the part inside the container
+            shapestring_center = label_obj.Shape.BoundBox.Center
+
+            # The part is centered at (0,0,0) within the container because we applied
+            # shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), ...)
+            # So the target visual center for the label is simply (0,0, Z_height)
+
+            # Apply inverse rotation to keep text horizontal
+            part_rotation = final_placement.Rotation
+            inverse_rotation = part_rotation.inverted()
+
+            # To center the text correctly, we must rotate the local center offset
+            target_label_center = FreeCAD.Vector(0, 0, ui_params.get('label_height', 0.1))
+            shapestring_center_rotated = inverse_rotation.multVec(shapestring_center)
+            label_placement_base = target_label_center - shapestring_center_rotated
+
+            label_obj.Placement = FreeCAD.Placement(label_placement_base, inverse_rotation)
+
+            # Link label to shape (add property if needed for plain Part::Feature)
+            if not hasattr(shape_obj, "LabelObject"):
+                shape_obj.addProperty("App::PropertyLink", "LabelObject", "Nesting", "Link to label")
+            shape_obj.LabelObject = label_obj
+
+        # Set visibility on the main shape object (add properties if needed)
+        if not hasattr(shape_obj, "ShowShape"):
+            shape_obj.addProperty("App::PropertyBool", "ShowShape", "Nesting", "Show shape geometry")
+        if not hasattr(shape_obj, "ShowBounds"):
+            shape_obj.addProperty("App::PropertyBool", "ShowBounds", "Nesting", "Show bounds")
+        if not hasattr(shape_obj, "ShowLabel"):
+            shape_obj.addProperty("App::PropertyBool", "ShowLabel", "Nesting", "Show label")
+
+        shape_obj.ShowShape = True
+        shape_obj.ShowBounds = ui_params.get('show_bounds', False)
+        shape_obj.ShowLabel = ui_params.get('add_labels', False)
+
+    def _draw_simulation_part(self, shape_obj, final_placement):
+        """Draw a part for simulation/preview: move the boundary object and hide the shape."""
+        if hasattr(shape_obj, 'ViewObject'):
+            shape_obj.ViewObject.Visibility = False
+
+        if hasattr(shape_obj, 'BoundaryObject') and shape_obj.BoundaryObject:
+            boundary = shape_obj.BoundaryObject
+            boundary.Placement = final_placement
+            if hasattr(boundary, 'ViewObject'):
+                boundary.ViewObject.Visibility = True
+                boundary.ViewObject.LineColor = (0.0, 0.7, 0.0)  # Green for simulation
+                boundary.ViewObject.LineWidth = 2.0

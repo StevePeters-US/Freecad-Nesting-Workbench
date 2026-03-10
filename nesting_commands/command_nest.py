@@ -20,7 +20,9 @@ class NestingCommand:
         """This method is executed when the command is activated."""
         # Manages its own instance to prevent multiple panels
         if NestingCommand._task_panel is None:
-            NestingCommand._task_panel = task_panel_manager.NestingTaskPanel()
+            NestingCommand._task_panel = task_panel_manager.NestingTaskPanel(
+                cleanup_callback=lambda: setattr(NestingCommand, "_task_panel", None)
+            )
 
     def IsActive(self):
         """Can only be active if a document is open."""
