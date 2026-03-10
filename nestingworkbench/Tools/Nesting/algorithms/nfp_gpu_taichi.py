@@ -31,6 +31,47 @@ def is_available():
 
 if TAICHI_AVAILABLE:
     @ti.kernel
+    def compute_nfp_pairs_kernel(
+        n_pairs: int,
+        arr_a: ti.types.ndarray(),  # [n_pairs, max_verts_a, 2]
+        len_a: ti.types.ndarray(),  # [n_pairs]
+        arr_b: ti.types.ndarray(),  # [n_pairs, max_verts_b, 2]
+        len_b: ti.types.ndarray(),  # [n_pairs]
+        rotations: ti.types.ndarray(), # [n_pairs]
+        out_vertices: ti.types.ndarray(), # [n_pairs, max_verts_out, 2]
+        out_len: ti.types.ndarray() # [n_pairs]
+    ):
+        """
+        Computes Minkowski sums for arbitrary pairs of convex polygons.
+        """
+        for p in range(n_pairs):
+            angle = rotations[p]
+            c = ti.cos(angle)
+            s = ti.sin(angle)
+            
+            count_a = len_a[p]
+            count_b = len_b[p]
+            
+            out_idx = 0
+            for va_idx in range(count_a):
+                ax = arr_a[p, va_idx, 0]
+                ay = arr_a[p, va_idx, 1]
+                
+                for vb_idx in range(count_b):
+                    bx_raw = arr_b[p, vb_idx, 0]
+                    by_raw = arr_b[p, vb_idx, 1]
+                    
+                    # Rotate B
+                    bx = bx_raw * c - by_raw * s
+                    by = bx_raw * s + by_raw * c
+                    
+                    out_vertices[p, out_idx, 0] = ax + bx
+                    out_vertices[p, out_idx, 1] = ay + by
+                    out_idx += 1
+            out_len[p] = out_idx
+
+
+    @ti.kernel
     def compute_minkowski_sum_convex_kernel(
         n_poly_a: int, 
         n_poly_b: int,
@@ -186,6 +227,64 @@ if TAICHI_AVAILABLE:
             )
             
         return results_np
+
+
+    def compute_nfp_pairs(pairs):
+        """
+        Computes Minkowski sums for arbitrary pairs of convex polygons.
+        Each pair is (poly_a, poly_b, rotation_rad).
+        """
+        from shapely.geometry import MultiPoint
+        if not pairs:
+            return []
+            
+        n_pairs = len(pairs)
+        max_v_a = max(len(p[0].exterior.coords) for p in pairs)
+        max_v_b = max(len(p[1].exterior.coords) for p in pairs)
+        max_out_verts = max_v_a * max_v_b
+        
+        np_a = np.zeros((n_pairs, max_v_a, 2), dtype=np.float32)
+        len_a = np.zeros(n_pairs, dtype=np.int32)
+        np_b = np.zeros((n_pairs, max_v_b, 2), dtype=np.float32)
+        len_b = np.zeros(n_pairs, dtype=np.int32)
+        np_rot = np.zeros(n_pairs, dtype=np.float32)
+        
+        for i, (p_a, p_b, rot) in enumerate(pairs):
+            coords_a = np.array(p_a.exterior.coords)[:-1]
+            np_a[i, :len(coords_a)] = coords_a
+            len_a[i] = len(coords_a)
+            
+            # Note: For NFP, we technically want A + (-B). 
+            # We assume the caller passed the -B version if they wanted NFP.
+            coords_b = np.array(p_b.exterior.coords)[:-1]
+            np_b[i, :len(coords_b)] = coords_b
+            len_b[i] = len(coords_b)
+            np_rot[i] = rot
+            
+        out_verts_np = np.zeros((n_pairs, max_out_verts, 2), dtype=np.float32)
+        out_len_np = np.zeros(n_pairs, dtype=np.int32)
+        
+        with _kernel_lock:
+            compute_nfp_pairs_kernel(
+                n_pairs,
+                np_a, len_a,
+                np_b, len_b,
+                np_rot,
+                out_verts_np,
+                out_len_np
+            )
+            
+        results = []
+        for i in range(n_pairs):
+            count = out_len_np[i]
+            if count < 3:
+                results.append(None)
+                continue
+            points = out_verts_np[i, :count]
+            hull = MultiPoint(points).convex_hull
+            results.append(hull)
+            
+        return results
 
 
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):

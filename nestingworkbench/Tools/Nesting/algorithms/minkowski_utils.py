@@ -20,6 +20,10 @@ def decompose_if_needed(polygon, logger):
     if not polygon or polygon.is_empty:
         return []
     
+    # Ensure valid geometry
+    if not polygon.is_valid:
+        polygon = polygon.buffer(0)
+    
     # Use WKT for cache key
     cache_key = polygon.wkt
     with _decomposition_lock:
@@ -33,11 +37,19 @@ def decompose_if_needed(polygon, logger):
         return all_decomposed_parts
 
     # If already convex-ish (triangle or area match convex hull), return as is
-    if polygon.geom_type == 'Polygon' and len(polygon.exterior.coords) <= 4:
-        return [polygon]
-        
-    if math.isclose(polygon.area, polygon.convex_hull.area, rel_tol=10e-5):
-        return [polygon]
+    # Using a very strict tolerance for GPU kernel safety
+    is_convex = False
+    if polygon.geom_type == 'Polygon':
+        if len(polygon.exterior.coords) <= 4: # Triangle (4 coords including closure)
+            is_convex = True
+        elif math.isclose(polygon.area, polygon.convex_hull.area, rel_tol=1e-7):
+            is_convex = True
+            
+    if is_convex:
+        res = [polygon]
+        with _decomposition_lock:
+            Shape.decomposition_cache[cache_key] = res
+        return res
     
     try:
         # Triangulation is the most robust decomposition for complex NFPs with holes
@@ -45,7 +57,6 @@ def decompose_if_needed(polygon, logger):
         decomposed = []
         for tri in triangles:
              # Only keep triangles that are inside the original polygon
-             # and have meaningful area (ignore slivers)
              if tri.area > 1e-9 and polygon.contains(tri.representative_point()):
                  decomposed.append(tri)
         
@@ -53,7 +64,7 @@ def decompose_if_needed(polygon, logger):
             Shape.decomposition_cache[cache_key] = decomposed
         return decomposed
     except Exception as e:
-        logger(f"      - Shapely triangulation failed for decomposition: {e}. Falling back to convex hull.", level="warning")
+        logger(f"      - Triangulation failed: {e}. Falling back to convex hull.", level="warning")
 
     result = [polygon.convex_hull]
     with _decomposition_lock:
