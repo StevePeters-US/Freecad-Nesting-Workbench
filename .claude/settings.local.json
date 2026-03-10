@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find /d/Github/Freecad-Nesting-Workbench -name \"*.py\" -type f -exec wc -l {} +)"
+    ]
+  }
+}
