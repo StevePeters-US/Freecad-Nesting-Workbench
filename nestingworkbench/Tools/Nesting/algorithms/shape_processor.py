@@ -13,7 +13,7 @@ from ....freecad_helpers import get_up_direction_rotation
 
 
 
-def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, simplification=1.0):
+def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, simplification=1.0, verbose=False):
     """
     Extracts a usable 2D profile from a FreeCAD object by projecting it onto the XY plane.
     This captures the full silhouette of the shape from the specified viewing direction.
@@ -45,7 +45,8 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
         )
         placement = FreeCAD.Placement(FreeCAD.Vector(0, 0, 0), rotation, center)
         shape.transformShape(placement.Matrix)
-        FreeCAD.Console.PrintMessage(f"  -> Rotated shape for up_direction={up_direction}\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  -> Rotated shape for up_direction={up_direction}\n")
     
     # Always center the shape using bounding box center (for both rotated and non-rotated)
     bb = shape.BoundBox
@@ -98,14 +99,16 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
                     poly = ShapelyPolygon(outer_pts, holes)
                     if simplification > 0:
                         poly = poly.simplify(simplification, preserve_topology=True)
-                    FreeCAD.Console.PrintMessage(f"  -> Used wire discretization for 2D object '{obj.Label}'\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"  -> Used wire discretization for 2D object '{obj.Label}'\n")
                     return poly
             except Exception as e:
                 FreeCAD.Console.PrintWarning(f"Could not convert 2D object '{obj.Label}' via wire discretization: {e}. Falling back to mesh.\n")
 
     # Convert shape to mesh and project all mesh vertices onto XY plane
     try:
-        FreeCAD.Console.PrintMessage(f"  -> Meshing shape for '{obj.Label}'\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  -> Meshing shape for '{obj.Label}'\n")
         
         from shapely.geometry import MultiPoint, LineString, Polygon as ShapelyPolygon, MultiPolygon
         
@@ -155,7 +158,8 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
                     # Union of all triangles
                     # buffer(0) on the whole set can sometimes handle overlaps better than unary_union alone?
                     # But unary_union is designed for this.
-                    FreeCAD.Console.PrintMessage(f"  -> Merging {len(polygons)} triangles for '{obj.Label}'\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"  -> Merging {len(polygons)} triangles for '{obj.Label}'\n")
                     merged = unary_union(polygons)
                     
                     # Sometimes simple unions result in messy collections. Clean up.
@@ -194,7 +198,8 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
                                     pre_simplify = len(merged.exterior.coords)
                                     merged = merged.simplify(simplification, preserve_topology=True)
                                     post_simplify = len(merged.exterior.coords)
-                                    FreeCAD.Console.PrintMessage(f"  -> Early simplify: {pre_simplify} -> {post_simplify} vertices\n")
+                                    if verbose:
+                                        FreeCAD.Console.PrintMessage(f"  -> Early simplify: {pre_simplify} -> {post_simplify} vertices\n")
                                 
                                 # RETURN SHAPELY POLYGON DIRECTLY
                                 # This preserves high-resolution detail without FreeCAD wire conversion limits
@@ -203,7 +208,8 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
                     FreeCAD.Console.PrintWarning(f"  -> Union failed for '{obj.Label}': {union_e}. Falling back to convex hull.\n")
 
         # Fallback if no facets (e.g. only vertices?) or union failed: use Convex Hull of vertices
-        FreeCAD.Console.PrintMessage(f"  -> Fallback to convex hull for '{obj.Label}'\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  -> Fallback to convex hull for '{obj.Label}'\n")
         points_2d = [(v[0], v[1]) for v in vertices]
         multi_point = MultiPoint(points_2d)
         hull = multi_point.convex_hull
@@ -226,7 +232,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
     raise ValueError(f"Unsupported object '{obj.Label}' or no valid 2D geometry found.")
 
 
-def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=1.0, up_direction="Z+"):
+def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=1.0, up_direction="Z+", verbose=False):
     """
     Processes a FreeCAD object to generate a shapely-based boundary and populates
     the geometric properties of the provided Shape object. The created boundary is
@@ -244,13 +250,14 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     if not SHAPELY_AVAILABLE:
         raise ImportError("The shapely library is required for boundary creation but is not installed.")
     
-    FreeCAD.Console.PrintMessage(f"Processing shape '{shape_obj.Label}'...\n")
+    if verbose:
+        FreeCAD.Console.PrintMessage(f"Processing shape '{shape_obj.Label}'...\n")
     
     from shapely.geometry import Polygon, MultiPolygon
     from shapely.affinity import translate
     from shapely.validation import make_valid
 
-    profile_2d = get_2d_profile_from_obj(shape_obj, up_direction, deflection, simplification)
+    profile_2d = get_2d_profile_from_obj(shape_obj, up_direction, deflection, simplification, verbose=verbose)
     
     # Compute the world-space BB center from the NON-ROTATED shape
     # The rotation is handled by the placement in shape_preparer
@@ -294,7 +301,8 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     # Also simplify the unbuffered polygon for consistent visualization
     final_polygon_unbuffered = final_polygon_unbuffered.simplify(simplification, preserve_topology=True)
     
-    FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
+    if verbose:
+        FreeCAD.Console.PrintMessage(f"  -> Generated boundary: {original_points} -> {final_points} vertices (Simp: {simplification})\n")
 
     if buffered_polygon.is_empty:
          raise ValueError("Buffering operation did not produce a valid polygon.")
@@ -348,7 +356,8 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     shape_to_populate.unbuffered_polygon = final_unbuffered_polygon
     shape_to_populate.source_centroid = source_centroid + rotated_offset
     
-    FreeCAD.Console.PrintMessage(f"  -> source_centroid: ({shape_to_populate.source_centroid.x:.2f}, {shape_to_populate.source_centroid.y:.2f}, {shape_to_populate.source_centroid.z:.2f})\n")
-    if abs(offset_from_origin.x) > 0.01 or abs(offset_from_origin.y) > 0.01:
+    if verbose:
+        FreeCAD.Console.PrintMessage(f"  -> source_centroid: ({shape_to_populate.source_centroid.x:.2f}, {shape_to_populate.source_centroid.y:.2f}, {shape_to_populate.source_centroid.z:.2f})\n")
+    if verbose and (abs(offset_from_origin.x) > 0.01 or abs(offset_from_origin.y) > 0.01):
         FreeCAD.Console.PrintMessage(f"  -> Buffering centroid offset: ({offset_from_origin.x:.3f}, {offset_from_origin.y:.3f})\n")
 

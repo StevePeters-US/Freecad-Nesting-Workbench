@@ -130,13 +130,14 @@ class LayoutManager:
         
         return ordered_parts
     
-    def delete_layout(self, layout):
+    def delete_layout(self, layout, verbose=False):
         """
         Removes a layout group and ALL its children from the document.
         Must recursively delete children first since FreeCAD doesn't do this automatically.
         
         Args:
             layout: Layout object to delete
+            verbose: If True, log deletion
         """
         if not layout:
             return
@@ -164,7 +165,9 @@ class LayoutManager:
         # Recursively delete the group and all children
         if group_obj:
             recursive_delete(self.doc, group_obj)
-            FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
+            if verbose:
+                FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
+
     
 
     
@@ -287,7 +290,7 @@ class LayoutManager:
         return total_contact
     
     def create_ga_population(self, master_shapes_map, quantities, ui_params, 
-                             population_size, rotation_steps=1) -> list:
+                             population_size, rotation_steps=1, verbose=False) -> list:
         """
         Creates a population of layouts for genetic algorithm.
         
@@ -322,7 +325,8 @@ class LayoutManager:
                         part.set_rotation(angle)
             
             population.append(layout)
-            FreeCAD.Console.PrintMessage(f"Created layout {name} with {len(layout.parts)} parts\n")
+            if verbose:
+                FreeCAD.Console.PrintMessage(f"Created layout {name} with {len(layout.parts)} parts\n")
         
         return population
     

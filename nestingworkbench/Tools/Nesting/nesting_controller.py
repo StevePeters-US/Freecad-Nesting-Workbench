@@ -640,7 +640,7 @@ class NestingController:
         QtGui.QApplication.processEvents()
         
         layouts = layout_manager.create_ga_population(
-            master_map, quantities, ui_params, population_size, rotation_steps
+            master_map, quantities, ui_params, population_size, rotation_steps, verbose=verbose
         )
         
         best_layout = None
@@ -781,7 +781,7 @@ class NestingController:
                     FreeCAD.Console.PrintMessage(f"  Deleting {len(layouts) - 1} non-winning layouts...\n")
                 for layout in layouts:
                     if layout != best_layout:
-                        layout_manager.delete_layout(layout)
+                        layout_manager.delete_layout(layout, verbose=verbose)
                 
                 # STEP 3: Create new layouts for next generation (if not last)
                 if gen < generations - 1:
@@ -1012,7 +1012,8 @@ class NestingController:
             'label_size': self.ui.label_size_input.value(),
             'generations': self.ui.minkowski_generations_input.value(),
             'population_size': self.ui.minkowski_population_size_input.value(),
-            'use_gpu': self.ui.use_gpu_checkbox.isChecked()
+            'use_gpu': self.ui.use_gpu_checkbox.isChecked(),
+            'verbose': self.ui.verbose_logging_checkbox.isChecked()
         }
         
         # Save persistence

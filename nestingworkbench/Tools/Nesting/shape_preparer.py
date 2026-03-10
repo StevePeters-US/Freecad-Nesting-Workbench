@@ -27,7 +27,7 @@ class ShapePreparer:
         Main entry point to prepare parts.
         
         Args:
-            ui_global_settings (dict): { 'spacing': float, 'deflection': float, 'simplification': float, 'rotation_steps': int, 'add_labels': bool, 'font_path': str }
+            ui_global_settings (dict): { 'spacing': float, 'deflection': float, 'simplification': float, 'rotation_steps': int, 'add_labels': bool, 'font_path': str, 'verbose': bool }
             quantities (dict): { label: (quantity, rotation_steps) }
             master_shapes_map (dict): { label: FreeCADObject }
             layout_obj (App::DocumentObjectGroup): The layout group.
@@ -39,6 +39,7 @@ class ShapePreparer:
         spacing = ui_global_settings['spacing']
         deflection = ui_global_settings.get('deflection', 0.05)
         simplification = ui_global_settings.get('simplification', 0.1)
+        verbose = ui_global_settings.get('verbose', False)
         
         # --- Create or Retrieve the hidden MasterShapes group ---
         master_shapes_group = self._get_or_create_master_group(layout_obj)
@@ -71,11 +72,11 @@ class ShapePreparer:
                 
                 if is_reloading:
                     master_shape_obj, temp_shape_wrapper = self._create_temp_from_reloading(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group, verbose=verbose
                     )
                 else:
                     master_shape_obj, temp_shape_wrapper = self._handle_new_master(
-                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading
+                        master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading, verbose=verbose
                     )
 
                 if master_shape_obj and temp_shape_wrapper:
@@ -122,7 +123,7 @@ class ShapePreparer:
             master_shapes_group.ViewObject.Visibility = True
         return master_shapes_group
 
-    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group):
+    def _create_temp_from_reloading(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, layout_obj, master_shapes_group, verbose=False):
         """
         Creates a temporary copy of an existing master shape for use in the sandbox.
         """
@@ -226,7 +227,7 @@ class ShapePreparer:
         # 6. Recalculate if reuse failed
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(temp_master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification, verbose=verbose)
             # Update the container's SourceCentroid with the recalculated value
             if temp_shape_wrapper.source_centroid:
                 temp_container.SourceCentroid = temp_shape_wrapper.source_centroid
@@ -234,7 +235,7 @@ class ShapePreparer:
 
         return temp_master_obj, temp_shape_wrapper
 
-    def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading):
+    def _handle_new_master(self, master_obj, label, quantities, temp_shape_wrapper, spacing, deflection, simplification, cache_key, master_shapes_group, is_reloading, verbose=False):
         # Get part parameters from quantities
         part_params = quantities.get(label, {'quantity': 1, 'up_direction': 'Z+'})
         if isinstance(part_params, tuple):
@@ -244,7 +245,7 @@ class ShapePreparer:
         
         if not temp_shape_wrapper:
             temp_shape_wrapper = Shape(master_obj)
-            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction)
+            shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction, verbose=verbose)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
 
         master_container = self.doc.addObject("App::Part", f"master_{label}")
@@ -302,7 +303,8 @@ class ShapePreparer:
         # This keeps Placement.Base at (0,0,0) which avoids App::Part container corruption.
         original_shape = master_obj.Shape.copy()
         is_2d_object = master_obj.isDerivedFrom("Part::Part2DObject")
-        FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
         
         # Use source_centroid (which includes buffering offset) to match polygon centering.
         if temp_shape_wrapper.source_centroid:
@@ -353,7 +355,8 @@ class ShapePreparer:
                         original_shape = Part.Face(wire)
                     except Exception:
                         original_shape = Part.Compound([wire])
-                    FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
             except Exception as e:
                 FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
                 # Fallback: discretize to polygon
@@ -380,7 +383,8 @@ class ShapePreparer:
         
         master_shape_obj.Shape = original_shape
         
-        FreeCAD.Console.PrintMessage(f"     Centered from ({center_point.x:.2f}, {center_point.y:.2f}) to origin\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"     Centered from ({center_point.x:.2f}, {center_point.y:.2f}) to origin\n")
         
         # Get up_direction rotation (Placement has NO translation — only rotation)
         up_rotation = get_up_direction_rotation(up_direction)
@@ -399,7 +403,8 @@ class ShapePreparer:
                 master_shape_obj.BoundaryObject = boundary_obj
                 master_shape_obj.ShowBounds = False
                 if hasattr(boundary_obj, "ViewObject"): boundary_obj.ViewObject.Visibility = False
-                FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
         
         master_shapes_group.addObject(master_container)
         return master_shape_obj, temp_shape_wrapper
@@ -447,6 +452,7 @@ class ShapePreparer:
         spacing = ui_settings['spacing']
         # Default global rotation
         global_rotation_steps = ui_settings['rotation_steps']
+        verbose = ui_settings.get('verbose', False)
 
         for label, original_obj in master_shapes_map.items():
             # If reloading, label is master_shape_X, handle mapping
@@ -496,7 +502,7 @@ class ShapePreparer:
                 part_copy.Placement = master_shape_obj.Placement
                 
                 # Debug: Check what geometry we're getting
-                if up_direction != "Z+" and up_direction is not None:
+                if verbose and up_direction != "Z+" and up_direction is not None:
                     FreeCAD.Console.PrintMessage(f"     Part copy {shape_instance.id}: BoundBox={part_copy.Shape.BoundBox}\n")
                 
                 # Copy boundary if exists
