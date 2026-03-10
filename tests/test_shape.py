@@ -56,3 +56,37 @@ def test_shape_bounding_box(unit_square):
     # (minx, miny, width, height)
     bbox = shape.bounding_box()
     assert bbox == (0, 0, 1, 1)
+
+def test_shape_get_final_placement(unit_square):
+    import FreeCAD
+    mock_obj = MagicMock()
+    mock_obj.Label = "TestPart"
+    shape = Shape(mock_obj)
+    shape.polygon = unit_square # Centroid (0.5, 0.5)
+    shape.original_polygon = unit_square
+    
+    # 0 deg rotation
+    shape.set_rotation(0)
+    placement_0 = shape.get_final_placement(FreeCAD.Vector(10, 10, 0))
+    # container_pos = sheet_origin (10,10,0) + centroid (0.5, 0.5, 0) = (10.5, 10.5, 0)
+    assert placement_0.Base.x == 10.5
+    assert placement_0.Base.y == 10.5
+    assert placement_0.Rotation.Angle == 0.0
+
+    # 90 deg rotation
+    shape.set_rotation(90)
+    placement_90 = shape.get_final_placement(FreeCAD.Vector(0, 0, 0))
+    # Centroid should remain (0.5, 0.5) if it rotates around its own centroid
+    assert placement_90.Base.x == 0.5
+    assert placement_90.Base.y == 0.5
+    assert placement_90.Rotation.Angle == 90.0
+
+    # 180 deg rotation
+    shape.set_rotation(180)
+    placement_180 = shape.get_final_placement(FreeCAD.Vector(0, 0, 0))
+    assert placement_180.Rotation.Angle == 180.0
+
+    # Negative rotation
+    shape.set_rotation(-45)
+    placement_neg = shape.get_final_placement(FreeCAD.Vector(0, 0, 0))
+    assert placement_neg.Rotation.Angle == -45.0

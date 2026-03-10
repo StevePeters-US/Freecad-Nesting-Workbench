@@ -64,3 +64,28 @@ def test_mutate_chromosome_swap(mock_parts):
     
     # At least one operator should have fired
     assert new_order != original_order
+
+def test_mutate_single_gene():
+    # T-020: Mutation on single-gene chromosome should do nothing/not fail
+    chromo = [MagicMock()]
+    mutate_chromosome(chromo, mutation_rate=1.0, rotation_steps=4)
+    assert len(chromo) == 1
+
+def test_ordered_crossover_identical(mock_parts):
+    # T-020: Crossover where both parents are identical
+    p1 = mock_parts
+    p2 = [p for p in mock_parts] # Shallow copy of list, same objects
+    child = ordered_crossover(p1, p2)
+    
+    assert len(child) == len(p1)
+    child_ids = [p.id for p in child]
+    p1_ids = [p.id for p in p1]
+    # Even with identical parents, the order might be different depending on crossover points
+    # but the SET of IDs must be the same.
+    assert set(child_ids) == set(p1_ids)
+
+def test_tournament_selection_size_1():
+    # T-020: Selection on a population of size 1
+    pop = [(1.0, "only_one")]
+    winner = tournament_selection(pop, k=3)
+    assert winner == "only_one"

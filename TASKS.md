@@ -66,29 +66,29 @@
 
 ### Naming Clarity
 
-- [ ] **T-011** `nestingworkbench/Tools/Nesting/nesting_logic.py`
+- [x] **T-011** `nestingworkbench/Tools/Nesting/nesting_logic.py`
   Rename internal helper `_draw_trial_bounds` → `_visualize_trial_placement`.
   Update every call site in the same file.
 
-- [ ] **T-012** `nestingworkbench/Tools/Nesting/algorithms/minkowski_utils.py`
+- [x] **T-012** `nestingworkbench/Tools/Nesting/algorithms/minkowski_utils.py`
   Rename `minkowski_difference` → `calculate_inner_fit_polygon`.
   Update every call site across the project
   (`minkowski_engine.py`, any other callers found via grep).
 
-- [ ] **T-013** `nestingworkbench/Tools/Nesting/layout_manager.py`
+- [x] **T-013** `nestingworkbench/Tools/Nesting/layout_manager.py`
   Add a one-line docstring to `_calculate_contact_score()` explaining:
   - what the return value represents
   - whether higher or lower is better
 
 ### Documentation
 
-- [ ] **T-014** `nestingworkbench/datatypes/shape.py` — `Shape.__init__`
+- [x] **T-014** `nestingworkbench/datatypes/shape.py` — `Shape.__init__`
   Add a class-level docstring that explains:
   - `polygon` — the buffered/offset polygon used for nesting gap calculations
   - `original_polygon` — the true polygon boundary before buffering
   - `unbuffered_polygon` — (if present) same as original; clarify which is canonical
 
-- [ ] **T-015** `nestingworkbench/Tools/Nesting/algorithms/minkowski_utils.py`
+- [x] **T-015** `nestingworkbench/Tools/Nesting/algorithms/minkowski_utils.py`
   Add a module-level docstring at line 1 explaining that this module computes
   No-Fit Polygons (NFP) and Inner-Fit Polygons (IFP) using Minkowski sums/differences.
 
