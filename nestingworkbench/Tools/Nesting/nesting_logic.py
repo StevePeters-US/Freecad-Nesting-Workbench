@@ -20,7 +20,7 @@ except ImportError:
 # Global reference for trial visualization object
 _trial_viz_obj = None
 
-def _draw_trial_bounds(part, angle, x, y):
+def _visualize_trial_placement(part, angle, x, y):
     """Draws the boundary polygon at a trial position during simulation."""
     global _trial_viz_obj
     
@@ -192,7 +192,7 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
 
     # If simulation is enabled, add callbacks to kwargs
     if simulate:
-        kwargs['trial_callback'] = _draw_trial_bounds
+        kwargs['trial_callback'] = _visualize_trial_placement
         kwargs['part_start_callback'] = _on_part_start
         kwargs['part_end_callback'] = _on_part_end
 

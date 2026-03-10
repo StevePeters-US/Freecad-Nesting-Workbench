@@ -4,7 +4,7 @@ from nestingworkbench.Tools.Nesting.algorithms.minkowski_utils import (
     decompose_if_needed,
     minkowski_sum_convex,
     minkowski_difference_convex,
-    minkowski_difference,
+    calculate_inner_fit_polygon,
     minkowski_sum
 )
 
@@ -46,10 +46,10 @@ def test_minkowski_difference_convex_IFP(large_square, unit_square):
     # 10 - 1 = 9. Area should be 9*9 = 81.
     assert pytest.approx(result.area) == 81.0
 
-def test_minkowski_difference_integration(large_square, unit_square):
-    # Integration test for minkowski_difference
+def test_calculate_inner_fit_polygon_integration(large_square, unit_square):
+    # Integration test for calculate_inner_fit_polygon
     logger = lambda x, level=None: None
     # IFP for 1x1 inside 10x10
-    result = minkowski_difference(large_square, 0, unit_square, 0, logger)
+    result = calculate_inner_fit_polygon(large_square, 0, unit_square, 0, logger)
     assert result is not None
     assert pytest.approx(result.area) == 81.0

@@ -10,32 +10,32 @@
 
 ### Exception Handling
 
-- [ ] **T-001** `nestingworkbench/Tools/Nesting/nesting_logic.py` lines 53-56
+- [x] **T-001** `nestingworkbench/Tools/Nesting/nesting_logic.py` lines 53-56
   Replace `except Exception: pass` with a log statement:
   `FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")`
 
-- [ ] **T-002** `nestingworkbench/Tools/Nesting/nesting_logic.py` lines 77-80
+- [x] **T-002** `nestingworkbench/Tools/Nesting/nesting_logic.py` lines 77-80
   Same as T-001 — replace silent `except Exception: pass` with a warning log.
 
-- [ ] **T-003** `nestingworkbench/Tools/Nesting/shape_preparer.py` line 89
+- [x] **T-003** `nestingworkbench/Tools/Nesting/shape_preparer.py` line 89
   Add `import traceback` at top of file (if missing). Append
   `traceback.format_exc()` to the existing error message string so the full
   stack trace is printed to the FreeCAD console.
 
-- [ ] **T-004** `nestingworkbench/Tools/Nesting/shape_preparer.py` line 221
+- [x] **T-004** `nestingworkbench/Tools/Nesting/shape_preparer.py` line 221
   Same as T-003 — add traceback to the shape-reload failure message.
 
-- [ ] **T-005** `nestingworkbench/Tools/Nesting/layout_manager.py` line 212
+- [x] **T-005** `nestingworkbench/Tools/Nesting/layout_manager.py` line 212
   Replace bare `except Exception:` with a logged warning that includes the
   part name and the exception message. Do not silently swallow the error.
 
-- [ ] **T-006** `nestingworkbench/Tools/ManualNester/manual_nester_tool.py`
+- [x] **T-006** `nestingworkbench/Tools/ManualNester/manual_nester_tool.py`
   Search for `except Exception:` or `except:` with `pass` body and add a
   `FreeCAD.Console.PrintWarning(...)` log line to each one.
 
 ### Magic Numbers → Named Constants
 
-- [ ] **T-007** `nestingworkbench/Tools/Nesting/ui_nesting.py` lines 54-67
+- [x] **T-007** `nestingworkbench/Tools/Nesting/ui_nesting.py` lines 54-67
   At the top of the file (after imports), add a `_DEFAULTS` dict:
   ```python
   _DEFAULTS = {
@@ -50,17 +50,17 @@
   Replace each hardcoded literal in the widget initialisation code with the
   corresponding `_DEFAULTS[...]` key.
 
-- [ ] **T-008** `nestingworkbench/Tools/Nesting/ui_nesting.py` line 118
+- [x] **T-008** `nestingworkbench/Tools/Nesting/ui_nesting.py` line 118
   Replace the hardcoded dial range `(0, 359)` with a named constant
   `_MINKOWSKI_DIR_MAX = 359` defined at module top.
 
 ### Dead Code / Unused Imports
 
-- [ ] **T-009** `nestingworkbench/datatypes/sheet.py` line 14
+- [x] **T-009** `nestingworkbench/datatypes/sheet.py` line 14
   Remove the commented-out import:
   `# from shapely.ops import unary_union`
 
-- [ ] **T-010** `nestingworkbench/Tools/Nesting/algorithms/nesting_strategy.py`
+- [x] **T-010** `nestingworkbench/Tools/Nesting/algorithms/nesting_strategy.py`
   Verify whether `from collections import defaultdict` (line 6) is actually
   used in the file. If unused, remove the import.
 

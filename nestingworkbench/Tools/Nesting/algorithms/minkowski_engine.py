@@ -205,7 +205,7 @@ class MinkowskiEngine:
                         poly_B_rotated.bounds[3] - poly_B_rotated.bounds[1] < hole_poly_rotated.bounds[3] - hole_poly_rotated.bounds[1] and
                             poly_B_rotated.area < hole_poly_rotated.area):
                         
-                        ifp_raw = minkowski_utils.minkowski_difference(hole_poly_rotated, 0, poly_B_centered, angle_B, self.log)
+                        ifp_raw = minkowski_utils.calculate_inner_fit_polygon(hole_poly_rotated, 0, poly_B_centered, angle_B, self.log)
                         
                         if ifp_raw and ifp_raw.area > 0:
                             if ifp_raw.geom_type == 'Polygon':
@@ -379,7 +379,7 @@ class MinkowskiEngine:
                                 poly_B_rotated.area < hole_poly_rotated.area):
                              
                              # Use CPU utils for difference (erosion)
-                             ifp_raw = minkowski_utils.minkowski_difference(hole_poly_rotated, 0, poly_B_centered, angle_B, self.log)
+                             ifp_raw = minkowski_utils.calculate_inner_fit_polygon(hole_poly_rotated, 0, poly_B_centered, angle_B, self.log)
                              if ifp_raw and ifp_raw.area > 0:
                                  if ifp_raw.geom_type == 'Polygon':
                                      nfp_interiors.append(ifp_raw.exterior)

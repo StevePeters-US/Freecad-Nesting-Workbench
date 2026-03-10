@@ -18,10 +18,18 @@ except ImportError:
     SHAPELY_AVAILABLE = False
 
 class Shape:
-    """
-    Represents a single part for nesting. This class holds the source object,
-    its geometric boundary (as a shapely Polygon), and its placement state
-    during and after the nesting process.
+    """Represents a single part for nesting.
+
+    This class holds the source object, its geometric boundary (as a shapely
+    Polygon), and its placement state during and after the nesting process.
+
+    Attributes:
+        polygon (Polygon): The current, transformed polygon used for nesting gap
+            calculations and collision checks.
+        original_polygon (Polygon): The true polygon boundary before buffering.
+            Used as a base for rotation operations.
+        unbuffered_polygon (Polygon): The un-rotated, un-buffered polygon for
+            area calculation and visualization.
     """
     nfp_cache = {}
     nfp_cache_lock = threading.Lock()

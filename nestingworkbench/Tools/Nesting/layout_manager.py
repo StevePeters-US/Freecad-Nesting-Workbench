@@ -235,10 +235,14 @@ class LayoutManager:
     
     def _calculate_contact_score(self, layout) -> float:
         """
-        Calculate how much parts are in contact with each other.
-        Higher score = more contact = better packing.
+        Calculates the total contact score between parts in the layout.
         
-        Uses buffer/touches approach: if buffered polygon touches another, they're in contact.
+        The score represents the total length (or normalized area) of contact
+        between part boundaries. A higher score indicates better packing density
+        as parts are more tightly "tucked" against each other.
+        
+        Returns:
+            float: The cumulative contact score (higher is better).
         """
         try:
             from shapely.ops import unary_union

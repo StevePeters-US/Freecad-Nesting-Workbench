@@ -1,3 +1,9 @@
+"""Computes No-Fit Polygons (NFP) and Inner-Fit Polygons (IFP) using Minkowski sums/differences.
+
+This module provides geometric utility functions for calculating Minkowski sums
+and differences (including containment/erosion for IFP) to determine valid
+placement zones for nesting operations.
+"""
 import math
 from shapely.geometry import Polygon, MultiPoint
 from shapely.ops import unary_union, triangulate
@@ -56,7 +62,7 @@ def minkowski_sum_convex(poly1, poly2):
 def minkowski_difference_convex(poly1, poly2):
     """
     Computes the erosion of poly1 by poly2, which is the Inner-Fit Polygon.
-    This is NOT the Minkowski Difference, which would enlarge the polygon.
+    This is NOT the Inner-Fit Polygon calculation (calculate_inner_fit_polygon), which would enlarge the polygon.
     """
     if not poly1 or poly1.is_empty or not poly2 or poly2.is_empty:
         return None
@@ -79,7 +85,7 @@ def minkowski_difference_convex(poly1, poly2):
     return eroded_poly
 
 
-def minkowski_difference(master_poly1, angle1, master_poly2, angle2, logger):
+def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logger):
     """
     Computes the Inner-Fit Polygon for master_poly2 inside master_poly1.
     The IFP represents valid positions for poly2's CENTROID where poly2 fits inside poly1.
@@ -106,7 +112,7 @@ def minkowski_difference(master_poly1, angle1, master_poly2, angle2, logger):
         # Translate poly2 so its centroid is at origin
         p2_at_origin = translate(p2, xoff=-p2_centroid.x, yoff=-p2_centroid.y)
         
-        # Compute Minkowski difference
+        # Compute Inner-Fit Polygon
         diff = minkowski_difference_convex(poly1_exterior_only, p2_at_origin)
         pairwise_diffs.append(diff)
     
