@@ -5,21 +5,26 @@ and differences (including containment/erosion for IFP) to determine valid
 placement zones for nesting operations.
 """
 import math
+import threading
 from shapely.geometry import Polygon, MultiPoint
 from shapely.ops import unary_union, triangulate
 from shapely.affinity import rotate, scale, translate
 
 from ....datatypes.shape import Shape
 
+_decomposition_lock = threading.Lock()
+
 
 def decompose_if_needed(polygon, logger):
-    """Decomposes a non-convex polygon into convex parts."""
+    """Decomposes a non-convex polygon into convex parts (triangles)."""
     if not polygon or polygon.is_empty:
         return []
     
+    # Use WKT for cache key
     cache_key = polygon.wkt
-    if Shape.decomposition_cache.get(cache_key):
-        return Shape.decomposition_cache.get(cache_key)
+    with _decomposition_lock:
+        if cache_key in Shape.decomposition_cache:
+            return Shape.decomposition_cache[cache_key]
 
     if polygon.geom_type == 'MultiPolygon':
         all_decomposed_parts = []
@@ -27,19 +32,32 @@ def decompose_if_needed(polygon, logger):
             all_decomposed_parts.extend(decompose_if_needed(p, logger))
         return all_decomposed_parts
 
-    if math.isclose(polygon.area, polygon.convex_hull.area):
+    # If already convex-ish (triangle or area match convex hull), return as is
+    if polygon.geom_type == 'Polygon' and len(polygon.exterior.coords) <= 4:
+        return [polygon]
+        
+    if math.isclose(polygon.area, polygon.convex_hull.area, rel_tol=10e-5):
         return [polygon]
     
     try:
+        # Triangulation is the most robust decomposition for complex NFPs with holes
         triangles = triangulate(polygon)
-        decomposed = [tri for tri in triangles if polygon.contains(tri.representative_point())]
-        Shape.decomposition_cache[cache_key] = decomposed
+        decomposed = []
+        for tri in triangles:
+             # Only keep triangles that are inside the original polygon
+             # and have meaningful area (ignore slivers)
+             if tri.area > 1e-9 and polygon.contains(tri.representative_point()):
+                 decomposed.append(tri)
+        
+        with _decomposition_lock:
+            Shape.decomposition_cache[cache_key] = decomposed
         return decomposed
     except Exception as e:
-        logger(f"      - Shapely triangulation not available or failed: {e}. Falling back to convex hull.", level="warning")
+        logger(f"      - Shapely triangulation failed for decomposition: {e}. Falling back to convex hull.", level="warning")
 
     result = [polygon.convex_hull]
-    Shape.decomposition_cache[cache_key] = result
+    with _decomposition_lock:
+        Shape.decomposition_cache[cache_key] = result
     return result
 
 

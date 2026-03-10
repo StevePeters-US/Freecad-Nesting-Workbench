@@ -91,6 +91,103 @@ if TAICHI_AVAILABLE:
             out_len[r, i, j] = out_idx
 
 
+    @ti.kernel
+    def is_inside_any_convex_kernel(
+        n_points: int,
+        points: ti.types.ndarray(),        # [n_points, 2]
+        n_polys: int,
+        poly_starts: ti.types.ndarray(),   # [n_polys] start index in vertices array
+        poly_lens: ti.types.ndarray(),     # [n_polys] number of vertices
+        vertices: ti.types.ndarray(),      # [total_vertices, 2]
+        results: ti.types.ndarray()        # [n_points] - 1 if inside any, 0 otherwise
+    ):
+        """
+        Check if each point is inside any of the convex polygons in the batch.
+        Parallelizes over points. For each point, iterate through polygons.
+        Inside check for convex: point must be on the same side of all edges.
+        """
+        for p_idx in range(n_points):
+            px = points[p_idx, 0]
+            py = points[p_idx, 1]
+            
+            is_found = 0
+            for poly_idx in range(n_polys):
+                if is_found == 1:
+                    continue
+                
+                start = poly_starts[poly_idx]
+                count = poly_lens[poly_idx]
+                
+                if count < 3:
+                    continue
+                
+                has_pos = 0
+                has_neg = 0
+                for i in range(count):
+                    # Edge from V_i to V_{i+1}
+                    v1x = vertices[start + i, 0]
+                    v1y = vertices[start + i, 1]
+                    
+                    next_idx = i + 1
+                    if next_idx == count:
+                        next_idx = 0
+                    
+                    v2x = vertices[start + next_idx, 0]
+                    v2y = vertices[start + next_idx, 1]
+                    
+                    # Cross product to determine side
+                    # (v2.x - v1.x) * (p.y - v1.y) - (v2.y - v1.y) * (p.x - v1.x)
+                    side = (v2x - v1x) * (py - v1y) - (v2y - v1y) * (px - v1x)
+                    
+                    if side > 1e-6:
+                        has_pos = 1
+                    elif side < -1e-6:
+                        has_neg = 1
+                    
+                    # If we have both, it's outside a convex hull
+                    if has_pos == 1 and has_neg == 1:
+                        break
+                
+                if (has_pos == 1 and has_neg == 0) or (has_pos == 0 and has_neg == 1) or (has_pos == 0 and has_neg == 0):
+                    is_found = 1
+            
+            results[p_idx] = is_found
+
+    def compute_batch_pip(points_np, convex_polys):
+        """
+        Efficiently check if a list of points are inside ANY of the provided convex polygons.
+        """
+        if not points_np.any() or not convex_polys:
+            return np.zeros(len(points_np), dtype=np.int32)
+            
+        n_points = len(points_np)
+        n_polys = len(convex_polys)
+        
+        # Flatten polygons into a single array for the kernel
+        poly_lens = np.array([len(p.exterior.coords) - 1 for p in convex_polys], dtype=np.int32)
+        poly_starts = np.zeros(n_polys, dtype=np.int32)
+        total_verts = sum(poly_lens)
+        
+        all_vertices = np.zeros((total_verts, 2), dtype=np.float32)
+        current_offset = 0
+        for i, p in enumerate(convex_polys):
+            poly_starts[i] = current_offset
+            coords = np.array(p.exterior.coords)[:-1]
+            all_vertices[current_offset:current_offset + poly_lens[i]] = coords
+            current_offset += poly_lens[i]
+            
+        results_np = np.zeros(n_points, dtype=np.int32)
+        
+        with _kernel_lock:
+            is_inside_any_convex_kernel(
+                n_points, points_np,
+                n_polys, poly_starts, poly_lens, all_vertices,
+                results_np
+            )
+            
+        return results_np
+
+
     def compute_nfp_batch(poly_a_list, poly_b_list, rotations_deg):
         """
         Computes the NFP for a list of convex polygons A and B across multiple rotations.

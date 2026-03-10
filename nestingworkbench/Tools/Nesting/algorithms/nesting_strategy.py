@@ -27,6 +27,7 @@ class PlacementOptimizer:
         self.search_direction = search_direction
         self.log_callback = log_callback
         self.trial_callback = trial_callback  # Called for each trial placement in simulation mode
+        self.verbose = False
 
     def log(self, message):
         if self.log_callback:
@@ -58,24 +59,43 @@ class PlacementOptimizer:
             part_rotation_steps = self.rotation_steps
         part_rotation_steps = max(1, part_rotation_steps)
         
-        # Parallel execution
-        with ThreadPoolExecutor() as executor:
+        # Batch evaluate or parallel evaluate
+        if self.engine.use_gpu:
+            # 1. Collect candidates for ALL rotations
+            all_rotation_candidates = []
             angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
-            futures = {
-                executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle 
-                for angle in angles
-            }
             
-            for future in as_completed(futures):
-                try:
-                    res = future.result()
-                    if res and res['metric'] < best_result['metric']:
-                        best_result = res
-                        # Call trial callback from main thread for each better result found
-                        if self.trial_callback and best_result.get('x') is not None:
-                            self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
-                except Exception as e:
-                    self.log(f"Error in rotation evaluation thread: {e}")
+            # Precompute NFPs in batch on GPU
+            self.engine.precompute_nfp_batch(part, angles, sheet)
+            
+            for angle in angles:
+                candidates = self._get_candidates_for_rotation(angle, part, sheet)
+                if candidates:
+                    all_rotation_candidates.append((angle, candidates))
+            
+            # 2. Batch score on GPU
+            res = self.engine.score_candidates_gpu(part, all_rotation_candidates, sheet)
+            if res and res.get('metric', float('inf')) < best_result['metric']:
+                best_result = res
+        else:
+            # CPU Parallel evaluation
+            with ThreadPoolExecutor() as executor:
+                angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
+                futures = {
+                    executor.submit(self._evaluate_rotation, angle, part, placed_parts_grouped, sheet, direction): angle 
+                    for angle in angles
+                }
+                
+                for future in as_completed(futures):
+                    try:
+                        res = future.result()
+                        if res and res['metric'] < best_result['metric']:
+                            best_result = res
+                            # Call trial callback from main thread for each better result found
+                            if self.trial_callback and best_result.get('x') is not None:
+                                self.trial_callback(part, best_result['angle'], best_result['x'], best_result['y'])
+                    except Exception as e:
+                        self.log(f"Error in rotation evaluation thread: {e}")
         
         if self.verbose:
             self.log(f"  -> Best result for {part.id}: {best_result}")
@@ -110,38 +130,22 @@ class PlacementOptimizer:
                      prepared_nfp = nfp_entry['prepared']
 
         # 2. Generate Candidates
+        ext_cands = self._get_candidates_for_rotation(angle, part, sheet)
+        if not ext_cands:
+            return {'metric': float('inf')}
+            
         rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
         if not rotated_poly: return {'metric': float('inf')}
 
-        # A. Bin Candidates (Corners of part vs Corners of bin)
-        min_x, min_y, max_x, max_y = rotated_poly.bounds
-        ext_cands = []
-        w_bin, h_bin = self.engine.bin_width, self.engine.bin_height
-        
-        # Essential placement points
-        # Bottom-Left at (0,0) -> (-min_x, -min_y)
-        ext_cands.append(Point(-min_x, -min_y)) 
-        ext_cands.append(Point(w_bin - max_x, -min_y))
-        ext_cands.append(Point(-min_x, h_bin - max_y))
-        ext_cands.append(Point(w_bin - max_x, h_bin - max_y))
-
-        # B. NFP Boundary Candidates
-        # Filter points that are within bin bounds
-        valid_points = []
-        for p in nfp_entry['points']:
-             if 0 <= p.x <= w_bin and 0 <= p.y <= h_bin:
-                 valid_points.append(p)
-        ext_cands.extend(valid_points)
-
         # 3. Score Candidates
-        centroid = rotated_poly.centroid
-        dir_x, dir_y = direction
-        
         best = {'metric': float('inf')}
         valid_count = 0
         rejected_nfp = 0
         rejected_bounds = 0
         
+        centroid = rotated_poly.centroid
+        dir_x, dir_y = direction
+
         def score_point(pt):
              nonlocal rejected_nfp, rejected_bounds
              # A. Check NFP Collision (Fastest if cached)
@@ -156,12 +160,9 @@ class PlacementOptimizer:
              if not bin_polygon.contains(test_poly):
                  rejected_bounds += 1
                  return None
-
+ 
              return pt.x * (-dir_x) + pt.y * (-dir_y)
-
-        # Sort candidates (heuristic optimization)
-        # ext_cands.sort(key=lambda p: p.x * (-dir_x) + p.y * (-dir_y))
-
+ 
         for pt in ext_cands:
             valid_metric = score_point(pt)
             if valid_metric is not None:
@@ -169,7 +170,37 @@ class PlacementOptimizer:
                 if valid_metric < best['metric']:
                     best = {'x': pt.x, 'y': pt.y, 'angle': angle, 'metric': valid_metric}
         
+        # Notify better result found
+        if self.trial_callback and best.get('x') is not None:
+             self.trial_callback(part, angle, best['x'], best['y'])
+             
         return best
+
+    def _get_candidates_for_rotation(self, angle, part, sheet):
+        """Helper to compute candidate points for a specific rotation."""
+        nfp_entry = self.engine.get_global_nfp_for(part, angle, sheet)
+        if nfp_entry is None:
+            return []
+            
+        rotated_poly = rotate(part.original_polygon, angle, origin='centroid')
+        if not rotated_poly: return []
+
+        min_x, min_y, max_x, max_y = rotated_poly.bounds
+        ext_cands = []
+        w_bin, h_bin = self.engine.bin_width, self.engine.bin_height
+        
+        # Essential placement points
+        ext_cands.append(Point(-min_x, -min_y)) 
+        ext_cands.append(Point(w_bin - max_x, -min_y))
+        ext_cands.append(Point(-min_x, h_bin - max_y))
+        ext_cands.append(Point(w_bin - max_x, h_bin - max_y))
+
+        # NFP Boundary Candidates
+        for p in nfp_entry['points']:
+             if 0 <= p.x <= w_bin and 0 <= p.y <= h_bin:
+                 ext_cands.append(p)
+                 
+        return ext_cands
 
 
 class Nester:
