@@ -18,6 +18,7 @@ _DEFAULTS = {
     "part_spacing": 12.5,
     "sheet_thickness": 3.0,
     "deflection_angle": 30.0,
+    "verbose_logging": False,
     "rotation_angles": [360, 180, 120, 90, 45, 30, 15, 10, 5, 1],
 }
 
@@ -197,6 +198,8 @@ class NestingPanel(QtGui.QWidget):
         self.label_size_input = QtGui.QDoubleSpinBox(); self.label_size_input.setRange(1, 100); self.label_size_input.setValue(10.0)
         self.label_size_input.setToolTip("The text size for identifier labels in mm.")
         self.simulate_nesting_checkbox = QtGui.QCheckBox("Simulate Nesting (slower)"); self.simulate_nesting_checkbox.setChecked(True)
+        self.verbose_logging_checkbox = QtGui.QCheckBox("Verbose Logging"); self.verbose_logging_checkbox.setChecked(_DEFAULTS["verbose_logging"])
+        self.verbose_logging_checkbox.setToolTip("Enables detailed logging of the nesting process in the FreeCAD console.")
         self.sound_checkbox = QtGui.QCheckBox("Play sound on completion"); self.sound_checkbox.setChecked(True)
         
         self.nest_button = QtGui.QPushButton("Run Nesting")
@@ -251,6 +254,7 @@ class NestingPanel(QtGui.QWidget):
         form_layout.addRow("Global Rotation Steps:", rotation_layout)
 
         form_layout.addRow(self.simulate_nesting_checkbox)
+        form_layout.addRow(self.verbose_logging_checkbox)
         form_layout.addRow(self.show_bounds_checkbox) # Keep this on its own line
         form_layout.addRow(self.sound_checkbox)
         
@@ -452,6 +456,7 @@ class NestingPanel(QtGui.QWidget):
         self.deflection_input.setValue(deflection_angle)
         self.simplification_input.setValue(prefs.GetFloat("Simplification", 1.0))
         self.use_gpu_checkbox.setChecked(prefs.GetBool("UseGPU", False))
+        self.verbose_logging_checkbox.setChecked(prefs.GetBool("VerboseLogging", False))
         
         # Load Rotation Steps
         rot_steps = prefs.GetInt("RotationSteps", 0)

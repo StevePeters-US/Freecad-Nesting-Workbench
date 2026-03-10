@@ -18,12 +18,13 @@ class MinkowskiEngine:
     Handles geometric operations for Minkowski nesting, such as NFP generation,
     candidate point finding, and placement validation.
     """
-    def __init__(self, bin_width, bin_height, step_size, discretize_edges=True, log_callback=None, use_gpu=False):
+    def __init__(self, bin_width, bin_height, step_size, discretize_edges=True, log_callback=None, use_gpu=False, verbose=False):
         self.bin_width = bin_width
         self.bin_height = bin_height
         self.step_size = step_size
         self.discretize_edges = discretize_edges
         self.log_callback = log_callback
+        self.verbose = verbose
         self.use_gpu = use_gpu and nfp_gpu_taichi and nfp_gpu_taichi.is_available() # Check availability
         self._log_lock = Lock()
         
@@ -168,7 +169,8 @@ class MinkowskiEngine:
 
         try:
             # DEBUG LOGGING
-            self.log(f"Calculating NFP on CPU for {cache_key}")
+            if self.verbose:
+                self.log(f"Calculating NFP on CPU for {cache_key}")
             
             poly_A_master = shape_A.original_polygon
             poly_B_master = part_to_place.original_polygon
@@ -258,7 +260,8 @@ class MinkowskiEngine:
         
         try:
             # DEBUG LOGGING
-            self.log(f"Calculating NFP on GPU (Taichi) for {cache_key}")
+            if self.verbose:
+                self.log(f"Calculating NFP on GPU (Taichi) for {cache_key}")
 
             poly_A_master = shape_A.original_polygon
             poly_B_master = part_to_place.original_polygon

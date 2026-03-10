@@ -77,6 +77,9 @@ class PlacementOptimizer:
                 except Exception as e:
                     self.log(f"Error in rotation evaluation thread: {e}")
         
+        if self.verbose:
+            self.log(f"  -> Best result for {part.id}: {best_result}")
+
         if best_result.get('x') is not None:
              part.set_rotation(best_result['angle'], reposition=False)
              curr = part.centroid
@@ -188,6 +191,7 @@ class Nester:
         
         # Logging control
         self.quiet = kwargs.get("quiet", False)  # If True, suppress per-part logs
+        self.verbose = kwargs.get("verbose", False)  # If True, enable extra detailed logs
         self.log_callback = kwargs.get("log_callback")
         self.trial_callback = kwargs.get("trial_callback")  # For visualizing trial placements
         self.part_start_callback = kwargs.get("part_start_callback")  # Called when starting to place a part
@@ -196,8 +200,9 @@ class Nester:
         
         step_size = kwargs.get("step_size", 5.0) 
         use_gpu = kwargs.get("use_gpu", False)
-        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, use_gpu=use_gpu)
+        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, use_gpu=use_gpu, verbose=self.verbose)
         self.optimizer = PlacementOptimizer(self.engine, rotation_steps, self.search_direction, self.log_callback, self.trial_callback)
+        self.optimizer.verbose = self.verbose
 
         self.parts_to_place = []
         self.sheets = []
@@ -252,10 +257,12 @@ class Nester:
         total_parts = len(current_parts)
         
         for i, part in enumerate(current_parts):
-            if not quiet:
+            if self.verbose and not quiet:
                 self.log(f"Processing part {i+1}/{total_parts}: {part.id}")
-                if self.progress_callback:
-                    self.progress_callback(i + 1, total_parts, f"Placing {part.id}...")
+            
+            if not quiet and self.progress_callback:
+                self.progress_callback(i + 1, total_parts, f"Placing {part.id}...")
+            
             start_part_time = datetime.now()
             placed = False
             
@@ -269,10 +276,12 @@ class Nester:
 
                 if self._attempt_placement_on_sheet(part, sheet):
                     placed = True
-                    if not quiet:
+                    if self.verbose and not quiet:
                         elapsed = (datetime.now() - start_part_time).total_seconds()
                         self.log(f"  -> Placed on Sheet {sheet_idx+1} ({elapsed:.4f}s)")
-                        if self.update_callback: self.update_callback(part, sheet)
+                    
+                    if not quiet and self.update_callback: 
+                        self.update_callback(part, sheet)
                     break
             
             # 2. Try new sheet
@@ -281,10 +290,12 @@ class Nester:
                 if self._attempt_placement_on_sheet(part, new_sheet):
                     sheets.append(new_sheet)
                     placed = True
-                    if not quiet:
+                    if self.verbose and not quiet:
                         elapsed = (datetime.now() - start_part_time).total_seconds()
                         self.log(f"  -> Placed on New Sheet {len(sheets)} ({elapsed:.4f}s)")
-                        if self.update_callback: self.update_callback(part, new_sheet)
+                    
+                    if not quiet and self.update_callback: 
+                        self.update_callback(part, new_sheet)
                 else:
                     unplaced_parts.append(part)
                     if not quiet:

@@ -144,7 +144,7 @@ class Sheet:
         
         return True
 
-    def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None, x_offset=0):
+    def draw(self, doc, ui_params, parent_group=None, transient_part=None, parts_to_place_group=None, x_offset=0, verbose=False):
         """
         Draws the sheet and its contents into the FreeCAD document.
 
@@ -158,7 +158,9 @@ class Sheet:
             parts_to_place_group (App.DocumentObjectGroup): Optional. The temporary group where parts were created.
                                                             Required to safely remove parts from it to prevent deletion.
             x_offset (float): Optional X offset for placing layouts side by side in GA mode.
+            verbose (bool): Optional. If True, enables detailed drawing logs.
         """
+        # verbose is passed as an argument
         sheet_origin = self.get_origin()
         # Apply X offset for GA layout visualization
         if x_offset != 0:
@@ -206,7 +208,7 @@ class Sheet:
 
             # Draw the parts placed on this sheet
             for placed_part in self.parts:
-                self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, shapes_group, parts_to_place_group)
+                self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, sheet_group, parts_to_place_group, verbose=verbose)
 
         # --- Simulation Drawing Mode (with transient_part) ---
         elif transient_part:
@@ -221,9 +223,9 @@ class Sheet:
                     sim_boundary.ViewObject.DisplayMode = "Flat Lines"
             sim_boundary.Placement = FreeCAD.Placement(sheet_origin, FreeCAD.Rotation())
             
-            self._draw_single_part(doc, transient_part, sheet_origin, ui_params)
+            self._draw_single_part(doc, transient_part, sheet_origin, ui_params, verbose=verbose)
 
-    def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None, parts_to_place_group=None):
+    def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None, parts_to_place_group=None, verbose=False):
         """Helper to draw a single part, either for final placement or simulation."""
         if shape:
             # For final drawing, placement is pre-calculated. For simulation, we calculate it now.
@@ -294,12 +296,14 @@ class Sheet:
                     if boundary_obj:
                         bbb = boundary_obj.Shape.BoundBox
                         bound_center_str = f"({(bbb.XMin + bbb.XMax)/2:.2f}, {(bbb.YMin + bbb.YMax)/2:.2f})"
-                    FreeCAD.Console.PrintMessage(
-                        f"  DRAW {shape.id}: shape_visual=({shape_visual_center.x:.2f}, {shape_visual_center.y:.2f})"
-                        f" bounds_center={bound_center_str}"
-                        f" shape_plc=({shape_obj.Placement.Base.x:.2f}, {shape_obj.Placement.Base.y:.2f})"
-                        f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})\n"
-                    )
+                    
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(
+                            f"  DRAW {shape.id}: shape_visual=({shape_visual_center.x:.2f}, {shape_visual_center.y:.2f})"
+                            f" bounds_center={bound_center_str}"
+                            f" shape_plc=({shape_obj.Placement.Base.x:.2f}, {shape_obj.Placement.Base.y:.2f})"
+                            f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})\n"
+                        )
 
                     # --- Handle the label object AFTER the container is placed ---
                     if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:

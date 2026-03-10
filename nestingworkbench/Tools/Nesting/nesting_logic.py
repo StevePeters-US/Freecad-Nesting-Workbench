@@ -221,11 +221,11 @@ def nest(parts, width, height, rotation_steps=1, simulate=False, **kwargs):
         sheets, unplaced = result
 
     # Calculate and display packing efficiency
-    _calculate_efficiency(sheets)
+    _calculate_efficiency(sheets, verbose=kwargs.get('verbose', False))
 
     return sheets, unplaced, steps, elapsed
 
-def _calculate_efficiency(sheets):
+def _calculate_efficiency(sheets, verbose=False):
     """Calculates and displays sheet packing efficiency."""
     if not sheets:
         return
@@ -233,7 +233,8 @@ def _calculate_efficiency(sheets):
     total_parts_area = 0
     total_sheet_area = 0
     
-    FreeCAD.Console.PrintMessage("\n--- PACKING EFFICIENCY ---\n")
+    if verbose:
+        FreeCAD.Console.PrintMessage("\n--- PACKING EFFICIENCY ---\n")
     
     for i, sheet in enumerate(sheets):
         sheet_area = sheet.width * sheet.height
@@ -242,15 +243,17 @@ def _calculate_efficiency(sheets):
         total_sheet_area += sheet_area
         total_parts_area += parts_area
         
-        if sheet_area > 0:
+        if verbose and sheet_area > 0:
             efficiency = (parts_area / sheet_area) * 100
             FreeCAD.Console.PrintMessage(f"  Sheet {i+1}: {efficiency:.1f}% ({parts_area:.0f} / {sheet_area:.0f} mm²)\n")
     
     if total_sheet_area > 0:
         overall_efficiency = (total_parts_area / total_sheet_area) * 100
-        FreeCAD.Console.PrintMessage(f"  Overall: {overall_efficiency:.1f}% ({total_parts_area:.0f} / {total_sheet_area:.0f} mm²)\n")
-    
-    FreeCAD.Console.PrintMessage("--------------------------\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"  Overall: {overall_efficiency:.1f}% ({total_parts_area:.0f} / {total_sheet_area:.0f} mm²)\n")
+            FreeCAD.Console.PrintMessage("--------------------------\n")
+        else:
+            FreeCAD.Console.PrintMessage(f"Packing Efficiency: {overall_efficiency:.1f}%\n")
 
 def show_shapely_installation_instructions():
     msg_box = QtGui.QMessageBox()

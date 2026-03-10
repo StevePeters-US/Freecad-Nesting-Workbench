@@ -74,7 +74,11 @@ class NestingJob:
         self._persist_metadata(quantities, rotation_params)
 
         # 2. Run Algorithm
-        self.sheets, unplaced, steps = nest(
+        # Ensure verbose is in algo_kwargs if present in params
+        if 'verbose_logging' in self.params:
+            algo_kwargs['verbose'] = self.params['verbose_logging']
+
+        self.sheets, unplaced, steps, elapsed = nest(
             parts_to_nest, 
             self.params['sheet_width'], 
             self.params['sheet_height'],
@@ -93,8 +97,9 @@ class NestingJob:
             
         # 3. Draw Results (into Temp Layout)
         # Note: sheet.draw now handles unlinking from PartsToPlace!
+        verbose = self.params.get('verbose_logging', False)
         for sheet in self.sheets:
-            sheet.draw(self.doc, self.params, self.temp_layout, parts_to_place_group=self.parts_group)
+            sheet.draw(self.doc, self.params, self.temp_layout, parts_to_place_group=self.parts_group, verbose=verbose)
             
         return len(self.sheets), sum(len(s) for s in self.sheets)
 
@@ -281,6 +286,12 @@ class NestingController:
         
         algo_kwargs = self._prepare_algo_kwargs(ui_params)
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
+        verbose = self.ui.verbose_logging_checkbox.isChecked()
+        algo_kwargs['verbose'] = verbose
+        
+        # Persist verbose setting
+        prefs = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/NestingWorkbench")
+        prefs.SetBool("VerboseLogging", verbose)
         
         # 3. Execute nesting using unified GA path
         # (population=1, generations=1 is equivalent to standard nesting)
@@ -616,8 +627,10 @@ class NestingController:
         elite_count = max(1, population_size // 5)  # Keep top 20%
         mutation_rate = 0.1
         early_stop_threshold = 5
+        verbose = algo_kwargs.get('verbose', False)
         
-        FreeCAD.Console.PrintMessage(f"GA Mode: {generations} generations, {population_size} population\n")
+        if verbose:
+            FreeCAD.Console.PrintMessage(f"GA Mode: {generations} generations, {population_size} population\n")
         
         # Create LayoutManager
         layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache)
@@ -637,26 +650,30 @@ class NestingController:
         
         try:
             for gen in range(generations):
-                FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
                 self.ui.status_label.setText(f"Generation {gen+1}/{generations}...")
                 QtGui.QApplication.processEvents()
                 
                 # Debug: show all layouts with their part counts
-                FreeCAD.Console.PrintMessage(f"  Layouts to evaluate: {len(layouts)}\n")
-                for i, lay in enumerate(layouts):
-                    part_ids = [p.id for p in lay.parts] if lay.parts else []
-                    FreeCAD.Console.PrintMessage(f"    {i+1}. {lay.name}: {part_ids}\n")
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"  Layouts to evaluate: {len(layouts)}\n")
+                    for i, lay in enumerate(layouts):
+                        part_ids = [p.id for p in lay.parts] if lay.parts else []
+                        FreeCAD.Console.PrintMessage(f"    {i+1}. {lay.name}: {part_ids}\n")
                 
                 # Run nesting on each layout
                 for idx, layout in enumerate(layouts):
-                    FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
                     
                     # Store genes (ordering and rotations) for this layout
                     layout.genes = [(p.id, getattr(p, '_angle', 0)) for p in layout.parts] if layout.parts else []
                     
                     # Skip if already nested (e.g., winner from previous generation)
                     if layout.sheets:
-                        FreeCAD.Console.PrintMessage(f"    -> Already nested (winner from previous gen), efficiency: {layout.efficiency:.1f}%\n")
+                        if verbose:
+                            FreeCAD.Console.PrintMessage(f"    -> Already nested (winner from previous gen), efficiency: {layout.efficiency:.1f}%\n")
                         continue
                     
                     if not layout.parts:
@@ -717,12 +734,13 @@ class NestingController:
                         unplaced_ids = [p.id for p in unplaced]
                         FreeCAD.Console.PrintWarning(f"    -> WARNING: {len(unplaced)} part(s) could not be placed: {unplaced_ids}\n")
                     
-                    FreeCAD.Console.PrintMessage(f"    -> Efficiency: {efficiency:.1f}%\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"    -> Efficiency: {efficiency:.1f}%\n")
                     
                     # Draw the layout (no offset - we'll delete non-winners)
                     for sheet in sheets:
                         sheet.draw(self.doc, ui_params, layout.layout_group, 
-                                   parts_to_place_group=layout.parts_group)
+                                   parts_to_place_group=layout.parts_group, verbose=verbose)
                     
                     # Hide completed layout to reduce visual clutter (when population > 1)
                     if population_size > 1 and layout.layout_group and hasattr(layout.layout_group, "ViewObject"):
@@ -738,13 +756,15 @@ class NestingController:
                     best_layout = current_best
                     best_efficiency = current_best.efficiency
                     generations_without_improvement = 0
-                    FreeCAD.Console.PrintMessage(f"\n>>> New Best: {best_efficiency:.1f}% efficiency <<<\n")
-                    FreeCAD.Console.PrintMessage(f"    Best genes: {best_layout.genes[:5]}... ({len(best_layout.genes)} total)\n")
-                    if hasattr(best_layout, 'contact_score'):
-                        FreeCAD.Console.PrintMessage(f"    Contact score: {best_layout.contact_score:.1f}\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"\n>>> New Best: {best_efficiency:.1f}% efficiency <<<\n")
+                        FreeCAD.Console.PrintMessage(f"    Best genes: {best_layout.genes[:5]}... ({len(best_layout.genes)} total)\n")
+                        if hasattr(best_layout, 'contact_score'):
+                            FreeCAD.Console.PrintMessage(f"    Contact score: {best_layout.contact_score:.1f}\n")
                 else:
                     generations_without_improvement += 1
-                    FreeCAD.Console.PrintMessage(f"\nNo improvement ({generations_without_improvement}/{early_stop_threshold})\n")
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"\nNo improvement ({generations_without_improvement}/{early_stop_threshold})\n")
                 
                 # Early stopping
                 if generations_without_improvement >= early_stop_threshold:
@@ -757,7 +777,8 @@ class NestingController:
                         best_layout.layout_group.ViewObject.Visibility = False
                 
                 # STEP 2: Delete all non-winner layouts from this generation
-                FreeCAD.Console.PrintMessage(f"  Deleting {len(layouts) - 1} non-winning layouts...\n")
+                if verbose:
+                    FreeCAD.Console.PrintMessage(f"  Deleting {len(layouts) - 1} non-winning layouts...\n")
                 for layout in layouts:
                     if layout != best_layout:
                         layout_manager.delete_layout(layout)
