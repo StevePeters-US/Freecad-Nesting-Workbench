@@ -10,6 +10,17 @@ import FreeCAD
 import FreeCADGui
 import os
 
+_MINKOWSKI_DIR_MAX = 359
+
+_DEFAULTS = {
+    "sheet_width": 600.0,
+    "sheet_height": 600.0,
+    "part_spacing": 12.5,
+    "sheet_thickness": 3.0,
+    "deflection_angle": 30.0,
+    "rotation_angles": [360, 180, 120, 90, 45, 30, 15, 10, 5, 1],
+}
+
 class NestingPanel(QtGui.QWidget):
     """
     Defines the user interface for the main nesting task panel, including
@@ -51,17 +62,17 @@ class NestingPanel(QtGui.QWidget):
         table_button_layout = QtGui.QHBoxLayout()
         action_button_layout = QtGui.QHBoxLayout()
 
-        self.sheet_width_input = QtGui.QDoubleSpinBox(); self.sheet_width_input.setRange(1, 10000); self.sheet_width_input.setValue(600)
-        self.sheet_height_input = QtGui.QDoubleSpinBox(); self.sheet_height_input.setRange(1, 10000); self.sheet_height_input.setValue(600)
-        self.sheet_thickness_input = QtGui.QDoubleSpinBox(); self.sheet_thickness_input.setRange(0.1, 1000); self.sheet_thickness_input.setValue(3.0)
-        self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(12.5)
+        self.sheet_width_input = QtGui.QDoubleSpinBox(); self.sheet_width_input.setRange(1, 10000); self.sheet_width_input.setValue(_DEFAULTS["sheet_width"])
+        self.sheet_height_input = QtGui.QDoubleSpinBox(); self.sheet_height_input.setRange(1, 10000); self.sheet_height_input.setValue(_DEFAULTS["sheet_height"])
+        self.sheet_thickness_input = QtGui.QDoubleSpinBox(); self.sheet_thickness_input.setRange(0.1, 1000); self.sheet_thickness_input.setValue(_DEFAULTS["sheet_thickness"])
+        self.part_spacing_input = QtGui.QDoubleSpinBox(); self.part_spacing_input.setRange(0, 1000); self.part_spacing_input.setValue(_DEFAULTS["part_spacing"])
         
         # --- Advanced Boundary Settings ---
         # Deflection is now specified as an angle (degrees) for more intuitive control
         # Internally converted to linear deflection: deflection_mm = angle / 200.0
         self.deflection_input = QtGui.QDoubleSpinBox()
         self.deflection_input.setRange(1, 90)
-        self.deflection_input.setValue(30)  # 30° default for faster processing
+        self.deflection_input.setValue(_DEFAULTS["deflection_angle"])  # 30° default for faster processing
         self.deflection_input.setSingleStep(1)
         self.deflection_input.setDecimals(0)
         self.deflection_input.setSuffix("°")
@@ -87,9 +98,8 @@ class NestingPanel(QtGui.QWidget):
         self.shape_table.setColumnCount(6)
         self.shape_table.setHorizontalHeaderLabels(["Shape", "Quantity", "Rotations", "Override", "Up Dir", "Fill"])
 
-        # --- Discrete Rotation Slider ---
         # Angles: 360 (1 step), 180 (2), 120 (3), 90 (4), 45 (8), 30 (12), 15 (24), 10 (36), 5 (72), 1 (360)
-        self.rotation_angles = [360, 180, 120, 90, 45, 30, 15, 10, 5, 1]
+        self.rotation_angles = _DEFAULTS["rotation_angles"]
         
         self.rotation_steps_slider = QtGui.QSlider(QtCore.Qt.Horizontal)
         self.rotation_steps_slider.setRange(0, len(self.rotation_angles) - 1) 
@@ -114,7 +124,7 @@ class NestingPanel(QtGui.QWidget):
 
         # Direction Dial for Minkowski
         self.minkowski_direction_dial = QtGui.QDial()
-        self.minkowski_direction_dial.setRange(0, 359)
+        self.minkowski_direction_dial.setRange(0, _MINKOWSKI_DIR_MAX)
         self.minkowski_direction_dial.setValue(0) # Default to Down
         self.minkowski_direction_dial.setWrapping(True)
         self.minkowski_direction_dial.setNotchesVisible(True)

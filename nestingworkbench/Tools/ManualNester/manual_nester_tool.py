@@ -271,7 +271,8 @@ class ManualNesterToolObserver:
             
             return False
 
-        except Exception:
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Event callback failed: {e}\n")
             return False
 
     def handle_click(self, pos):
@@ -587,7 +588,8 @@ class ManualNesterToolObserver:
         for obj in reversed(self.new_objects):
             try:
                 self.layout_group.Document.removeObject(obj.Name)
-            except Exception:
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to remove object {obj.Name}: {e}\n")
                 pass
         self.new_objects = []
         FreeCAD.Console.PrintMessage("Manual Nester: Transformations cancelled and new items removed.\n")
@@ -603,7 +605,8 @@ class ManualNesterToolObserver:
                  self.layout_group.Document.removeObject(obj.Name)
                  self.new_objects.remove(obj)
                  if self.selected_obj == obj: self.selected_obj = None
-        except Exception:
+        except Exception as e:
+            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to revert object {obj.Name}: {e}\n")
             pass
 
     def cleanup(self):
@@ -628,8 +631,9 @@ class ManualNesterToolObserver:
                 # Check if it was a selectability track
                 # Let's fix the tracking to use a more robust way
                 pass
-            except Exception:
-                pass 
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Visibility restoration failed: {e}\n")
+                pass
         
         # Simpler approach: find all sheets and make them selectable again
         if self.layout_group and hasattr(self.layout_group, "Group"):
@@ -645,7 +649,8 @@ class ManualNesterToolObserver:
                 if not isinstance(obj, str):
                     if hasattr(obj, "ViewObject"):
                         obj.ViewObject.Visibility = is_visible
-            except Exception:
+            except Exception as e:
+                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Object visibility restoration failed: {e}\n")
                 pass # Object may have been deleted
         self.original_visibilities = {}
         

@@ -11,7 +11,6 @@ import threading
 
 try:
     from shapely.geometry import Polygon
-    # from shapely.ops import unary_union
     SHAPELY_AVAILABLE = True
 except ImportError:
     SHAPELY_AVAILABLE = False
