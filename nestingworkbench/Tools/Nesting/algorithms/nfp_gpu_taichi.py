@@ -1,5 +1,6 @@
 import math
 import warnings
+import threading
 
 try:
     import taichi as ti
@@ -21,6 +22,9 @@ if TAICHI_AVAILABLE:
                 ti.init(arch=ti.opengl)
              except Exception:
                 ti.init(arch=ti.cpu)
+
+# Global lock to prevent concurrent Taichi kernel launches from multiple threads.
+_kernel_lock = threading.Lock()
 
 def is_available():
     return TAICHI_AVAILABLE
@@ -148,17 +152,18 @@ if TAICHI_AVAILABLE:
         out_verts_np = np.zeros((n_r, n_a, n_b, max_out_verts, 2), dtype=np.float32)
         out_len_np = np.zeros((n_r, n_a, n_b), dtype=np.int32)
         
-        # Call Kernel
-        compute_minkowski_sum_convex_kernel(
-            n_a, n_b, n_r, 
-            np_a, 
-            len_a, 
-            np_b, 
-            len_b, 
-            np_rot, 
-            out_verts_np, 
-            out_len_np
-        )
+        # Call Kernel (protected by lock)
+        with _kernel_lock:
+            compute_minkowski_sum_convex_kernel(
+                n_a, n_b, n_r, 
+                np_a, 
+                len_a, 
+                np_b, 
+                len_b, 
+                np_rot, 
+                out_verts_np, 
+                out_len_np
+            )
         
         # Sync happened implicitly or explicitly? taichi ndarray syncs.
         
