@@ -3,6 +3,7 @@ import FreeCAD
 import Part
 import copy
 import Draft
+import traceback
 from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
@@ -86,7 +87,7 @@ class ShapePreparer:
                         masters_to_place.append((master_shape_obj.InList[0], temp_shape_wrapper))
 
             except Exception as e:
-                FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n")
+                FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n{traceback.format_exc()}\n")
                 continue
         
         # --- Step 1.5: Sort masters and position them ---
@@ -219,7 +220,7 @@ class ShapePreparer:
                         
                         self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"Shape reload failed for '{label}': {e}. Recalculating.\n")
+                FreeCAD.Console.PrintWarning(f"Shape reload failed for '{label}': {e}\n{traceback.format_exc()}. Recalculating.\n")
                 temp_shape_wrapper = None
         
         # 6. Recalculate if reuse failed

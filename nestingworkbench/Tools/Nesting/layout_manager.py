@@ -203,14 +203,24 @@ class LayoutManager:
         # Add bounding box of last sheet
         last_sheet = layout.sheets[-1]
         if last_sheet.parts:
-            try:
-                min_x = min(p.shape.bounding_box()[0] for p in last_sheet.parts)
-                min_y = min(p.shape.bounding_box()[1] for p in last_sheet.parts)
-                max_x = max(p.shape.bounding_box()[0] + p.shape.bounding_box()[2] for p in last_sheet.parts)
-                max_y = max(p.shape.bounding_box()[1] + p.shape.bounding_box()[3] for p in last_sheet.parts)
+            min_x, min_y = float('inf'), float('inf')
+            max_x, max_y = float('-inf'), float('-inf')
+            found_valid = False
+            
+            for p in last_sheet.parts:
+                try:
+                    bx, by, bw, bh = p.shape.bounding_box()
+                    min_x = min(min_x, bx)
+                    min_y = min(min_y, by)
+                    max_x = max(max_x, bx + bw)
+                    max_y = max(max_y, by + bh)
+                    found_valid = True
+                except Exception as e:
+                    part_id = getattr(p.shape, 'id', 'unknown') if hasattr(p, 'shape') else 'unknown'
+                    FreeCAD.Console.PrintWarning(f"[LayoutManager] Bounding box failed for part '{part_id}': {e}\n")
+            
+            if found_valid:
                 fitness += (max_x - min_x) * (max_y - min_y)
-            except Exception:
-                pass
         
         # Contact score: reward parts that touch each other
         # Lower fitness = better, so we subtract contact bonus

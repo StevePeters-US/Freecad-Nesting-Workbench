@@ -52,7 +52,7 @@ def _draw_trial_bounds(part, angle, x, y):
             # Force UI update
             QtGui.QApplication.processEvents()
     except Exception as e:
-        pass  # Silently ignore drawing errors
+        FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")
 
 def _cleanup_trial_viz():
     """Removes the trial visualization object and simulation sheet boundaries."""
@@ -74,10 +74,10 @@ def _cleanup_trial_viz():
             for name in to_remove:
                 try:
                     doc.removeObject(name)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                except Exception as e:
+                    FreeCAD.Console.PrintWarning(f"[nesting_logic] Cleanup failed: {e}\n")
+    except Exception as e:
+        FreeCAD.Console.PrintWarning(f"[nesting_logic] Cleanup failed: {e}\n")
 
 # --- Master Shape Highlighting ---
 _current_highlighted_master = None  # Track the currently highlighted master container
