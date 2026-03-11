@@ -10,6 +10,8 @@ import FreeCADGui
 from PySide import QtCore
 import math
 from .ui_manual_nester import ManualNesterToolUI
+from .physics_engine import PhysicsEngine
+from .collision_resolver import CollisionResolver
 
 class ManualNesterToolObserver:
     """
@@ -38,6 +40,11 @@ class ManualNesterToolObserver:
         self.is_implicit_drag = False
         self.drag_start_screen_pos = (0,0)
         self.last_known_screen_pos = (0,0)
+
+        # Physics initialization
+        self.physics_engine = PhysicsEngine()
+        self.collision_resolver = CollisionResolver()
+        self.physics_enabled = True
 
         # 1. Infer Layout Group
         selection = FreeCADGui.Selection.getSelection()
@@ -364,8 +371,14 @@ class ManualNesterToolObserver:
                 # Lock X to the position when Y was pressed
                 new_pos.x = self.constraint_lock_pos.x
             
+            # Integrate Physics
+            drag_delta = new_pos - self.selected_obj.Placement.Base
+            
             new_placement.Base = new_pos
             self.selected_obj.Placement = new_placement
+            
+            if drag_delta.Length > 0.001:
+                self._apply_physics(drag_delta)
             
         elif self.mode == "ROTATE":
             if not self.start_placement: return
@@ -389,6 +402,50 @@ class ManualNesterToolObserver:
             new_placement = self.start_placement.copy()
             new_placement.Rotation = rot.multiply(self.start_placement.Rotation)
             self.selected_obj.Placement = new_placement
+
+    def _apply_physics(self, drag_delta):
+        """Push nearby parts based on proximity to the dragged part."""
+        if not self.physics_engine or not self.physics_enabled:
+            return
+
+        dragged_center = self._get_obj_center(self.selected_obj)
+
+        # Collect other parts and their centers
+        parts_with_centers = []
+        for obj in self.original_placements:
+            if obj == self.selected_obj:
+                continue
+            parts_with_centers.append((obj, self._get_obj_center(obj)))
+
+        # Compute and apply displacements
+        displacements = self.physics_engine.compute_displacements(
+            dragged_center, drag_delta, parts_with_centers
+        )
+        
+        displaced_objs = []
+        for obj, displacement in displacements:
+            if displacement.Length > 0.01:  # Skip negligible moves
+                obj.Placement.Base = obj.Placement.Base + displacement
+                displaced_objs.append(obj)
+
+        # Resolve collisions: clamp to sheets
+        for obj in displaced_objs:
+            sheet_group = self._find_sheet_at_pos(obj.Placement.Base)
+            if sheet_group:
+                boundary = next((c for c in sheet_group.Group if c.Label.startswith("Sheet_Boundary_")), None)
+                if boundary:
+                    self.collision_resolver.clamp_to_sheet(obj, boundary.Shape.BoundBox)
+
+    def _get_obj_center(self, obj):
+        """Returns the XY center of an object's bounding box as a FreeCAD.Vector."""
+        bb = obj.Shape.BoundBox
+        # Note: Placement.Base is already in global coordinates if it's a top-level layout part.
+        # BoundBox is local to the object.
+        return FreeCAD.Vector(
+            bb.XMin + bb.XLength / 2 + obj.Placement.Base.x,
+            bb.YMin + bb.YLength / 2 + obj.Placement.Base.y,
+            0
+        )
 
     def handle_release(self):
         # ALWAYS ensure we finish/reset, regardless of implicit drag state
