@@ -71,8 +71,8 @@ class ManualNesterToolObserver:
         # Track objects in MasterShapes for picking
         self._track_master_objects()
 
-        # 4. Ensure at least one sheet exists (Drop Zone)
-        self._ensure_drop_zone_sheet()
+        # 4. Always add a fresh drop-zone sheet
+        self._add_drop_zone_sheet()
 
         # After changing visibilities, we need to update the GUI to reflect them.
         FreeCADGui.updateGui()
@@ -628,6 +628,7 @@ class ManualNesterToolObserver:
         if not self.layout_group:
             return
 
+        self._remove_empty_sheets()
         FreeCAD.Console.PrintMessage(f"Manual Nester: Saved new placements for objects.\n")
         # If sheets were stacked, this move breaks the "stacked" state
         if hasattr(self.layout_group, 'IsStacked') and self.layout_group.IsStacked:
@@ -714,21 +715,43 @@ class ManualNesterToolObserver:
         FreeCADGui.updateGui()
         self.layout_group = None
 
-    def _ensure_drop_zone_sheet(self):
-        """Ensures at least one sheet exists in the layout."""
-        has_sheet = False
+    def _remove_empty_sheets(self):
+        """Removes sheet groups that contain no parts in their Shapes_ sub-group."""
+        doc = self.layout_group.Document
+        sheets_to_remove = []
         for child in self.layout_group.Group:
             if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_"):
-                has_sheet = True
-                break
-        
-        if not has_sheet:
-            self._add_new_sheet()
+                shapes_group = next((c for c in child.Group if c.Label.startswith("Shapes_")), None)
+                if shapes_group and len(shapes_group.Group) == 0:
+                    sheets_to_remove.append(child)
+
+        for sheet_group in sheets_to_remove:
+            # Remove children first (boundary, shapes group)
+            for sub in reversed(sheet_group.Group):
+                doc.removeObject(sub.Name)
+            doc.removeObject(sheet_group.Name)
+            FreeCAD.Console.PrintMessage(f"Manual Nester: Removed empty sheet '{sheet_group.Label}'.\n")
+
+    def _add_drop_zone_sheet(self):
+        """Adds a fresh drop-zone sheet to the layout."""
+        self._add_new_sheet()
+
+    def _get_sheet_dimensions(self):
+        """Returns (width, height) from the first existing sheet, or (1000, 1000) as default."""
+        for child in self.layout_group.Group:
+            if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_"):
+                boundary = next((c for c in child.Group if c.Label.startswith("Sheet_Boundary_")), None)
+                if boundary and hasattr(boundary, "Shape"):
+                    bb = boundary.Shape.BoundBox
+                    return bb.XLength, bb.YLength
+        return 1000.0, 1000.0
 
     def _add_new_sheet(self):
         """Adds a new sheet group with a boundary."""
         doc = self.layout_group.Document
         index = len([c for c in self.layout_group.Group if c.Label.startswith("Sheet_")]) + 1
+        
+        width, height = self._get_sheet_dimensions()
         
         sheet_group = doc.addObject("App::DocumentObjectGroup", f"Sheet_{index}")
         sheet_group.Label = f"Sheet_{index}"
@@ -736,10 +759,11 @@ class ManualNesterToolObserver:
         
         # Add Boundary
         boundary = doc.addObject("Part::Feature", f"Sheet_Boundary_{index}")
-        # Default size 1000x1000 if not specified
-        boundary.Shape = Part.makePlane(1000, 1000)
-        # Position it to the right of existing sheets if any
-        offset_x = (index - 1) * 1100
+        # Use dimensions from existing sheets
+        import Part
+        boundary.Shape = Part.makePlane(width, height)
+        # Position it to the right of existing sheets if any (width + 10% gap)
+        offset_x = (index - 1) * (width * 1.1)
         boundary.Placement = FreeCAD.Placement(FreeCAD.Vector(offset_x, 0, 0), FreeCAD.Rotation())
         sheet_group.addObject(boundary)
         
