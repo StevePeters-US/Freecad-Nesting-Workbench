@@ -10,6 +10,7 @@ import copy
 import FreeCAD
 import threading
 from ..freecad_helpers import get_up_direction_rotation
+from ..Tools.Nesting import placement_utils
 
 try:
     from shapely.affinity import translate, rotate
@@ -168,12 +169,8 @@ class Shape:
         if sheet_origin is None:
             sheet_origin = FreeCAD.Vector(0, 0, 0)
 
-        # Where the nested polygon's center ended up
-        nested_centroid_shapely = self.polygon.centroid
-        nested_centroid = FreeCAD.Vector(nested_centroid_shapely.x, nested_centroid_shapely.y, 0)
-        
-        # Container position = target world position for the shape's center
-        container_pos = sheet_origin + nested_centroid
+        # Use utility to calculate world position for the container
+        container_pos = placement_utils.calculate_container_centroid(self.polygon, sheet_origin)
         
         # Only in-plane Z rotation for the container (keeps bounds flat)
         angle_deg = self._angle

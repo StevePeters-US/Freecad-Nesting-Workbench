@@ -22,6 +22,7 @@ except ImportError:
 
 from .shape_object import create_shape_object
 from .label_object import create_label_object
+from ..Tools.Nesting import placement_utils
 
 class Sheet:
     """
@@ -326,22 +327,12 @@ class Sheet:
             container.addObject(label_obj)
 
             # Calculate local placement relative to the part inside the container
-            shapestring_center = label_obj.Shape.BoundBox.Center
-
-            # The part is centered at (0,0,0) within the container because we applied
-            # shape_obj.Placement = FreeCAD.Placement(shape.source_centroid.negative(), ...)
-            # So the target visual center for the label is simply (0,0, Z_height)
-
-            # Apply inverse rotation to keep text horizontal
-            part_rotation = final_placement.Rotation
-            inverse_rotation = part_rotation.inverted()
-
-            # To center the text correctly, we must rotate the local center offset
-            target_label_center = FreeCAD.Vector(0, 0, ui_params.get('label_height', 0.1))
-            shapestring_center_rotated = inverse_rotation.multVec(shapestring_center)
-            label_placement_base = target_label_center - shapestring_center_rotated
-
-            label_obj.Placement = FreeCAD.Placement(label_placement_base, inverse_rotation)
+            # using utility function to keep text horizontal and centered
+            label_obj.Placement = placement_utils.calculate_label_placement(
+                label_obj.Shape.BoundBox.Center,
+                final_placement.Rotation,
+                ui_params.get('label_height', 0.1)
+            )
 
             # Link label to shape (add property if needed for plain Part::Feature)
             if not hasattr(shape_obj, "LabelObject"):

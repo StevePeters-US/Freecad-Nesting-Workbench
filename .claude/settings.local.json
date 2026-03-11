@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(find /d/Github/Freecad-Nesting-Workbench -name \"*.py\" -type f -exec wc -l {} +)"
+      "Bash(find /d/Github/Freecad-Nesting-Workbench -name \"*.py\" -type f -exec wc -l {} +)",
+      "Bash(find /d/Github/Freecad-Nesting-Workbench -type f -name \"*.py\" -exec grep -l \"taskpanel\\\\|task_panel\" {})"
     ]
   }
 }
