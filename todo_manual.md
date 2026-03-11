@@ -243,8 +243,8 @@ ManualNester/
 
 ## Tier 3 — UI Controls
 
-### M-007: Add physics controls to the task panel UI
-- [ ] **File**: `nestingworkbench/Tools/ManualNester/ui_manual_nester.py` (MODIFY)
+### M-007: Add physics controls to the task panel UI (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/ui_manual_nester.py` (MODIFY)
 - **What**: Add controls for the physics engine parameters.
 - **Controls to add**:
   1. **Enable Physics** checkbox (default: checked)
@@ -255,8 +255,8 @@ ManualNester/
 - **Expose as attributes**: `self.physics_enabled_cb`, `self.radius_spin`, `self.curve_dropdown`, `self.strength_spin`
 - **Lines changed**: ~40
 
-### M-008: Wire UI controls to PhysicsEngine in the observer
-- [ ] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
+### M-008: Wire UI controls to PhysicsEngine in the observer (completed)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/manual_nester_tool.py` (MODIFY)
 - **What**: Connect UI widget signals to update `self.physics_engine` parameters live.
 - **Changes to `__init__()`**:
   1. After creating `self.physics_engine`, connect signals from `self.panel_manager.form`:

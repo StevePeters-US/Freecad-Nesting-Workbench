@@ -46,6 +46,29 @@ class ManualNesterToolObserver:
         self.collision_resolver = CollisionResolver()
         self.physics_enabled = True
 
+        # Connect UI signals
+        if hasattr(self.panel_manager, 'form'):
+            ui = self.panel_manager.form
+            # Initial sync
+            self.physics_engine.radius = ui.radius_spin.value()
+            self.physics_engine.curve_exponent = [1.0, 2.0, 3.0][ui.curve_dropdown.currentIndex()]
+            self.physics_engine.strength = ui.strength_spin.value()
+            self.physics_enabled = ui.physics_enabled_cb.isChecked()
+
+            # Signal connections
+            ui.physics_enabled_cb.stateChanged.connect(
+                lambda state: setattr(self, 'physics_enabled', bool(state))
+            )
+            ui.radius_spin.valueChanged.connect(
+                lambda val: setattr(self.physics_engine, 'radius', val)
+            )
+            ui.curve_dropdown.currentIndexChanged.connect(
+                lambda idx: setattr(self.physics_engine, 'curve_exponent', [1.0, 2.0, 3.0][idx])
+            )
+            ui.strength_spin.valueChanged.connect(
+                lambda val: setattr(self.physics_engine, 'strength', val)
+            )
+
         # 1. Infer Layout Group
         selection = FreeCADGui.Selection.getSelection()
         if selection and selection[0].isDerivedFrom("App::DocumentObjectGroup") and (selection[0].Label.startswith("Layout_") or selection[0].Label == "Layout"):
@@ -726,11 +749,12 @@ class ManualNesterToolObserver:
                     sheets_to_remove.append(child)
 
         for sheet_group in sheets_to_remove:
+            label = sheet_group.Label
             # Remove children first (boundary, shapes group)
             for sub in reversed(sheet_group.Group):
                 doc.removeObject(sub.Name)
             doc.removeObject(sheet_group.Name)
-            FreeCAD.Console.PrintMessage(f"Manual Nester: Removed empty sheet '{sheet_group.Label}'.\n")
+            FreeCAD.Console.PrintMessage(f"Manual Nester: Removed empty sheet '{label}'.\n")
 
     def _add_drop_zone_sheet(self):
         """Adds a fresh drop-zone sheet to the layout."""
