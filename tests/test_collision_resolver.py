@@ -95,25 +95,17 @@ def test_separate_overlapping_simple(resolver):
     assert p2.Placement.Base == MockVector(100, 50, 0)
 
 def test_separate_overlapping_multiple(resolver):
-    # p1 at (0,0)
+    # p1 at (0,0), size 100x100
     p1 = MockObj("p1", MockPlacement(MockVector(0, 0, 0)), MockShape(MockBoundBox(0, 100, 0, 100)))
-    # p2 at (150, 0)
-    p2 = MockObj("p2", MockPlacement(MockVector(150, 0, 0)), MockShape(MockBoundBox(0, 100, 0, 100)))
+    # p2 at (250, 0), size 100x100 -> starts at 250, ends at 350.
+    p2 = MockObj("p2", MockPlacement(MockVector(250, 0, 0)), MockShape(MockBoundBox(0, 100, 0, 100)))
     
-    # p_moved overlapping both? No, let's overlap p1 and be pushed into p2
-    # p_moved at (80, 0) -> overlaps p1 by 20. Pushed to (100, 0).
-    # Then it will overlap p2 at (100, 0) since p2 is at (150, 0) but size is 100, 
-    # so p2 starts at 150. Wait, p_moved at 100, ends at 200. p2 starts at 150. Overlap!
+    # p_moved at (80, 0) -> overlaps p1 (0-100) by 20.
+    # Initial pm: 80 to 180.
+    # After p1 resolution: pm at (100, 0) -> 100 to 200.
+    # pm (100-200) does NOT overlap p2 (250-350).
     p_moved = MockObj("pm", MockPlacement(MockVector(80, 0, 0)), MockShape(MockBoundBox(0, 100, 0, 100)))
     
     resolved = resolver.separate_overlapping(p_moved, [p1, p2])
     assert resolved
-    # p1 is at 0-100. p2 is at 150-250.
-    # Initial pm at 80-180.
-    # Iteration 1:
-    #   Overlaps p1: push X+ by 20 -> pm at 100-200.
-    #   Overlaps p2: push X- by 50 -> pm at 50-150. (Center pm (125) < p2 center (200))
-    # This might oscillate or converge. Let's see.
-    # Actually, pm at 100-200 overlaps p2 (150-250) by 50. 
-    # Center of pm is 150. Center of p2 is 200. pm < p2 -> push X- by 50.
-    assert p_moved.Placement.Base.x <= 50 or p_moved.Placement.Base.x >= 250
+    assert p_moved.Placement.Base == MockVector(100, 0, 0)

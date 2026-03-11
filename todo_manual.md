@@ -81,7 +81,7 @@ ManualNester/
 - **Lines**: ~60
 
 ### M-002: Create `collision_resolver.py` with boundary clamping
-- [ ] **File**: `nestingworkbench/Tools/ManualNester/collision_resolver.py` (NEW)
+- [x] **File**: `nestingworkbench/Tools/ManualNester/collision_resolver.py` (NEW)
 - **What**: A utility that clamps part positions to stay within sheet boundaries and resolves overlaps with simple separation.
 - **Interface**:
   ```python

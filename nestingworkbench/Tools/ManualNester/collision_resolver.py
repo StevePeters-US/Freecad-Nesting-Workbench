@@ -66,7 +66,7 @@ class CollisionResolver:
         Returns:
             True if all overlaps resolved, False if some remain.
         """
-        for _ in range(max_iterations):
+        for i in range(max_iterations):
             any_overlap = False
             moved_bb = self._get_abs_bbox(moved_obj)
             current_pos = moved_obj.Placement.Base
@@ -83,24 +83,21 @@ class CollisionResolver:
                     overlap_x = min(moved_bb['max_x'], other_bb['max_x']) - max(moved_bb['min_x'], other_bb['min_x'])
                     overlap_y = min(moved_bb['max_y'], other_bb['max_y']) - max(moved_bb['min_y'], other_bb['min_y'])
                     
-                    # Add a tiny epsilon to ensure they actually separate
-                    epsilon = 0.001
-                    
                     new_x = current_pos.x
                     new_y = current_pos.y
                     
                     if overlap_x < overlap_y:
                         # Push along X
                         if moved_bb['center_x'] < other_bb['center_x']:
-                            new_x -= (overlap_x + epsilon)
+                            new_x -= overlap_x
                         else:
-                            new_x += (overlap_x + epsilon)
+                            new_x += overlap_x
                     else:
                         # Push along Y
                         if moved_bb['center_y'] < other_bb['center_y']:
-                            new_y -= (overlap_y + epsilon)
+                            new_y -= overlap_y
                         else:
-                            new_y += (overlap_y + epsilon)
+                            new_y += overlap_y
                     
                     # Update placement so next other_obj check uses new position
                     current_pos = type(current_pos)(new_x, new_y, current_pos.z)
@@ -109,7 +106,7 @@ class CollisionResolver:
             
             if not any_overlap:
                 return True
-                
+        
         return False
 
     def _get_abs_bbox(self, obj):
@@ -127,7 +124,9 @@ class CollisionResolver:
 
     def _bboxes_intersect(self, bb1, bb2):
         """Check if two absolute bboxes (dicts) intersect."""
-        return not (bb1['max_x'] < bb2['min_x'] or 
-                   bb1['min_x'] > bb2['max_x'] or 
-                   bb1['max_y'] < bb2['min_y'] or 
-                   bb1['min_y'] > bb2['max_y'])
+        # Use strict inequality for intersection:
+        # If one ends exactly where the next starts, it's not an intersection.
+        return not (bb1['max_x'] <= bb2['min_x'] or 
+                   bb1['min_x'] >= bb2['max_x'] or 
+                   bb1['max_y'] <= bb2['min_y'] or 
+                   bb1['min_y'] >= bb2['max_y'])
