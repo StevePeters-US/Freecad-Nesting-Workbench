@@ -13,6 +13,11 @@ from .ui_manual_nester import ManualNesterToolUI
 from .physics_engine import PhysicsEngine
 from .collision_resolver import CollisionResolver
 
+try:
+    from pivy import coin
+except ImportError:
+    coin = None
+
 class ManualNesterToolObserver:
     """
     A ViewObserver that captures mouse events to allow manual nesting (dragging)
@@ -40,6 +45,8 @@ class ManualNesterToolObserver:
         self.is_implicit_drag = False
         self.drag_start_screen_pos = (0,0)
         self.last_known_screen_pos = (0,0)
+        self.pre_drag_placements = {} # Track placements for undo/cancel (M-009)
+        self.radius_indicator = None # M-010: Coin3D overlay for influence radius
 
         # Physics initialization
         self.physics_engine = PhysicsEngine()
@@ -299,6 +306,28 @@ class ManualNesterToolObserver:
                 
                 if self.mode != "IDLE": return True
             
+            # --- MOUSE WHEEL HANDLING (M-011) ---
+            elif event_type == "SoMouseButtonEvent":
+                btn = event_dict["Button"]
+                state = event_dict["State"]
+                if self.pressed or self.is_mouse_down:
+                    if btn in ["BUTTON4", "BUTTON5"] and state == "DOWN":
+                        # BUTTON4 = Scroll Up, BUTTON5 = Scroll Down
+                        delta = 25.0 if btn == "BUTTON4" else -25.0
+                        new_radius = max(25.0, min(2000.0, self.physics_engine.radius + delta))
+                        self.physics_engine.radius = new_radius
+                        
+                        # Sync to UI
+                        if hasattr(self.panel_manager, 'form'):
+                            self.panel_manager.form.radius_spin.setValue(new_radius)
+                        
+                        # Update indicator immediately if dragging
+                        if self.is_implicit_drag:
+                             self.handle_move(self.last_known_screen_pos, 
+                                             event_dict.get("Ctrl", False), 
+                                             event_dict.get("Shift", False))
+                        return True
+
             return False
 
         except Exception as e:
@@ -403,6 +432,12 @@ class ManualNesterToolObserver:
             if drag_delta.Length > 0.001:
                 self._apply_physics(drag_delta)
             
+            # M-010: Show radius indicator
+            if self.physics_enabled:
+                self._show_radius_indicator(new_pos, self.physics_engine.radius)
+            else:
+                self._hide_radius_indicator()
+            
         elif self.mode == "ROTATE":
             if not self.start_placement: return
             
@@ -425,6 +460,10 @@ class ManualNesterToolObserver:
             new_placement = self.start_placement.copy()
             new_placement.Rotation = rot.multiply(self.start_placement.Rotation)
             self.selected_obj.Placement = new_placement
+            
+            # M-010: Show radius indicator even in rotation mode if physics active
+            if self.physics_enabled:
+                self._show_radius_indicator(self.selected_obj.Placement.Base, self.physics_engine.radius)
 
     def _apply_physics(self, drag_delta):
         """Push nearby parts based on proximity to the dragged part."""
@@ -448,6 +487,10 @@ class ManualNesterToolObserver:
         displaced_objs = []
         for obj, displacement in displacements:
             if displacement.Length > 0.01:  # Skip negligible moves
+                # M-009: Store pre-drag placement for undo if not already stored
+                if obj not in self.pre_drag_placements:
+                    self.pre_drag_placements[obj] = obj.Placement.copy()
+
                 obj.Placement.Base = obj.Placement.Base + displacement
                 displaced_objs.append(obj)
 
@@ -538,6 +581,12 @@ class ManualNesterToolObserver:
              self.selected_obj.Placement = self.start_placement
              FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
         
+        # M-009: Revert physics-displaced parts
+        for obj, placement in self.pre_drag_placements.items():
+            if obj and obj in self.layout_group.Document.Objects:
+                obj.Placement = placement
+        self.pre_drag_placements = {}
+        
         self.mode = "IDLE"
         self.constraint = None
         self.constraint_lock_pos = None
@@ -545,6 +594,7 @@ class ManualNesterToolObserver:
         self.start_pos = None
         self.is_implicit_drag = False
         self.is_mouse_down = False
+        self._hide_radius_indicator() # M-010
 
     def finish_operation(self):
         self.mode = "IDLE"
@@ -554,6 +604,8 @@ class ManualNesterToolObserver:
         self.start_placement = None
         self.start_pos = None
         self.is_implicit_drag = False
+        self.pre_drag_placements = {} # M-009: Clear pre-drag placements
+        self._hide_radius_indicator() # M-010
         FreeCADGui.Selection.clearSelection() # Clear visual highlight
 
     def pick_object(self, pos):
@@ -759,6 +811,59 @@ class ManualNesterToolObserver:
     def _add_drop_zone_sheet(self):
         """Adds a fresh drop-zone sheet to the layout."""
         self._add_new_sheet()
+
+    def _show_radius_indicator(self, center, radius):
+        """M-010: Creates/updates a Coin3D indicator for the physics radius."""
+        if not coin or not self.view:
+            return
+
+        if not self.radius_indicator:
+            # Create the node tree
+            self.radius_indicator = coin.SoSeparator()
+            
+            # Line style
+            style = coin.SoDrawStyle()
+            style.lineWidth = 1.0
+            style.linePattern = 0xF0F0 # Dashed
+            self.radius_indicator.addChild(style)
+            
+            # Color
+            color = coin.SoBaseColor()
+            color.rgb = (0.0, 0.5, 1.0) # Light blue
+            self.radius_indicator.addChild(color)
+            
+            # Translation
+            self.indicator_trans = coin.SoTranslation()
+            self.radius_indicator.addChild(self.indicator_trans)
+            
+            # Circle coordinates
+            self.indicator_coords = coin.SoCoordinate3()
+            self.radius_indicator.addChild(self.indicator_coords)
+            
+            # Line set
+            line_set = coin.SoLineSet()
+            self.radius_indicator.addChild(line_set)
+            
+            # Add to view
+            self.view.getSceneGraph().addChild(self.radius_indicator)
+
+        # Update position
+        self.indicator_trans.translation.setValue(center.x, center.y, center.z + 0.1) # Slightly above XY
+        
+        # Update circle geometry
+        points = []
+        segments = 64
+        for i in range(segments + 1):
+            angle = 2.0 * math.pi * i / segments
+            points.append((radius * math.cos(angle), radius * math.sin(angle), 0))
+        
+        self.indicator_coords.point.setValues(0, len(points), points)
+
+    def _hide_radius_indicator(self):
+        """M-010: Removes the radius indicator from the view."""
+        if self.radius_indicator and self.view:
+            self.view.getSceneGraph().removeChild(self.radius_indicator)
+            self.radius_indicator = None
 
     def _get_sheet_dimensions(self):
         """Returns (width, height) from the first existing sheet, or (1000, 1000) as default."""
