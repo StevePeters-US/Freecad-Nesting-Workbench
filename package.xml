@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
+  <name>Nesting</name>
+  <description>A workbench for 2D nesting of shapes, using no-fit-polygon (Minkowski sum) placement with a genetic algorithm optimizer. Includes a manual nester, sheet stacking, DXF export and CAM job creation.</description>
+  <version>1.0.1</version>
+  <date>2026-08-29</date>
+  <maintainer email="petersfinewoodcraft@gmail.com">Steve Peters</maintainer>
+  <license file="LICENSE">LGPL-2.1-or-later</license>
+  <license file="LICENSE-Assets">OFL-1.1</license>
+  <url type="repository" branch="main">https://github.com/StevePeters-US/Freecad-Nesting-Workbench</url>
+  <url type="readme">https://raw.githubusercontent.com/StevePeters-US/Freecad-Nesting-Workbench/main/README.md</url>
+  <url type="bugtracker">https://github.com/StevePeters-US/Freecad-Nesting-Workbench/issues</url>
+  <icon>Resources/icons/Nesting_Workbench.svg</icon>
+
+  <content>
+    <workbench>
+      <name>Nesting</name>
+      <classname>NestingWorkbench</classname>
+      <description>2D nesting of shapes onto sheets, with automatic and manual placement.</description>
+      <version>1.0.1</version>
+      <subdirectory>./</subdirectory>
+      <icon>Resources/icons/Nesting_Workbench.svg</icon>
+      <freecadmin>1.0.0</freecadmin>
+      <pythonmin>3.11</pythonmin>
+      <depend type="python">shapely</depend>
+      <depend type="python">numpy</depend>
+      <depend type="internal">Part</depend>
+      <depend type="internal">Draft</depend>
+      <depend type="internal">CAM</depend>
+      <tag>nesting</tag>
+      <tag>cnc</tag>
+      <tag>cam</tag>
+      <tag>2d</tag>
+      <tag>sheet</tag>
+      <tag>cutting</tag>
+    </workbench>
+  </content>
+
+</package>

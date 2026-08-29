@@ -1,0 +1,36 @@
+# Python bytecode
+*.py[cod]
+__pycache__/
+
+# Test / tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# FreeCAD backups and scratch files
+*.FCStd1
+*.FCBak
+*.blend1
+
+# Editor / OS cruft
+.DS_Store
+Thumbs.db
+*.swp
+*~
+.vscode/
+.idea/
+
+# Merge / patch leftovers
+*.orig
+*.rej
+
+# Machine-local agent settings
+.claude/settings.local.json
