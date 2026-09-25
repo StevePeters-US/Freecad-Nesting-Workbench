@@ -64,15 +64,16 @@ class SheetExporter:
             sheet_view_folder = self.doc.addObject("App::DocumentObjectGroup", f"{sheet_group.Label}_Views")
             views_folder.addObject(sheet_view_folder)
 
-            try:
-                # Add a 2D projection of each object to the new sub-folder
-                for obj in objects_to_project:
+            # Add a 2D projection of each object to the new sub-folder
+            failed_objects = []
+            for obj in objects_to_project:
+                try:
                     # Get the base shape, which is defined at the origin
                     base_shape = obj.Shape.copy()
                     
                     # Project the base shape to a 2D entity at the origin
                     # ShapeStrings are Compounds, so we check for that type as well. 
-                    if isinstance(base_shape, (Part.Wire, Part.Face, Part.Compound, Part.Solid)):
+                    if isinstance(base_shape, (Part.Wire, Part.Face, Part.Compound)):
                         shape_2d = base_shape
                     else:
                         shape_2d = base_shape.toShape2D()
@@ -86,11 +87,23 @@ class SheetExporter:
                     
                     # Add the new 2D object to this sheet's view folder
                     sheet_view_folder.addObject(new_2d_obj)
-                
-                FreeCAD.Console.PrintMessage(f"Successfully created 2D views for {sheet_group.Label}\n")
+                except Exception as e:
+                    label = getattr(obj, "Label", obj.Name if hasattr(obj, "Name") else str(obj))
+                    failed_objects.append(label)
+                    FreeCAD.Console.PrintError(f"An error occurred creating 2D view for '{label}' in {sheet_group.Label}: {e}\n")
 
-            except Exception as e:
-                FreeCAD.Console.PrintError(f"An error occurred during view creation for {sheet_group.Label}: {e}\n")
+            if failed_objects:
+                msg = f"Failed to create 2D view for {len(failed_objects)} object(s) in {sheet_group.Label}: {', '.join(failed_objects)}"
+                FreeCAD.Console.PrintError(f"{msg}\n")
+                if hasattr(FreeCAD, "GuiUp") and FreeCAD.GuiUp:
+                    try:
+                        from freecad.nestingworkbench.ui_helpers import show_warning_dialog
+                        show_warning_dialog(None, "Export Warning", msg)
+                    except Exception:
+                        # Already reported via PrintError above; the dialog is best-effort.
+                        pass
+            else:
+                FreeCAD.Console.PrintMessage(f"Successfully created 2D views for {sheet_group.Label}\n")
 
         FreeCAD.Console.PrintMessage(f"Finished creating 2D views in folder: {views_folder.Label}\n")
 

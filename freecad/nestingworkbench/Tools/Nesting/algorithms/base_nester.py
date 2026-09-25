@@ -57,6 +57,10 @@ class BaseNester(object):
         
         if sort:
             self.parts_to_place.sort(key=lambda p: p.area, reverse=True)
+
+        # The order parts were actually tried in; the GA records it as the
+        # chromosome (see Nester._nest_standard).
+        self.last_consumption_order = [p.id for p in self.parts_to_place]
         
         unplaced_parts = []
         total_count = len(self.parts_to_place)

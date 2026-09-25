@@ -10,6 +10,11 @@ import FreeCAD
 from ...constants import *
 from ...freecad_helpers import get_nested_containers
 
+FALLBACK_SHEET_WIDTH_MM = 600.0   # used only when the layout group has no SheetWidth property
+FALLBACK_SHEET_HEIGHT_MM = 600.0
+FALLBACK_SHEET_THICKNESS_MM = 3.0
+THICKNESS_MATCH_TOL_MM = 0.01
+
 class CAMManager:
     """Manages the creation of FreeCAD CAM jobs from nested layouts."""
     def __init__(self, layout_group):
@@ -56,9 +61,9 @@ class CAMManager:
             return
         
         # Layout dimensions live on the layout group's properties.
-        sheet_width = 600.0  # Default values
-        sheet_height = 600.0
-        sheet_thickness = 3.0
+        sheet_width = FALLBACK_SHEET_WIDTH_MM
+        sheet_height = FALLBACK_SHEET_HEIGHT_MM
+        sheet_thickness = FALLBACK_SHEET_THICKNESS_MM
 
         if self.layout_group:
             if hasattr(self.layout_group, PROP_SHEET_WIDTH):
@@ -104,7 +109,7 @@ class CAMManager:
                         z_offset = -sheet_thickness - z_min
                         z_placement = FreeCAD.Placement(FreeCAD.Vector(-sheet_origin.x, -sheet_origin.y, z_offset), FreeCAD.Rotation())
                         transformed_shape = transformed_shape.transformGeometry(z_placement.toMatrix())
-                        if abs(transformed_shape.BoundBox.ZLength - sheet_thickness) > 0.01:
+                        if abs(transformed_shape.BoundBox.ZLength - sheet_thickness) > THICKNESS_MATCH_TOL_MM:
                             thickness_mismatches.append(child.Label)
                         parts_shapes.append(transformed_shape)
                     
@@ -173,18 +178,7 @@ class CAMManager:
             import FreeCADGui
             from Path.Main.Gui import Job as PathJobGui
             
-            # Use the GUI create function which handles template usage properly
-            # Arguments for PathJobGui.Create:
-            # base: list of base objects
-            # target: document (None = active)
-            # template: path to template file (None = default empty)
-            # openTaskPanel: boolean
-            
-            # The signature appears to be Create(base, template, openTaskPanel, target=None)
-            # We will pass arguments positionally where appropriate.
-            # If template_path is provided, we pass it. If None, we pass None.
-            # We explicitly pass openTaskPanel=False to suppress the dialog.
-            
+            # Pass openTaskPanel=False to suppress the interactive task panel dialog.
             job = PathJobGui.Create(all_models, template_path, openTaskPanel=False)
             
             if job:

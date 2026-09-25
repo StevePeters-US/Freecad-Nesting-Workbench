@@ -7,13 +7,50 @@ placement zones for nesting operations.
 """
 import math
 import threading
-from shapely.geometry import Polygon, MultiPoint
-from shapely.ops import unary_union, triangulate
+import numpy as np
+import shapely
+from shapely.geometry import Polygon
+from shapely.ops import triangulate
 from shapely.affinity import rotate, scale, translate
 
 from ....datatypes.shape import Shape
 
 _decomposition_lock = threading.Lock()
+
+def _merge_convex_parts(parts):
+    """Greedily merge convex pieces whose union is still convex (Hertel-Mehlhorn).
+
+    Raw Delaunay output gives ~n pieces for an n-gon, and minkowski_sum costs
+    len(parts_A) * len(parts_B) convex sums — so piece count is quadratic in
+    run time. Merging is union-preserving (two pieces are only ever replaced
+    by their exact union), so the covering guarantee decompose_if_needed
+    depends on is unchanged.
+    """
+    if len(parts) < 2:
+        return parts
+    merged = list(parts)
+    changed = True
+    while changed:
+        changed = False
+        out, consumed = [], set()
+        for i in range(len(merged)):
+            if i in consumed:
+                continue
+            cur = merged[i]
+            for j in range(i + 1, len(merged)):
+                if j in consumed or not cur.intersects(merged[j]):
+                    continue
+                u = shapely.union(cur, merged[j])
+                if u.geom_type != 'Polygon' or u.interiors or u.is_empty:
+                    continue
+                if math.isclose(u.area, u.convex_hull.area, rel_tol=1e-9):
+                    cur = u
+                    consumed.add(j)
+                    changed = True
+            consumed.add(i)
+            out.append(cur)
+        merged = out
+    return merged
 
 def decompose_if_needed(polygon, logger):
     """Decomposes a non-convex polygon into convex parts (triangles)."""
@@ -80,6 +117,8 @@ def decompose_if_needed(polygon, logger):
             # An empty shell list means "no collision constraint" downstream —
             # never return that for a real polygon.
             decomposed = [polygon.convex_hull]
+        else:
+            decomposed = _merge_convex_parts(decomposed)
 
         with _decomposition_lock:
             Shape.decomposition_cache[cache_key] = decomposed
@@ -92,20 +131,22 @@ def decompose_if_needed(polygon, logger):
         Shape.decomposition_cache[cache_key] = result
     return result
 
+def _summed_point_cloud(v1, v2):
+    # Point cloud of every pairwise vertex sum, as one shapely MultiPoint.
+    # Building one shapely.Point per summed vertex was ~70% of total nesting
+    # run time; the whole grid is one numpy broadcast instead.
+    return shapely.multipoints((v1[:, None, :] + v2[None, :, :]).reshape(-1, 2))
+
 def minkowski_sum_convex(poly1, poly2):
-    """Computes the Minkowski sum of two convex polygons."""
-    # The Minkowski sum of two convex polygons is the convex hull of the sum of their vertices.
-    # This is a standard and robust method.
-    v1 = poly1.exterior.coords
-    v2 = poly2.exterior.coords
-    
-    sum_vertices = []
-    for p1 in v1:
-        for p2 in v2:
-            sum_vertices.append((p1[0] + p2[0], p1[1] + p2[1]))
-    
-    # The convex hull of these summed points is the Minkowski sum.
-    return MultiPoint(sum_vertices).convex_hull
+    """Computes the Minkowski sum of two convex polygons.
+
+    The sum of two convex polygons is the convex hull of the pairwise sums of
+    their vertices. Built as a single numpy array: constructing one
+    shapely.Point per summed vertex was ~70% of total nesting run time.
+    """
+    v1 = np.asarray(poly1.exterior.coords[:-1], dtype=np.float64)
+    v2 = np.asarray(poly2.exterior.coords[:-1], dtype=np.float64)
+    return shapely.convex_hull(_summed_point_cloud(v1, v2))
 
 def minkowski_difference_convex(poly1, poly2):
     """
@@ -136,42 +177,47 @@ def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logg
     """
     Computes the Inner-Fit Polygon for master_poly2 inside master_poly1.
     The IFP represents valid positions for poly2's CENTROID where poly2 fits inside poly1.
-    This is Hole - Part. If Part is not convex, this is (Hole - P1) ∩ (Hole - P2) ...
+
+    Exact for non-convex parts and non-convex holes: the vertex erosion of
+    the hole by each convex piece (pieces kept at their true offset from
+    the centroid), minus every position where a hole edge crosses a piece.
+    Returns a Polygon, a MultiPolygon, or None.
     """
     if not master_poly1 or master_poly1.is_empty or not master_poly2 or master_poly2.is_empty:
         return None
-    
-    # Transform both polygons around their centroids
-    poly1_transformed = rotate(master_poly1, angle1, origin='centroid')
-    poly2_convex_parts = decompose_if_needed(master_poly2, logger)
-    poly2_centroid = master_poly2.centroid
-    poly2_convex_transformed = [rotate(p, angle2, origin=poly2_centroid) for p in poly2_convex_parts]
-    
-    # Translate both polygons so poly2's centroid is at the origin
-    # This makes the Minkowski difference compute placement zones relative to poly2's centroid
-    poly1_exterior_only = Polygon(poly1_transformed.exterior.coords)
-    
-    pairwise_diffs = []
-    for i, p2 in enumerate(poly2_convex_transformed):
-        # Get poly2's centroid
-        p2_centroid = p2.centroid
-        
-        # Translate poly2 so its centroid is at origin
-        p2_at_origin = translate(p2, xoff=-p2_centroid.x, yoff=-p2_centroid.y)
-        
-        # Compute Inner-Fit Polygon
-        diff = minkowski_difference_convex(poly1_exterior_only, p2_at_origin)
-        pairwise_diffs.append(diff)
-    
-    if not pairwise_diffs:
+
+    hole = Polygon(rotate(master_poly1, angle1, origin='centroid').exterior.coords)
+    c2 = master_poly2.centroid
+    # Rotate about the part's centroid, then put that centroid at the origin.
+    # Every piece keeps its offset from the centroid; recentring pieces
+    # individually shifts each piece's constraint and lets parts escape.
+    pieces = [translate(rotate(p, angle2, origin=c2), -c2.x, -c2.y)
+              for p in decompose_if_needed(master_poly2, logger)]
+
+    hole_xy = np.asarray(hole.exterior.coords, dtype=np.float64)
+    edges = np.stack([hole_xy[:-1], hole_xy[1:]], axis=1)
+
+    result, sweeps = None, []
+    for p in pieces:
+        eroded = minkowski_difference_convex(hole, p)
+        if eroded is None or eroded.is_empty:
+            return None
+        result = eroded if result is None else result.intersection(eroded)
+        if result.is_empty:
+            return None
+        # Vertex erosion is exact only for a convex hole: also exclude every
+        # position where a hole edge touches or crosses this piece (e ⊕ −P).
+        neg = -np.asarray(p.exterior.coords[:-1], dtype=np.float64)
+        sweeps.extend(shapely.convex_hull(_summed_point_cloud(e, neg)) for e in edges)
+
+    # One bounded union per pairwise hole fit, cached with the NFP. This is
+    # a bounded once-per-pair union, not a union in the placement path.
+    result = result.difference(shapely.union_all(sweeps))
+    polys = [g for g in getattr(result, 'geoms', [result])
+             if g.geom_type == 'Polygon' and g.area > 1e-9]
+    if not polys:
         return None
-    
-    # Intersection of all pairwise differences
-    final_difference = pairwise_diffs[0]
-    for i in range(1, len(pairwise_diffs)):
-        final_difference = final_difference.intersection(pairwise_diffs[i])
-    
-    return final_difference
+    return polys[0] if len(polys) == 1 else shapely.MultiPolygon(polys)
 
 def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2, logger, rot_origin1=None, rot_origin2=None):
     """
@@ -213,9 +259,12 @@ def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2
             p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(c2.x, c2.y))
         poly2_convex_transformed.append(p_new)
 
-    minkowski_parts = []
-    for p1 in poly1_convex_transformed:
-        for p2 in poly2_convex_transformed:
-            minkowski_parts.append(minkowski_sum_convex(p1, p2))
-
-    return unary_union(minkowski_parts)
+    coords1 = [np.asarray(p.exterior.coords[:-1], dtype=np.float64)
+               for p in poly1_convex_transformed]
+    coords2 = [np.asarray(p.exterior.coords[:-1], dtype=np.float64)
+               for p in poly2_convex_transformed]
+    clouds = [_summed_point_cloud(a, b) for a in coords1 for b in coords2]
+    if not clouds:
+        return Polygon()
+    hulls = shapely.convex_hull(np.asarray(clouds, dtype=object))
+    return shapely.union_all(hulls)

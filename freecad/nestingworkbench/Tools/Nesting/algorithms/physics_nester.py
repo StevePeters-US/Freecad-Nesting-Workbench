@@ -89,7 +89,6 @@ class PhysicsNester(BaseNester):
             physics_moved = abs(post_physics_x - pre_physics_x) > 1e-6 or abs(post_physics_y - pre_physics_y) > 1e-6
 
             if physics_moved:
-                cycle = 0 # Reset iteration count because we made progress
                 continue
 
             # If physics alone can't move the part, try to shake it free (annealing)
@@ -99,10 +98,11 @@ class PhysicsNester(BaseNester):
                              translate_enabled=self.anneal_translate_enabled)
             
             if shake_moved:
-                cycle = 0 # Reset iteration count because the wiggle found a better opening
                 continue
 
             # No movement possible after both physics and annealing
             break
+        else:
+            self.log(f"Part {part.id} reached the {self.max_nesting_steps}-cycle cap before settling.")
 
         return part

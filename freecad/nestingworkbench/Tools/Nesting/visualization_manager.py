@@ -99,17 +99,21 @@ class VisualizationManager:
         Internal helper to set the highlight state of a master container's 
         boundary object.
         """
-        if master_container and hasattr(master_container, "Group"):
-            for child in master_container.Group:
-                if hasattr(child, "BoundaryObject") and child.BoundaryObject:
-                    boundary = child.BoundaryObject
-                    if hasattr(boundary, "ViewObject"):
-                        if highlight:
-                            boundary.ViewObject.Visibility = True
-                            boundary.ViewObject.LineColor = (0.0, 0.8, 0.0)  # Green
-                            boundary.ViewObject.LineWidth = 3.0
-                        else:
-                            # Don't hide — placed parts must stay visible.
-                            # Just remove the highlight glow (restore normal appearance).
-                            boundary.ViewObject.LineColor = (0.0, 0.7, 0.0)
-                            boundary.ViewObject.LineWidth = 2.0
+        try:
+            children = master_container.Group if master_container else []
+        except (AttributeError, ReferenceError, RuntimeError):
+            return  # Container belonged to a layout that has since been deleted
+        for child in children:
+            if hasattr(child, "BoundaryObject") and child.BoundaryObject:
+                boundary = child.BoundaryObject
+                if hasattr(boundary, "ViewObject"):
+                    boundary.ViewObject.Visibility = True
+                    if highlight:
+                        boundary.ViewObject.LineColor = (0.0, 0.8, 0.0)  # Green
+                        boundary.ViewObject.LineWidth = 3.0
+                    else:
+                        # Every master outline stays on screen while the panel is
+                        # open; un-highlighting only drops the glow. The panel
+                        # hides the whole row when it closes.
+                        boundary.ViewObject.LineColor = (0.0, 0.7, 0.0)
+                        boundary.ViewObject.LineWidth = 2.0

@@ -7,22 +7,24 @@ import os
 import time
 import math
 import threading
-from PySide import QtWidgets
+from PySide import QtWidgets, QtCore
 from PySide.QtCore import QThread, Signal
 from ...datatypes.shape import Shape
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
 from .ga_coordinator import GACoordinator
-from ...freecad_helpers import recursive_delete
+from ...freecad_helpers import (recursive_delete, set_master_shapes_visible,
+                               hide_all_master_shapes)
 from ...constants import *
+from ...ui_helpers import closest_angle_index
 from .nesting_job import NestingJob
 from ... import DEFAULT_FONT
 
-try:
-    from .nesting_logic import nest, NestingDependencyError
-    from .visualization_manager import VisualizationManager
-except ImportError:
-    pass  # Optional dependency missing, proceed without visualization
+DEFLECTION_ANGLE_PER_MM = 200.0  # legacy UI scale: deflection_angle = deflection_mm * 200
+
+from . import nesting_logic
+from .nesting_logic import nest
+from .visualization_manager import VisualizationManager
 
 class NestingWorker(QThread):
     """Runs nesting computation on a background thread.
@@ -68,14 +70,63 @@ class NestingWorker(QThread):
             self.error_signal.emit(f"{e}\n{traceback.format_exc()}")
     
     def request_draw_on_main_thread(self, payload):
-        """Called from worker thread. Emits signal and blocks until main thread draws."""
+        """Called from worker thread. Emits signal and blocks until main thread draws.
+
+        The emit goes through the simulation relay rather than straight onto the
+        Qt event queue. Simulation redraws queued on the relay call updateGui(),
+        which would otherwise deliver this request in the middle of the relay's
+        backlog: the final draw ran first, then the leftover sim redraws hid every
+        part again, leaving only the labels on screen. Sharing the relay's FIFO
+        runs every earlier sim callback before the draw. The emit happens on the
+        main thread, where the QThread object lives, so the slot runs directly.
+        """
         self._draw_event.clear()
-        self.draw_requested.emit(payload)
+        nesting_logic._main_thread_relay.post(lambda: self.draw_requested.emit(payload))
         self._draw_event.wait()
     
     def notify_draw_complete(self):
         """Called from main thread after draw finishes."""
         self._draw_event.set()
+
+def _as_bool(value, default=False):
+    """Coerces a FreeCAD property read to a real bool.
+
+    Layouts saved before PartRotationOverride existed do not carry it at
+    all, and a user can set any type on a scripted object from the
+    property view. Anything that is not already bool-like becomes
+    `default` rather than reaching QCheckBox.setChecked, which raises
+    TypeError on a list (public issue #19).
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return bool(value)
+    return default
+
+
+def _as_int(value, default=0):
+    """Coerces a FreeCAD property read to an int, `default` if impossible."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+# Human-readable names for the layout settings the reload path can fail to
+# restore. The warning built from these is read by users, not developers, so it
+# must not print raw FreeCAD property names.
+_LAYOUT_SETTING_LABELS = {
+    PROP_SHEET_WIDTH: "sheet width",
+    PROP_SHEET_HEIGHT: "sheet height",
+    PROP_PART_SPACING: "part spacing",
+    PROP_SHEET_THICKNESS: "sheet thickness",
+    PROP_SIMPLIFICATION: "simplification",
+    PROP_LABEL_SIZE: "label size",
+    PROP_GENERATIONS: "generations",
+    PROP_POPULATION_SIZE: "population size",
+    PROP_NESTING_DIRECTION: "nesting direction",
+}
+
 
 class NestingController:
     """
@@ -114,6 +165,11 @@ class NestingController:
         is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
         if hasattr(target_layout, "ViewObject"):
             target_layout.ViewObject.Visibility = False
+
+        # Every layout arranges its master row with its own spacing, so a row
+        # left over from an earlier run sits slightly offset from this one's and
+        # reads as a doubled, misaligned outline. Only the row being packed shows.
+        hide_all_master_shapes(self.doc)
 
         ui_params = self._collect_ui_params()
         ui_params, quantities, master_map, rotation_params = self._collect_job_parameters(ui_params)
@@ -175,12 +231,43 @@ class NestingController:
         self.ui.selected_shapes_to_process = []
         self.ui.hidden_originals = []
 
-        self._load_params_from_layout(layout_group)
-        
-        self._load_shapes_from_layout(layout_group)
+        params_missing = self._load_params_from_layout(layout_group) or []
+        shapes_missing, dropped_masters = self._load_shapes_from_layout(layout_group)
+
+        # The panel owns master visibility while it is open: this layout's row is
+        # on screen, every other layout's row is off.
+        hide_all_master_shapes(self.doc, except_layout=layout_group)
+        set_master_shapes_visible(layout_group, True)
+
+        # A dropped part and a defaulted setting are separate sentences, but one
+        # log call — a second call would overwrite the first in the status label.
+        missing = params_missing + shapes_missing
+        sentences = []
+        if missing:
+            sentences.append(
+                f"Layout '{layout_group.Label}' was saved without "
+                f"{len(missing)} setting(s), now at defaults: "
+                f"{'; '.join(missing)}. Re-nest and save to store them.")
+        if dropped_masters:
+            sentences.append(
+                f"{len(dropped_masters)} part(s) could not be loaded: "
+                f"{', '.join(dropped_masters)}.")
+        if sentences:
+            self.ui.log_message(" ".join(sentences), level="warning")
+
+    def _verbose_logging(self):
+        """True when the panel's verbose-logging checkbox is on.
+
+        Guarded: some entry points build the controller against a minimal UI
+        stub that has no such widget, and a missing checkbox must mean "quiet",
+        not AttributeError.
+        """
+        box = getattr(self.ui, "verbose_logging_checkbox", None)
+        return bool(box.isChecked()) if box is not None else False
 
     def _load_params_from_layout(self, layout_group):
         """Extracts algorithm parameters from layout properties."""
+        missing = []
         props_map = {
             PROP_SHEET_WIDTH: self.ui.sheet_width_input,
             PROP_SHEET_HEIGHT: self.ui.sheet_height_input,
@@ -193,39 +280,71 @@ class NestingController:
             PROP_NESTING_DIRECTION: self.ui.minkowski_direction_dial,
         }
         
+        verbose = self._verbose_logging()
+
         for prop, widget in props_map.items():
             val = getattr(layout_group, prop, None)
-            if val is not None: widget.setValue(val)
-            
+            if val is not None:
+                widget.setValue(val)
+            else:
+                missing.append(f"{_LAYOUT_SETTING_LABELS.get(prop, prop)} (defaulted)")
+
+        # Deflection has three outcomes and only one of them is a real default.
         deflection_angle = getattr(layout_group, PROP_DEFLECTION_ANGLE, None)
         if deflection_angle is not None:
             self.ui.deflection_input.setValue(deflection_angle)
         elif hasattr(layout_group, 'Deflection'):
-            self.ui.deflection_input.setValue(layout_group.Deflection * 200.0)
-            
+            # Legacy documents stored millimetres. The setting is genuinely
+            # restored, so this is a migration rather than a fallback and does
+            # not belong in the warning — but it is still worth being able to
+            # see, so it goes out under verbose.
+            self.ui.deflection_input.setValue(layout_group.Deflection * DEFLECTION_ANGLE_PER_MM)
+            if verbose:
+                FreeCAD.Console.PrintMessage(
+                    f"[NestingController] Layout '{layout_group.Label}': converted legacy "
+                    f"Deflection ({layout_group.Deflection} mm) to a deflection angle\n")
+        else:
+            missing.append("deflection angle (kept the panel's current value)")
 
-        
-        font_path = getattr(layout_group, PROP_FONT_FILE, None)
-        if font_path and os.path.exists(font_path):
-            self.ui.selected_font_path = font_path
-            self.ui.font_label.setText(os.path.basename(font_path))
+        # Font: "never stored one", "stored no font" and "stored one that has
+        # since moved" are three different things. The middle one is a real
+        # setting being honoured, so only the other two are reported.
+        if not hasattr(layout_group, PROP_FONT_FILE):
+            missing.append("label font (kept the panel's current font)")
+        else:
+            font_path = getattr(layout_group, PROP_FONT_FILE, None)
+            if font_path:
+                if os.path.exists(font_path):
+                    self.ui.selected_font_path = font_path
+                    self.ui.font_label.setText(os.path.basename(font_path))
+                else:
+                    missing.append(
+                        f"label font '{os.path.basename(font_path)}' (saved path no longer "
+                        f"exists, kept the panel's current font)")
 
-        steps = getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS, 0)
+        # The algorithm is a setting in its own right. It used to be restored
+        # only inside the `steps > 0` branch below, so a layout that carried
+        # Algorithm could still reopen on the wrong one — silently, because
+        # hasattr() was true and nothing was reported as defaulted.
+        if hasattr(layout_group, PROP_ALGORITHM):
+            algo = str(getattr(layout_group, PROP_ALGORITHM))
+        else:
+            algo = "Minkowski"
+            missing.append("algorithm (defaulted to Minkowski)")
+        self.ui.algorithm_dropdown.setCurrentText(algo)
+
+        steps = _as_int(getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS, 0), 0)
         if steps > 0:
             target_angle = 360.0 / steps
-            algo = getattr(layout_group, "Algorithm", "Minkowski")
-            self.ui.algorithm_dropdown.setCurrentText(algo)
-            
             angles = PHYSICS_ROTATION_PRESETS if algo == "Physics" else self.ui.rotation_angles
             slider = self.ui.physics_rotation_steps_slider if algo == "Physics" else self.ui.minkowski_rotation_steps_slider
-            
-            closest_idx = 0
-            min_diff = float('inf')
-            for i, angle in enumerate(angles):
-                diff = abs(angle - target_angle)
-                if diff < min_diff:
-                    min_diff, closest_idx = diff, i
-            slider.setValue(closest_idx)
+            slider.setValue(closest_angle_index(angles, target_angle))
+        else:
+            # Absent, or stored as a value the slider cannot be derived from.
+            # Either way the slider keeps whatever the panel already had.
+            missing.append("global rotation steps (kept the panel's current value)")
+
+        return missing
 
     def _load_shapes_from_layout(self, layout_group):
         """Identifies master shapes and their quantities/overrides."""
@@ -234,31 +353,99 @@ class NestingController:
         if not master_shapes_group:
             FreeCAD.Console.PrintWarning(f"  WARNING: No MasterShapes group found in '{layout_group.Label}'\n")
             self.ui.status_label.setText("Warning: Could not find 'MasterShapes' group.")
-            return
+            return [], []
 
         shapes_to_load = []
         quantities, overrides, steps_map, up_dirs, fill_map = {}, {}, {}, {}, {}
+        dropped_masters = []
         
+        missing_counts = {
+            PROP_PART_ROTATION_OVERRIDE: 0,
+            PROP_PART_ROTATION_STEPS: 0,
+            PROP_UP_DIRECTION: 0,
+            PROP_FILL_SHEET: 0,
+            PROP_QUANTITY: 0,
+        }
+
+        verbose = self._verbose_logging()
+
         for master in master_shapes_group.Group:
             if not hasattr(master, "Group"): continue
             
             shape_obj = next((child for child in master.Group if child.Label.startswith("master_shape_")), None)
-            if shape_obj and hasattr(shape_obj, "Shape"):
+            # A Part shape is always truthy; an emptied one is only detectable via isNull()
+            shape = getattr(shape_obj, "Shape", None) if shape_obj else None
+            if shape is not None and not shape.isNull():
                 shapes_to_load.append(shape_obj)
                 label = shape_obj.Label
                 
-                quantities[label] = getattr(master, "Quantity", 1)
-                
-                overrides[label] = getattr(master, "PartRotationOverride", [])
-                steps_map[label] = getattr(master, "PartRotationSteps", 0)
-                up_dirs[label] = getattr(master, "UpDirection", "Z+")
-                fill_map[label] = getattr(master, "FillSheet", False)
+                if not hasattr(master, PROP_QUANTITY):
+                    missing_counts[PROP_QUANTITY] += 1
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_QUANTITY}, defaulted to 1\n")
+
+                if not hasattr(master, PROP_PART_ROTATION_OVERRIDE):
+                    missing_counts[PROP_PART_ROTATION_OVERRIDE] += 1
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_PART_ROTATION_OVERRIDE}, defaulted to False\n")
+
+                if not hasattr(master, PROP_PART_ROTATION_STEPS):
+                    missing_counts[PROP_PART_ROTATION_STEPS] += 1
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_PART_ROTATION_STEPS}, defaulted to global\n")
+
+                if not hasattr(master, PROP_UP_DIRECTION):
+                    missing_counts[PROP_UP_DIRECTION] += 1
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_UP_DIRECTION}, defaulted to Z+\n")
+
+                if not hasattr(master, PROP_FILL_SHEET):
+                    missing_counts[PROP_FILL_SHEET] += 1
+                    if verbose:
+                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_FILL_SHEET}, defaulted to False\n")
+
+                quantities[label] = _as_int(getattr(master, PROP_QUANTITY, 1), 1)
+
+                overrides[label] = _as_bool(
+                    getattr(master, PROP_PART_ROTATION_OVERRIDE, False))
+
+                # Only override load_shapes' own default (4) when the
+                # layout actually carries a per-part value. 0 means the
+                # property is absent or never set, not "no rotation".
+                raw_steps = _as_int(
+                    getattr(master, PROP_PART_ROTATION_STEPS, 0), 0)
+                if raw_steps > 0:
+                    steps_map[label] = raw_steps
+
+                up_dirs[label] = str(getattr(master, PROP_UP_DIRECTION, "Z+"))
+                fill_map[label] = _as_bool(getattr(master, PROP_FILL_SHEET, False))
+            else:
+                dropped_masters.append(master.Label)
         
         self.load_shapes(
             shapes_to_load, is_reloading_layout=True, initial_quantities=quantities,
             initial_overrides=overrides, initial_rotation_steps=steps_map,
             initial_up_directions=up_dirs, initial_fill_sheet=fill_map
         )
+
+        missing_descriptions = []
+        if missing_counts[PROP_PART_ROTATION_OVERRIDE] > 0:
+            c = missing_counts[PROP_PART_ROTATION_OVERRIDE]
+            missing_descriptions.append(f"per-part rotation override ({c} {'part' if c == 1 else 'parts'}, defaulted to off)")
+        if missing_counts[PROP_PART_ROTATION_STEPS] > 0:
+            c = missing_counts[PROP_PART_ROTATION_STEPS]
+            missing_descriptions.append(f"per-part rotation steps ({c} {'part' if c == 1 else 'parts'}, defaulted to global)")
+        if missing_counts[PROP_UP_DIRECTION] > 0:
+            c = missing_counts[PROP_UP_DIRECTION]
+            missing_descriptions.append(f"up direction ({c} {'part' if c == 1 else 'parts'}, defaulted to Z+)")
+        if missing_counts[PROP_FILL_SHEET] > 0:
+            c = missing_counts[PROP_FILL_SHEET]
+            missing_descriptions.append(f"fill sheet ({c} {'part' if c == 1 else 'parts'}, defaulted to off)")
+        if missing_counts[PROP_QUANTITY] > 0:
+            c = missing_counts[PROP_QUANTITY]
+            missing_descriptions.append(f"quantity ({c} {'part' if c == 1 else 'parts'}, defaulted to 1)")
+
+        return missing_descriptions, dropped_masters
 
     def _extract_parts_from_selection(self, selection):
         """
@@ -331,12 +518,19 @@ class NestingController:
             self.ui.current_layout = None
             self.ui.hidden_originals = list(self.ui.selected_shapes_to_process)
         
+        seen_labels = set()
+        duplicate_labels = set()
+
         self.ui.shape_table.setRowCount(len(self.ui.selected_shapes_to_process))
         for i, obj in enumerate(self.ui.selected_shapes_to_process):
             display_label = obj.Label
             if display_label.startswith("master_shape_"):
                 display_label = display_label.replace("master_shape_", "")
             
+            if display_label in seen_labels:
+                duplicate_labels.add(display_label)
+            seen_labels.add(display_label)
+
             qty = selection_counts.get(obj, 1)
             
             if initial_quantities and obj.Label in initial_quantities:
@@ -361,9 +555,17 @@ class NestingController:
             if add_row_fn:
                  add_row_fn(i, display_label, quantity=qty, rotation_steps=steps, 
                             override_rotation=override, up_direction=up_dir, fill_sheet=fill)
+            
+            item = self.ui.shape_table.item(i, 0)
+            if item:
+                item.setData(QtCore.Qt.UserRole, obj)
         
         self.ui.shape_table.resizeColumnsToContents()
         self.ui.status_label.setText(f"{len(selection)} unique object(s) selected. Specify quantities and nest.")
+
+        if duplicate_labels:
+            msg = f"Duplicate part label(s) detected: {', '.join(sorted(duplicate_labels))}. Only one part per duplicate label will be nested."
+            self.ui.log_message(msg, level="warning")  # status label + Report view
 
     def add_selected_shapes(self):
         """Adds the currently selected FreeCAD objects to the shape table."""
@@ -379,14 +581,22 @@ class NestingController:
                 selection_counts[obj] = selection_counts.get(obj, 0) + 1
             selection = extracted
 
-        existing_labels = [self.ui.shape_table.item(row, 0).text() for row in range(self.ui.shape_table.rowCount())]
+        existing_labels = set(self.ui.shape_table.item(row, 0).text() for row in range(self.ui.shape_table.rowCount()))
         
         added_count = 0
+        duplicate_labels = set()
         
         unique_selection = list(dict.fromkeys(selection))
         
         for obj in unique_selection:
-            if obj.Label not in existing_labels:
+            display_label = obj.Label
+            if display_label.startswith("master_shape_"):
+                display_label = display_label.replace("master_shape_", "")
+
+            if display_label in existing_labels:
+                duplicate_labels.add(display_label)
+            else:
+                existing_labels.add(display_label)
                 row_position = self.ui.shape_table.rowCount()
                 self.ui.shape_table.insertRow(row_position)
                 
@@ -394,13 +604,21 @@ class NestingController:
                 
                 add_row_fn = getattr(self.ui, 'add_part_row', getattr(self.ui, '_add_part_row', None))
                 if add_row_fn:
-                    add_row_fn(row_position, obj.Label, quantity=qty)
+                    add_row_fn(row_position, display_label, quantity=qty)
+                
+                item = self.ui.shape_table.item(row_position, 0)
+                if item:
+                    item.setData(QtCore.Qt.UserRole, obj)
                     
                 self.ui.selected_shapes_to_process.append(obj)
                 added_count += 1
         
         self.ui.shape_table.resizeColumnsToContents()
         self.ui.status_label.setText(f"Added {added_count} new shape(s).")
+
+        if duplicate_labels:
+            msg = f"Duplicate part label(s) detected: {', '.join(sorted(duplicate_labels))}. Only one part per duplicate label will be nested."
+            self.ui.log_message(msg, level="warning")  # status label + Report view
 
         if self.ui.shape_table.rowCount() > 0:
             self.ui.nest_button.setEnabled(True)
@@ -409,10 +627,22 @@ class NestingController:
         """Removes the selected rows from the shape table."""
         selected_items = self.ui.shape_table.selectedItems()
         selected_rows = sorted(list(set(item.row() for item in selected_items)), reverse=True)
+        objects_to_remove = []
         for row in selected_rows:
-            label_to_remove = self.ui.shape_table.item(row, 0).text()
-            self.ui.selected_shapes_to_process = [obj for obj in self.ui.selected_shapes_to_process if obj.Label != label_to_remove]
+            item = self.ui.shape_table.item(row, 0)
+            obj_to_remove = item.data(QtCore.Qt.UserRole) if item else None
+            if obj_to_remove is not None:
+                objects_to_remove.append(obj_to_remove)
+            else:
+                label_to_remove = item.text() if item else ""
+                obj_match = next((o for o in self.ui.selected_shapes_to_process if o.Label == label_to_remove), None)
+                if obj_match:
+                    objects_to_remove.append(obj_match)
             self.ui.shape_table.removeRow(row)
+
+        for obj in objects_to_remove:
+            self.ui.selected_shapes_to_process = [o for o in self.ui.selected_shapes_to_process if o is not obj]
+
         self.ui.status_label.setText(f"Removed {len(selected_rows)} shape(s).")
 
         if self.ui.shape_table.rowCount() == 0:
@@ -535,7 +765,7 @@ class NestingController:
         self.ui.nest_button.setEnabled(True)
         self.ui.cancel_button.setEnabled(False)
         self.ui.reset_progress()
-        self._worker = None
+        self._retire_worker()
 
     def _on_nesting_error(self, error_msg):
         """Main-thread handler for nesting errors."""
@@ -546,8 +776,32 @@ class NestingController:
         self.ui.nest_button.setEnabled(True)
         self.ui.cancel_button.setEnabled(False)
         self.ui.reset_progress()
-        self._worker = None
-    
+        self._retire_worker()
+
+    def _retire_worker(self):
+        """Releases the finished worker thread on the main thread.
+
+        finished_signal / error_signal are emitted from inside run(), so the
+        thread may still be unwinding when these handlers execute. The worker
+        and its GACoordinator also reference each other (worker.coordinator /
+        coordinator.worker), so dropping self._worker alone did not free the
+        QThread: it lingered until Python's cyclic GC, which can fire on any
+        thread — typically the NEXT run's worker thread, mid-allocation.
+        Destroying a QThread from a foreign thread (or while still running)
+        is a hard crash, which is why a second run in the same panel could
+        take FreeCAD down. Wait for the thread, then break the cycle so the
+        wrapper is freed here, deterministically, by refcount.
+        """
+        worker, self._worker = self._worker, None
+        if worker is None:
+            return
+        worker.wait()
+        coordinator = worker.coordinator
+        worker.coordinator = None
+        if coordinator is not None:
+            coordinator.worker = None
+            coordinator.draw_callback = None
+
     def finalize_job(self):
         """Called when User clicks OK."""
         if self.current_job:
@@ -558,11 +812,11 @@ class NestingController:
             if final_layout and hasattr(final_layout, "ViewObject"):
                 final_layout.ViewObject.Visibility = True
                 
+            set_master_shapes_visible(final_layout, False)
+
             if final_layout and hasattr(final_layout, "Group"):
                 for child in final_layout.Group:
-                    if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
-                        child.ViewObject.Visibility = False
-                    elif child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
+                    if child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
                         child.ViewObject.Visibility = True
             
             self.current_job = None
@@ -617,8 +871,10 @@ class NestingController:
                             for child in target.Group:
                                 if child.Label.startswith("Sheet_") and hasattr(child, "ViewObject"):
                                     child.ViewObject.Visibility = True
-                                if child.Label.startswith("MasterShapes") and hasattr(child, "ViewObject"):
-                                    child.ViewObject.Visibility = False
+
+                        # Cancelling a run does not close the panel, and the
+                        # master row belongs to the panel: leave it on screen.
+                        set_master_shapes_visible(target, True)
                 except Exception as e:
                     FreeCAD.Console.PrintWarning(f"[NestingController] Cancel cleanup failed for child: {e}\n")
             
@@ -626,6 +882,22 @@ class NestingController:
             FreeCAD.Console.PrintMessage("Job Cancelled.\n")
             self.doc.recompute()
     
+    def on_panel_closed(self):
+        """Called when the task panel closes, whatever route it took.
+
+        Master shapes and their outlines exist for the panel's benefit, so they
+        go away with it — including rows belonging to layouts this session never
+        touched, which older runs could leave switched on.
+        """
+        try:
+            self.viz_manager.clear_highlight()
+            hide_all_master_shapes(self.doc)
+            if self.doc:
+                self.doc.recompute()
+        except Exception as e:
+            # The document may already be gone when the panel is torn down
+            FreeCAD.Console.PrintWarning(f"[NestingController] Panel teardown failed: {e}\n")
+
     def toggle_bounds_visibility(self):
         is_visible = self.ui.show_bounds_checkbox.isChecked()
         
@@ -692,7 +964,7 @@ class NestingController:
 
     def _collect_ui_params(self):
         deflection_angle = self.ui.deflection_input.value()
-        deflection_mm = deflection_angle / 200.0
+        deflection_mm = deflection_angle / DEFLECTION_ANGLE_PER_MM
         
         settings_dict = {
             'sheet_width': self.ui.sheet_width_input.value(),
@@ -777,17 +1049,24 @@ class NestingController:
                 
                 rot_widget = self.ui.shape_table.cellWidget(row, 2)
                 rot_val = rot_widget.findChild(QtWidgets.QSpinBox).value()
-                override = self.ui.shape_table.cellWidget(row, 3).isChecked()
+                override_box = rot_widget.findChild(QtWidgets.QCheckBox)
+                override = override_box.isChecked() if override_box else False
                 
-                up_dir_combo = self.ui.shape_table.cellWidget(row, 4)
+                up_dir_combo = self.ui.shape_table.cellWidget(row, 3)
                 up_direction = up_dir_combo.currentText() if up_dir_combo else "Z+"
                 
-                fill_checkbox = self.ui.shape_table.cellWidget(row, 5)
+                fill_checkbox = self.ui.shape_table.cellWidget(row, 4)
                 fill_sheet = fill_checkbox.isChecked() if fill_checkbox else False
                 
                 quantities[label] = {
                     'quantity': qty,
+                    # Resolved value the placer uses. Unchanged — do not
+                    # repoint this at the raw spinbox.
                     'rotation_steps': rot_val if override else global_rot,
+                    # Raw widget state, persisted onto the master container so
+                    # reopening the layout can restore the row.
+                    'override_rotation': override,
+                    'part_rotation_steps': rot_val,
                     'up_direction': up_direction,
                     'fill_sheet': fill_sheet
                 }
@@ -846,8 +1125,8 @@ class NestingController:
             
             algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
             algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
-            algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
 
+        algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
         algo_kwargs['spacing'] = ui_params['spacing']
         algo_kwargs['random_seed'] = ui_params.get('random_seed')
         

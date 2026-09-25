@@ -13,6 +13,7 @@ Supports:
 import FreeCAD
 import FreeCADGui
 import os
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
 
 
 class CreateSilhouetteCommand:
@@ -22,8 +23,8 @@ class CreateSilhouetteCommand:
         """Defines the command's appearance in FreeCAD."""
         return {
             'Pixmap': 'Nesting_Silhouette_Icon.svg',
-            'MenuText': 'Create Silhouette',
-            'ToolTip': 'Creates a 2D silhouette (outline) from the selected 3D object(s).'
+            'MenuText': QT_TRANSLATE_NOOP('CreateSilhouetteCommand', 'Create Silhouette'),
+            'ToolTip': QT_TRANSLATE_NOOP('CreateSilhouetteCommand', 'Creates a 2D silhouette (outline) from the selected 3D object(s).')
         }
     
     def Activated(self):
@@ -40,8 +41,8 @@ class CreateSilhouetteCommand:
             return
         
         # Import the silhouette creator functions
+        from freecad.nestingworkbench.freecad_helpers import is_layout_group
         from freecad.nestingworkbench.Tools.Silhouette.silhouette_creator import (
-            is_layout_group,
             create_silhouettes_for_layout,
             create_silhouette_for_container,
             create_silhouette_for_part,

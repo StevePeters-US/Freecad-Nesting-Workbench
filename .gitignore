@@ -31,6 +31,3 @@ Thumbs.db
 # Merge / patch leftovers
 *.orig
 *.rej
-
-# Machine-local agent settings
-.claude/settings.local.json

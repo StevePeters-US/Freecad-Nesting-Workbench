@@ -5,8 +5,12 @@ Handles repulsion and falloff computation for parts near a dragged part.
 This module is designed to be standalone and doesn't import FreeCAD.
 """
 
+RADIUS_MIN_MM = 0.0
+RADIUS_MAX_MM = 1000.0   # must match the Influence Radius spinbox range
+RADIUS_DEFAULT_MM = 200.0
+
 class PhysicsEngine:
-    def __init__(self, radius=200.0, curve_exponent=2.0, strength=1.0):
+    def __init__(self, radius=RADIUS_DEFAULT_MM, curve_exponent=2.0, strength=1.0):
         """
         Args:
             radius: max influence distance (mm) from dragged part center
@@ -52,62 +56,31 @@ class PhysicsEngine:
         if drag_len < 0.001:
             return [(obj, Vec(0, 0, 0)) for obj, *_ in parts_info]
 
-        try:
-            import numpy as np
-            return self._compute_numpy(dragged_center, drag_len, parts_info, Vec)
-        except ImportError:
-            return self._compute_python(dragged_center, drag_len, parts_info, Vec)
+        dragged_xy = (dragged_center.x, dragged_center.y)
+        raw_parts = [(obj, (c.x, c.y)) for obj, c, _, _ in parts_info]
+        raw_displacements = self._compute_core(dragged_xy, drag_len, raw_parts)
 
-    def _compute_numpy(self, dragged_center, drag_len, parts_info, Vec):
-        import numpy as np
-        n = len(parts_info)
-        centers = np.empty((n, 2))
-        for i, (_, c, _, _) in enumerate(parts_info):
-            centers[i, 0] = c.x
-            centers[i, 1] = c.y
+        return [(obj, Vec(dx, dy, 0)) for obj, (dx, dy) in raw_displacements]
 
-        dc = np.array([dragged_center.x, dragged_center.y])
-        diffs = centers - dc
-        dists = np.sqrt((diffs * diffs).sum(axis=1))
-
-        factors = np.zeros(n)
-        r = self.radius
-        if r > 0:
-            mask = (dists >= 0.001) & (dists < r)
-            if mask.any():
-                factors[mask] = (
-                    np.maximum(0.0, 1.0 - (dists[mask] / r) ** self.curve_exponent)
-                    * self.strength
-                )
-
-        result = []
-        for i, (obj, _, _, _) in enumerate(parts_info):
-            f = factors[i]
-            if f < 0.001:
-                result.append((obj, Vec(0, 0, 0)))
-            else:
-                push = drag_len * f
-                d = dists[i]
-                result.append((obj, Vec(diffs[i, 0] / d * push, diffs[i, 1] / d * push, 0)))
-        return result
-
-    def compute_raw(self, dragged_xy, drag_len, parts_keys_and_centers):
-        """Like compute_displacements but takes plain tuples — no FreeCAD.Vector needed.
-
+    def _compute_core(self, dragged_xy, drag_len, parts_keys_and_centers):
+        """Core displacement computation in 2D tuple space.
+        
         Args:
-            dragged_xy: (cx, cy) float tuple — center of dragged part
-            drag_len: float — length of drag delta this frame
+            dragged_xy: (cx, cy) tuple — center of dragged part
+            drag_len: float — length of drag delta
             parts_keys_and_centers: list of (key, (cx, cy)) tuples
-
+            
         Returns:
             list of (key, (dx, dy)) displacement tuples
         """
-        if not parts_keys_and_centers or drag_len < 0.001:
-            return [(k, (0.0, 0.0)) for k, _ in parts_keys_and_centers]
-
         dcx, dcy = dragged_xy
         try:
             import numpy as np
+            has_numpy = True
+        except ImportError:
+            has_numpy = False
+
+        if has_numpy:
             n = len(parts_keys_and_centers)
             centers = np.empty((n, 2))
             for i, (_, c) in enumerate(parts_keys_and_centers):
@@ -135,7 +108,7 @@ class PhysicsEngine:
                     d = dists[i]
                     result.append((key, (diffs[i, 0] / d * push, diffs[i, 1] / d * push)))
             return result
-        except ImportError:
+        else:
             result = []
             for key, c in parts_keys_and_centers:
                 dx = c[0] - dcx
@@ -152,19 +125,18 @@ class PhysicsEngine:
                 result.append((key, (dx / dist * push, dy / dist * push)))
             return result
 
-    def _compute_python(self, dragged_center, drag_len, parts_info, Vec):
-        result = []
-        for obj, center, _, _ in parts_info:
-            dx = center.x - dragged_center.x
-            dy = center.y - dragged_center.y
-            dist = (dx * dx + dy * dy) ** 0.5
-            if dist < 0.001:
-                result.append((obj, Vec(0, 0, 0)))
-                continue
-            factor = self.compute_falloff(dist) * self.strength
-            if factor < 0.001:
-                result.append((obj, Vec(0, 0, 0)))
-                continue
-            push = drag_len * factor
-            result.append((obj, Vec(dx / dist * push, dy / dist * push, 0)))
-        return result
+    def compute_raw(self, dragged_xy, drag_len, parts_keys_and_centers):
+        """Like compute_displacements but takes plain tuples — no FreeCAD.Vector needed.
+
+        Args:
+            dragged_xy: (cx, cy) float tuple — center of dragged part
+            drag_len: float — length of drag delta this frame
+            parts_keys_and_centers: list of (key, (cx, cy)) tuples
+
+        Returns:
+            list of (key, (dx, dy)) displacement tuples
+        """
+        if not parts_keys_and_centers or drag_len < 0.001:
+            return [(k, (0.0, 0.0)) for k, _ in parts_keys_and_centers]
+
+        return self._compute_core(dragged_xy, drag_len, parts_keys_and_centers)

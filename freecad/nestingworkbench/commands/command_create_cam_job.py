@@ -5,6 +5,8 @@ import os
 from PySide import QtWidgets, QtCore
 from freecad.nestingworkbench.Tools.Cam import cam_manager
 from freecad.nestingworkbench.constants import PREFS_PATH
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.freecad_helpers import is_layout_group
 
 
 class CAMOptionsDialog(QtWidgets.QDialog):
@@ -202,8 +204,8 @@ class CreateCAMJobCommand:
     def GetResources(self):
         return {
             'Pixmap': 'Nesting_CNC_Icon.svg',
-            'MenuText': 'Create CAM Job',
-            'ToolTip': 'Creates a CAM job from the selected layout.'
+            'MenuText': QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Create CAM Job'),
+            'ToolTip': QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Creates a CAM job from the selected layout.')
         }
 
     def Activated(self):
@@ -212,7 +214,7 @@ class CreateCAMJobCommand:
         layout_group = None
         if selection:
             selected = selection[0]
-            if selected.isDerivedFrom("App::DocumentObjectGroup") and selected.Label.startswith("Layout_"):
+            if is_layout_group(selected):
                 layout_group = selected
 
         if not layout_group:
@@ -244,7 +246,7 @@ class CreateCAMJobCommand:
         selection = FreeCADGui.Selection.getSelection()
         if not selection: return False
         selected = selection[0]
-        return selected.isDerivedFrom("App::DocumentObjectGroup") and selected.Label.startswith("Layout_")
+        return is_layout_group(selected)
 
 if FreeCAD.GuiUp:
     FreeCADGui.addCommand('Nesting_CreateCAMJob', CreateCAMJobCommand())

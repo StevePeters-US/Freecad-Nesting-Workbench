@@ -6,15 +6,16 @@ import os
 
 import FreeCADGui
 
-from freecad.nestingworkbench import ICONS_DIR
+from freecad.nestingworkbench import ICONS_DIR, TRANSLATIONS_DIR
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
 
 
 class NestingWorkbench(FreeCADGui.Workbench):
     """
     Defines the Nesting Workbench.
     """
-    MenuText = "Nesting"
-    ToolTip = "A workbench for 2D nesting of shapes."
+    MenuText = QT_TRANSLATE_NOOP("NestingWorkbench", "Nesting")
+    ToolTip = QT_TRANSLATE_NOOP("NestingWorkbench", "A workbench for 2D nesting of shapes.")
     # Absolute path: the workbench selector reads this at registration time,
     # before Initialize() has added the icon directory to the search path.
     Icon = os.path.join(ICONS_DIR, "Nesting_Workbench.svg")
@@ -28,6 +29,8 @@ class NestingWorkbench(FreeCADGui.Workbench):
         # import time, so an unactivated workbench does not affect icon lookup
         # for the rest of FreeCAD. All icon names are Nesting_*-prefixed.
         FreeCADGui.addIconPath(ICONS_DIR)
+        if hasattr(FreeCADGui, "addLanguagePath") and os.path.isdir(TRANSLATIONS_DIR):
+            FreeCADGui.addLanguagePath(TRANSLATIONS_DIR)
         # Import the command modules. This executes the FreeCADGui.addCommand()
         # in each file, making the commands available to FreeCAD.
         from freecad.nestingworkbench.commands import command_nest
@@ -36,6 +39,7 @@ class NestingWorkbench(FreeCADGui.Workbench):
         from freecad.nestingworkbench.commands import command_export_sheets
         from freecad.nestingworkbench.commands import command_create_cam_job
         from freecad.nestingworkbench.commands import command_create_silhouette
+        from freecad.nestingworkbench.commands import command_about
         # Create Menu (Dropdown)
         self.appendMenu(["Nesting"], [
             'Nesting_Run',
@@ -43,7 +47,9 @@ class NestingWorkbench(FreeCADGui.Workbench):
             'Nesting_ManualNester',
             'Nesting_Export',
             'Nesting_CreateCAMJob',
-            'Nesting_CreateSilhouette'
+            'Nesting_CreateSilhouette',
+            'Separator',
+            'Nesting_About'
         ])
         self.appendToolbar("Nesting", [
             'Nesting_Run',
