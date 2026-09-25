@@ -16,6 +16,8 @@ Collision detection uses a two-phase approach:
 """
 
 class CollisionResolver:
+    OVERLAP_PAD_MM = 0.001  # push just past contact so the next strict bbox test clears
+
     def __init__(self):
         self._cache = {}  # id(obj) -> entry dict with 'bbox' and 'poly' keys
         self._base_cache = {}  # id(obj) -> (x, y) placement base when entry was last computed
@@ -61,32 +63,8 @@ class CollisionResolver:
         return True
 
     def _translate_entry(self, obj, dx, dy):
-        """Shift a cached entry's bbox and Shapely polygon by (dx, dy).
-
-        Cheaper than invalidate() + _compute_entry(): no FreeCAD API calls are
-        needed for a pure XY translation.  No-op if obj has no cached entry.
-        """
-        key = id(obj)
-        if key not in self._cache:
-            return
-        entry = self._cache[key]
-        bb = entry['bbox']
-        bb['min_x'] += dx
-        bb['max_x'] += dx
-        bb['min_y'] += dy
-        bb['max_y'] += dy
-        bb['center_x'] += dx
-        bb['center_y'] += dy
-        poly = entry.get('poly')
-        if poly is not None:
-            try:
-                from shapely.affinity import translate as _shapely_translate
-                entry['poly'] = _shapely_translate(poly, dx, dy)
-            except Exception:
-                entry['poly'] = None
-        if key in self._base_cache:
-            old = self._base_cache[key]
-            self._base_cache[key] = (old[0] + dx, old[1] + dy)
+        """Shift obj's cached bbox and polygon by (dx, dy). No-op if uncached."""
+        self._translate_key(id(obj), dx, dy)
 
     def clamp_to_sheet(self, obj, sheet_bbox):
         """Clamp obj's logical position so its bbox stays within sheet_bbox.
@@ -98,28 +76,9 @@ class CollisionResolver:
             return False
 
         abs_bb = entry['bbox']
-        cur_x, cur_y = self._get_logical_pos(obj)
-
-        new_x = cur_x
-        new_y = cur_y
-        clamped = False
-
-        if abs_bb['min_x'] < sheet_bbox.XMin:
-            new_x += (sheet_bbox.XMin - abs_bb['min_x'])
-            clamped = True
-        elif abs_bb['max_x'] > sheet_bbox.XMax:
-            new_x -= (abs_bb['max_x'] - sheet_bbox.XMax)
-            clamped = True
-
-        if abs_bb['min_y'] < sheet_bbox.YMin:
-            new_y += (sheet_bbox.YMin - abs_bb['min_y'])
-            clamped = True
-        elif abs_bb['max_y'] > sheet_bbox.YMax:
-            new_y -= (abs_bb['max_y'] - sheet_bbox.YMax)
-            clamped = True
-
+        dx, dy, clamped = self._clamp_offsets(abs_bb, sheet_bbox.XMin, sheet_bbox.XMax, sheet_bbox.YMin, sheet_bbox.YMax)
         if clamped:
-            self._translate_entry(obj, new_x - cur_x, new_y - cur_y)
+            self._translate_entry(obj, dx, dy)
 
         return clamped
 
@@ -128,62 +87,27 @@ class CollisionResolver:
 
         Only moved_obj is shifted. Updates the cache only — does not write obj.Placement.
         """
-        for _ in range(max_iterations):
-            any_overlap = False
-            moved_entry = self._get_entry(moved_obj)
-            if not moved_entry:
-                return False
-            moved_bb = moved_entry['bbox']
-            cur_x, cur_y = self._get_logical_pos(moved_obj)
-
-            for other in other_objs:
-                if other == moved_obj:
-                    continue
-
-                other_entry = self._get_entry(other)
-                if not other_entry:
-                    continue
-
-                if self._entries_intersect(moved_entry, other_entry):
-                    any_overlap = True
-                    other_bb = other_entry['bbox']
-                    overlap_x = min(moved_bb['max_x'], other_bb['max_x']) - max(moved_bb['min_x'], other_bb['min_x']) + 0.001
-                    overlap_y = min(moved_bb['max_y'], other_bb['max_y']) - max(moved_bb['min_y'], other_bb['min_y']) + 0.001
-
-                    new_x = cur_x
-                    new_y = cur_y
-
-                    if overlap_x < overlap_y:
-                        dir_x = 1.0 if moved_bb['center_x'] > other_bb['center_x'] else -1.0
-                        new_x += overlap_x * dir_x
-                    else:
-                        dir_y = 1.0 if moved_bb['center_y'] > other_bb['center_y'] else -1.0
-                        new_y += overlap_y * dir_y
-
-                    dx = new_x - cur_x
-                    dy = new_y - cur_y
-                    cur_x, cur_y = new_x, new_y
-                    self._translate_entry(moved_obj, dx, dy)
-                    moved_entry = self._cache.get(id(moved_obj))
-                    if moved_entry:
-                        moved_bb = moved_entry['bbox']
-
-            if not any_overlap:
-                return True
-        return False
+        if not self._get_entry(moved_obj):
+            return False
+        other_keys = []
+        for other in other_objs:
+            if other == moved_obj:
+                continue
+            if self._get_entry(other):
+                other_keys.append(id(other))
+        return self.separate_overlapping_by_keys(id(moved_obj), other_keys, max_iterations=max_iterations)
 
     def overlaps_any(self, obj, others):
         """Returns True if obj overlaps any shape in others."""
-        entry = self._get_entry(obj)
-        if not entry:
+        if not self._get_entry(obj):
             return False
+        other_keys = []
         for other in others:
             if other == obj:
                 continue
-            other_entry = self._get_entry(other)
-            if other_entry and self._entries_intersect(entry, other_entry):
-                return True
-        return False
+            if self._get_entry(other):
+                other_keys.append(id(other))
+        return self.overlaps_any_by_keys(id(obj), other_keys)
 
     # Internal cache helpers
 
@@ -205,7 +129,11 @@ class CollisionResolver:
     # Key-based methods (worker-thread safe — no FreeCAD object refs)
 
     def _translate_key(self, key, dx, dy):
-        """Translate a cache entry by (dx, dy) using integer key instead of obj ref."""
+        """Translate a cache entry by (dx, dy) using integer key instead of obj ref.
+
+        Cheaper than invalidate() + _compute_entry(): no FreeCAD API calls needed for
+        a pure XY translation. No-op if uncached.
+        """
         if key not in self._cache:
             return
         entry = self._cache[key]
@@ -246,18 +174,9 @@ class CollisionResolver:
                 if self._entries_intersect(moved_entry, other_entry):
                     any_overlap = True
                     other_bb = other_entry['bbox']
-                    overlap_x = min(moved_bb['max_x'], other_bb['max_x']) - max(moved_bb['min_x'], other_bb['min_x']) + 0.001
-                    overlap_y = min(moved_bb['max_y'], other_bb['max_y']) - max(moved_bb['min_y'], other_bb['min_y']) + 0.001
-                    new_x, new_y = cur_x, cur_y
-                    if overlap_x < overlap_y:
-                        dir_x = 1.0 if moved_bb['center_x'] > other_bb['center_x'] else -1.0
-                        new_x += overlap_x * dir_x
-                    else:
-                        dir_y = 1.0 if moved_bb['center_y'] > other_bb['center_y'] else -1.0
-                        new_y += overlap_y * dir_y
-                    dx = new_x - cur_x
-                    dy = new_y - cur_y
-                    cur_x, cur_y = new_x, new_y
+                    dx, dy = self._separation_shift(moved_bb, other_bb)
+                    cur_x += dx
+                    cur_y += dy
                     self._translate_key(moved_key, dx, dy)
                     moved_entry = self._cache.get(moved_key)
                     if moved_entry:
@@ -273,23 +192,9 @@ class CollisionResolver:
         if not entry:
             return False
         abs_bb = entry['bbox']
-        cur_x, cur_y = self._get_logical_pos_by_key(key)
-        new_x, new_y = cur_x, cur_y
-        clamped = False
-        if abs_bb['min_x'] < xmin:
-            new_x += xmin - abs_bb['min_x']
-            clamped = True
-        elif abs_bb['max_x'] > xmax:
-            new_x -= abs_bb['max_x'] - xmax
-            clamped = True
-        if abs_bb['min_y'] < ymin:
-            new_y += ymin - abs_bb['min_y']
-            clamped = True
-        elif abs_bb['max_y'] > ymax:
-            new_y -= abs_bb['max_y'] - ymax
-            clamped = True
+        dx, dy, clamped = self._clamp_offsets(abs_bb, xmin, xmax, ymin, ymax)
         if clamped:
-            self._translate_key(key, new_x - cur_x, new_y - cur_y)
+            self._translate_key(key, dx, dy)
         return clamped
 
     def resolve_bi_by_keys(self, key_a, key_b):
@@ -301,8 +206,7 @@ class CollisionResolver:
         if self._entries_intersect(entry_a, entry_b):
             bb_a = entry_a['bbox']
             bb_b = entry_b['bbox']
-            ox = min(bb_a['max_x'], bb_b['max_x']) - max(bb_a['min_x'], bb_b['min_x']) + 0.001
-            oy = min(bb_a['max_y'], bb_b['max_y']) - max(bb_a['min_y'], bb_b['min_y']) + 0.001
+            ox, oy = self._overlap_extents(bb_a, bb_b)
             if ox < oy:
                 shift = ox / 2.0
                 dir_x = 1.0 if bb_a['center_x'] > bb_b['center_x'] else -1.0
@@ -331,11 +235,7 @@ class CollisionResolver:
 
     @staticmethod
     def find_overlapping_pairs(keys, cache):
-        """Return list of (key_a, key_b) pairs whose shapes intersect.
-
-        Uses Shapely STRtree spatial index when available (Shapely 2.x only).
-        Falls back to O(N²) AABB+polygon checks otherwise.
-        """
+        """Return list of (key_a, key_b) intersecting pairs via STRtree fast path or O(N²) fallback."""
         entries = [(k, cache[k]) for k in keys if k in cache]
         if len(entries) < 2:
             return []
@@ -383,11 +283,16 @@ class CollisionResolver:
         return pairs
 
     def _get_entry(self, obj):
-        """Return cached entry dict, computing it if not already cached."""
+        """Return cached entry dict, computing and caching it if not already cached."""
         key = id(obj)
         if key in self._cache:
             return self._cache[key]
-        return self._compute_entry(obj)
+        entry = self._compute_entry(obj)
+        if entry:
+            self._cache[key] = entry
+            base = obj.Placement.Base
+            self._base_cache[key] = (base.x, base.y)
+        return entry
 
     def _compute_entry(self, obj):
         """Compute bbox dict + Shapely polygon for obj. Returns None if no shape found."""
@@ -482,14 +387,8 @@ class CollisionResolver:
     # Intersection tests
 
     def _entries_intersect(self, entry_a, entry_b):
-        """Two-phase intersection test.
-
-        Phase 1 — AABB fast rejection: if bounding boxes don't overlap the
-        shapes definitely don't intersect.
-        Phase 2 — Shapely narrow phase: when boxes *do* overlap and both
-        entries have polygon geometry, use the actual polygon shapes.
-        Falls back to True (assume overlap) when polygons are absent.
-        """
+        """True if entries intersect via AABB rejection and Shapely polygon test.
+        Absent polygons conservatively evaluate as overlapping."""
         if not self._bboxes_intersect(entry_a['bbox'], entry_b['bbox']):
             return False
         poly_a = entry_a.get('poly')
@@ -530,3 +429,41 @@ class CollisionResolver:
                     bb1['min_x'] >= bb2['max_x'] or
                     bb1['max_y'] <= bb2['min_y'] or
                     bb1['min_y'] >= bb2['max_y'])
+
+    @staticmethod
+    def _overlap_extents(bb_a, bb_b):
+        """Padded overlap depth along each axis."""
+        ox = min(bb_a['max_x'], bb_b['max_x']) - max(bb_a['min_x'], bb_b['min_x']) + CollisionResolver.OVERLAP_PAD_MM
+        oy = min(bb_a['max_y'], bb_b['max_y']) - max(bb_a['min_y'], bb_b['min_y']) + CollisionResolver.OVERLAP_PAD_MM
+        return ox, oy
+
+    @staticmethod
+    def _separation_shift(moved_bb, other_bb):
+        """(dx, dy) pushing moved_bb clear of other_bb along the shallower axis."""
+        ox, oy = CollisionResolver._overlap_extents(moved_bb, other_bb)
+        if ox < oy:
+            return ox * (1.0 if moved_bb['center_x'] > other_bb['center_x'] else -1.0), 0.0
+        return 0.0, oy * (1.0 if moved_bb['center_y'] > other_bb['center_y'] else -1.0)
+
+    @staticmethod
+    def _clamp_offsets(bb, xmin, xmax, ymin, ymax):
+        """(dx, dy, clamped) bringing bb inside the bounds.
+
+        clamped reports that a bound was violated, matching the pre-refactor
+        return value even if the shift itself rounds to zero.
+        """
+        dx = dy = 0.0
+        clamped = False
+        if bb['min_x'] < xmin:
+            dx = xmin - bb['min_x']
+            clamped = True
+        elif bb['max_x'] > xmax:
+            dx = -(bb['max_x'] - xmax)
+            clamped = True
+        if bb['min_y'] < ymin:
+            dy = ymin - bb['min_y']
+            clamped = True
+        elif bb['max_y'] > ymax:
+            dy = -(bb['max_y'] - ymax)
+            clamped = True
+        return dx, dy, clamped

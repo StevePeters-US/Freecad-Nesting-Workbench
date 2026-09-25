@@ -6,8 +6,15 @@ This module contains the Sheet class, which represents a single bin or sheet
 in the nesting layout.
 """
 
-import FreeCAD
-import Part
+try:
+    import FreeCAD
+except ImportError:
+    FreeCAD = None
+
+try:
+    import Part
+except ImportError:
+    Part = None
 import threading
 
 try:
@@ -61,7 +68,9 @@ class Sheet:
         Returns:
             FreeCAD.Vector: The calculated origin vector.
         """
-        return FreeCAD.Vector(self.id * (self.width + self.spacing), 0, 0)
+        if FreeCAD:
+            return FreeCAD.Vector(self.id * (self.width + self.spacing), 0, 0)
+        return (self.id * (self.width + self.spacing), 0, 0)
 
     def is_placement_valid(self, shape_to_check, part_to_ignore=None):
         """

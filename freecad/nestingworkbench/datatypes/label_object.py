@@ -5,7 +5,10 @@
 This module defines a custom FreeCAD scripted object for representing a text label.
 """
 
-import FreeCAD
+try:
+    import FreeCAD
+except ImportError:
+    FreeCAD = None
 
 class LabelObject:
     """A scripted object representing a text label."""

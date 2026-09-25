@@ -2,14 +2,16 @@
 import FreeCAD
 import FreeCADGui
 from freecad.nestingworkbench.Tools.Stacker import stacker
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.freecad_helpers import is_layout_group
 
 class StackSheetsCommand:
     """The command to stack and unstack packed sheets."""
     def GetResources(self):
         return {
             'Pixmap': 'Nesting_Stack_Icon.svg',
-            'MenuText': 'Stack/Unstack Sheets',
-            'ToolTip': 'Toggles sheet layout between stacked and unstacked.'
+            'MenuText': QT_TRANSLATE_NOOP('StackSheetsCommand', 'Stack/Unstack Sheets'),
+            'ToolTip': QT_TRANSLATE_NOOP('StackSheetsCommand', 'Toggles sheet layout between stacked and unstacked.')
         }
 
     def Activated(self):
@@ -18,7 +20,7 @@ class StackSheetsCommand:
         layout_group = None
         if selection:
             selected = selection[0]
-            if selected.isDerivedFrom("App::DocumentObjectGroup") and selected.Label.startswith("Layout_"):
+            if is_layout_group(selected):
                 layout_group = selected
         
         sheet_stacker = stacker.SheetStacker(layout_group=layout_group)
@@ -33,7 +35,7 @@ class StackSheetsCommand:
             return False
         
         selected = selection[0]
-        return selected.isDerivedFrom("App::DocumentObjectGroup") and selected.Label.startswith("Layout_")
+        return is_layout_group(selected)
 
 if FreeCAD.GuiUp:
     FreeCADGui.addCommand('Nesting_StackSheets', StackSheetsCommand())

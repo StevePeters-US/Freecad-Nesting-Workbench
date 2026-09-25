@@ -2,8 +2,8 @@
 <package format="1" xmlns="https://wiki.freecad.org/Package_Metadata">
   <name>Nesting</name>
   <description>A workbench for 2D nesting of shapes, using no-fit-polygon (Minkowski sum) placement with a genetic algorithm optimizer. Includes a manual nester, sheet stacking, DXF export and CAM job creation.</description>
-  <version>1.0.1</version>
-  <date>2026-08-29</date>
+  <version>2026.9.0</version>
+  <date>2026-09-25</date>
   <maintainer email="petersfinewoodcraft@gmail.com">Steve Peters</maintainer>
   <license file="LICENSE">LGPL-2.1-or-later</license>
   <license file="LICENSE-Assets">OFL-1.1</license>
@@ -17,7 +17,7 @@
       <name>Nesting</name>
       <classname>NestingWorkbench</classname>
       <description>2D nesting of shapes onto sheets, with automatic and manual placement.</description>
-      <version>1.0.1</version>
+      <version>2026.9.0</version>
       <subdirectory>./</subdirectory>
       <icon>Resources/icons/Nesting_Workbench.svg</icon>
       <freecadmin>1.0.0</freecadmin>

@@ -11,6 +11,19 @@ import FreeCAD
 import Part
 from ....freecad_helpers import get_up_direction_rotation
 
+
+class EdgeOnProfileError(ValueError):
+    """A flat object seen edge-on from the chosen up direction has no 2D area."""
+
+
+def _require_area(poly, obj, up_direction):
+    if poly.is_empty or poly.area < 1e-6:
+        raise EdgeOnProfileError(
+            f"'{obj.Label}' has no area seen from up direction {up_direction}: "
+            f"it is flat and viewed edge-on. Choose the up direction along its normal."
+        )
+
+
 def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, simplification=1.0, verbose=False):
     """
     Extracts a usable 2D profile from a FreeCAD object by projecting it onto the XY plane.
@@ -56,7 +69,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
     shape.translate(translation)
 
     # Special case for sketches - already 2D
-    if obj.isDerivedFrom("Sketcher::SketchObject") and not needs_rotation:
+    if obj.isDerivedFrom("Sketcher::SketchObject"):
         if shape.Wires:
             try:
                 # Discretize sketch wire to points
@@ -66,7 +79,11 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
                 if len(pts) > 2:
                      from shapely.geometry import Polygon as ShapelyPolygon
                      if pts[0] != pts[-1]: pts.append(pts[0])
-                     return ShapelyPolygon(pts)
+                     poly = ShapelyPolygon(pts)
+                     _require_area(poly, obj, up_direction)
+                     return poly
+            except EdgeOnProfileError:
+                raise
             except Exception as e:
                 FreeCAD.Console.PrintWarning(f"Could not convert sketch '{obj.Label}' to polygon: {e}\n")
         
@@ -76,7 +93,9 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
     # Draft Wire, Draft Rectangle, etc. are Part::Part2DObject derivatives.
     # Their shapes may lack solid faces, causing tessellate() to produce no triangles
     # and falling back to convex hull (losing concavity).
-    if obj.isDerivedFrom("Part::Part2DObject") and not needs_rotation:
+    # Also covers non-Part2DObject scripted objects (e.g. curve objects from other
+    # workbenches) whose shape is wires-only with no faces to tessellate.
+    if obj.isDerivedFrom("Part::Part2DObject") or (not shape.Faces and shape.Wires):
         if shape.Wires:
             try:
                 from shapely.geometry import Polygon as ShapelyPolygon
@@ -95,11 +114,14 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
                                 h_pts.append(h_pts[0])
                             holes.append(h_pts)
                     poly = ShapelyPolygon(outer_pts, holes)
+                    _require_area(poly, obj, up_direction)
                     if simplification > 0:
                         poly = poly.simplify(simplification, preserve_topology=True)
                     if verbose:
                         FreeCAD.Console.PrintMessage(f"  -> Used wire discretization for 2D object '{obj.Label}'\n")
                     return poly
+            except EdgeOnProfileError:
+                raise
             except Exception as e:
                 FreeCAD.Console.PrintWarning(f"Could not convert 2D object '{obj.Label}' via wire discretization: {e}. Falling back to mesh.\n")
 
@@ -108,7 +130,7 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
         if verbose:
             FreeCAD.Console.PrintMessage(f"  -> Meshing shape for '{obj.Label}'\n")
         
-        from shapely.geometry import MultiPoint, LineString, Polygon as ShapelyPolygon, MultiPolygon
+        from shapely.geometry import MultiPoint, LineString, Polygon as ShapelyPolygon, MultiPolygon, box
         
         # Tessellate the shape to get mesh vertices
         # This handles curved surfaces by creating triangle vertices
@@ -219,9 +241,10 @@ def get_2d_profile_from_obj(obj, up_direction="Z+", tessellation_quality=0.1, si
              return hull
         
         # Absolute Fallback: use BoundBox
-        FreeCAD.Console.PrintWarning(f"  -> Using bounding box for '{obj.Label}'\n")
         bb = shape.BoundBox
-        return shapely.geometry.box(bb.XMin, bb.YMin, bb.XMax, bb.YMax)
+        if bb.XMax > bb.XMin and bb.YMax > bb.YMin:
+            FreeCAD.Console.PrintWarning(f"  -> Using bounding box for '{obj.Label}'\n")
+            return box(bb.XMin, bb.YMin, bb.XMax, bb.YMax)
         
     except Exception as e:
         FreeCAD.Console.PrintError(f"  -> Projection failed: {e}\n")
@@ -320,24 +343,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
     # offset_from_origin is the vector in the 2D PROFILE PLANE.
     # It needs to be rotated back to world space.
     rotation = get_up_direction_rotation(up_direction)
-    # The inverse rotation is the conjugate (for rotations) or negative angle
-    # FreeCAD Rotation objects have .inverted() method? 
-    # Or just use the same axis with negative angle.
-    
-    # Re-calculate inverse rotation manually to be safe
-    inv_rotation = None
-    if up_direction == "Z-":
-        inv_rotation = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -180)
-    elif up_direction == "Y+":
-        inv_rotation = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), 90) # Inverse of -90
-    elif up_direction == "Y-":
-        inv_rotation = FreeCAD.Rotation(FreeCAD.Vector(1, 0, 0), -90) # Inverse of 90
-    elif up_direction == "X+":
-        inv_rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90) # Inverse of 90
-    elif up_direction == "X-":
-        inv_rotation = FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), 90) # Inverse of -90
-    else:
-        inv_rotation = FreeCAD.Rotation()
+    inv_rotation = rotation.inverted()
 
     offset_3d = FreeCAD.Vector(offset_from_origin.x, offset_from_origin.y, 0)
     rotated_offset = inv_rotation.multVec(offset_3d)
@@ -356,23 +362,55 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
         FreeCAD.Console.PrintMessage(f"  -> Buffering centroid offset: ({offset_from_origin.x:.3f}, {offset_from_origin.y:.3f})\n")
 
 
+RING_DEDUP_TOLERANCE = 1e-6  # mm; points closer than this are one vertex
+
+
+def _discretize_ring(wire, deflection):
+    """Discretizes one closed wire into ring coordinates with no repeated points.
+
+    A discretized closed wire usually ends a float-hair away from where it
+    started. An exact `pts[0] != pts[-1]` closure test then appends a second,
+    near-identical closing point — a near-zero-length edge that makes GEOS
+    overlay ops (the hole inner-fit intersections in particular) raise
+    "non-noded intersection" / "side location conflict".
+    """
+    import shapely
+    from shapely.geometry import LinearRing
+    pts = [(v.x, v.y) for v in wire.discretize(Deflection=deflection)]
+    if len(pts) < 3:
+        return None
+    ring = shapely.remove_repeated_points(LinearRing(pts), tolerance=RING_DEDUP_TOLERANCE)
+    coords = list(ring.coords)
+    # Drop a trailing point that is really the start point again.
+    if len(coords) > 2 and shapely.Point(coords[0]).distance(shapely.Point(coords[-2])) <= RING_DEDUP_TOLERANCE:
+        coords = coords[:-2] + [coords[0]]
+    return coords if len(coords) >= 4 else None
+
+
 def discretize_wires_to_polygon(wires, deflection):
-    """Converts a sorted list of FreeCAD wires into a Shapely Polygon."""
-    from shapely.geometry import Polygon
+    """Converts a sorted list of FreeCAD wires (outer first) into a Shapely Polygon.
+
+    The saved boundary is Shape.draw_bounds' straight-line copy of the first
+    run's final (already buffered and simplified) polygon, so discretizing it
+    returns those same vertices. Do not simplify again here: a reloaded layout
+    must nest on the same geometry as the first run.
+    """
+    from shapely.geometry import Polygon, MultiPolygon
+    from shapely.validation import make_valid
     if not wires:
         return None
-    outer_pts = [(v.x, v.y) for v in wires[0].discretize(Deflection=deflection)]
-    if not outer_pts:
+    outer = _discretize_ring(wires[0], deflection)
+    if not outer:
         return None
-    if outer_pts[0] != outer_pts[-1]:
-        outer_pts.append(outer_pts[0])
-    poly = Polygon(outer_pts)
-    holes = []
-    for w in wires[1:]:
-        h_pts = [(v.x, v.y) for v in w.discretize(Deflection=deflection)]
-        if len(h_pts) > 2:
-            if h_pts[0] != h_pts[-1]:
-                h_pts.append(h_pts[0])
-            holes.append(h_pts)
-    return Polygon(poly.exterior.coords, holes)
+    holes = [h for h in (_discretize_ring(w, deflection) for w in wires[1:]) if h]
+    poly = Polygon(outer, holes)
+    if not poly.is_valid:
+        poly = make_valid(poly)
+        if not isinstance(poly, Polygon):
+            polys = [g for g in getattr(poly, 'geoms', []) if isinstance(g, (Polygon, MultiPolygon))]
+            polys = [p for g in polys for p in (g.geoms if isinstance(g, MultiPolygon) else [g])]
+            if not polys:
+                return None
+            poly = max(polys, key=lambda p: p.area)
+    return None if poly.is_empty else poly
 

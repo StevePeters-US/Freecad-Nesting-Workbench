@@ -106,6 +106,8 @@ class NestingJob:
         self._set_prop(target_layout, PROP_INTEGER, PROP_GLOBAL_ROTATION_STEPS, p['rotation_steps'])
         self._set_prop(target_layout, PROP_INTEGER, PROP_GENERATIONS, p.get('generations', 1))
         self._set_prop(target_layout, PROP_INTEGER, PROP_POPULATION_SIZE, p.get('population_size', 1))
+        self._set_prop(target_layout, PROP_STRING, PROP_ALGORITHM,
+                       str(p.get('algorithm', 'Minkowski')))
 
         # Save Nesting Direction as a vector/tuple if possible, or just the dial value
         # For simplicity and transparency in the UI, we'll save the dial value (degrees)

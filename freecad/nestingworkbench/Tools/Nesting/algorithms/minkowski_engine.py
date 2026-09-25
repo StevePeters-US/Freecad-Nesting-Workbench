@@ -3,7 +3,10 @@
 import math
 import time
 import numpy as np
-import FreeCAD
+try:
+    import FreeCAD
+except ImportError:
+    FreeCAD = None
 from threading import Lock
 import shapely
 from shapely.geometry import Polygon
@@ -11,24 +14,52 @@ from shapely.affinity import translate, rotate
 from . import minkowski_utils
 from ....datatypes.shape import Shape
 
+ANGLE_WRAP_EPS_DEG = 1e-5  # treat 359.99999→360 as 0 after the modulo
+
+_hole_fit_warned = set()
+_hole_fit_warned_lock = Lock()
+
+def _warn_hole_fit_failed(cache_key, error, log):
+    """Warns once per part pair (not once per angle) that a hole fit failed."""
+    pair = cache_key[:2]
+    with _hole_fit_warned_lock:
+        if pair in _hole_fit_warned:
+            return
+        _hole_fit_warned.add(pair)
+    log(f"Could not compute placements inside the hole(s) of '{pair[0]}' for '{pair[1]}' "
+        f"({error}). '{pair[1]}' will not be nested inside those holes; "
+        f"outside placements are unaffected.", level="warning")
+
 def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, log=None, step_size=5.0):
     """Computes the NFP for one (A, B, relative-angle) pair and stores it in
     Shape.nfp_cache under cache_key. Pure Shapely — safe on any thread.
     Returns the cache entry."""
     if log is None:
         def log_fallback(msg, level=None):
-            if level == "warning":
-                FreeCAD.Console.PrintWarning(f"MINKOWSKI_ENGINE: {msg}\n")
-            elif level == "error":
-                FreeCAD.Console.PrintError(f"MINKOWSKI_ENGINE: {msg}\n")
-            else:
-                FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {msg}\n")
+            if FreeCAD and hasattr(FreeCAD, 'Console'):
+                if level == "warning":
+                    FreeCAD.Console.PrintWarning(f"MINKOWSKI_ENGINE: {msg}\n")
+                elif level == "error":
+                    FreeCAD.Console.PrintError(f"MINKOWSKI_ENGINE: {msg}\n")
+                else:
+                    FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {msg}\n")
         log = log_fallback
 
     with Shape.nfp_cache_lock:
         cached_nfp_data = Shape.nfp_cache.get(cache_key)
         if cached_nfp_data:
             return cached_nfp_data
+    if shape_A.original_polygon is None or part_to_place.original_polygon is None:
+        # Do NOT cache this. Shape.nfp_cache persists across runs by design,
+        # so a cached failure would disable this pair for the whole session.
+        # Returning empty lets the placement-time path recompute after
+        # Nester.find_best_placement's original_polygon fallback
+        # (nesting_strategy.py:43-44) has repaired the part.
+        log(f"NFP skipped for {cache_key}: master polygon missing "
+            f"(A set: {shape_A.original_polygon is not None}, "
+            f"B set: {part_to_place.original_polygon is not None})",
+            level="error")
+        return {}
     try:
         mA, mB = shape_A.original_polygon, part_to_place.original_polygon
         cA, cB = mA.centroid, mB.centroid
@@ -43,7 +74,14 @@ def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, l
                 if (B_rot.bounds[2] - B_rot.bounds[0] < hole_poly.bounds[2] - hole_poly.bounds[0] and
                     B_rot.bounds[3] - B_rot.bounds[1] < hole_poly.bounds[3] - hole_poly.bounds[1] and
                     B_rot.area < hole_poly.area):
-                    ifp = minkowski_utils.calculate_inner_fit_polygon(hole_poly, 0, poly_B_centered, angle_B, log)
+                    # A failed hole fit only loses the in-hole placements. Letting
+                    # it reach the outer except would cache an error for the whole
+                    # pair and skip this rotation everywhere, not just in the hole.
+                    try:
+                        ifp = minkowski_utils.calculate_inner_fit_polygon(hole_poly, 0, poly_B_centered, angle_B, log)
+                    except Exception as e:
+                        _warn_hole_fit_failed(cache_key, e, log)
+                        continue
                     if ifp and not ifp.is_empty:
                         if ifp.geom_type == 'Polygon':
                             nfp_interiors.append(ifp.exterior)
@@ -83,7 +121,7 @@ class MinkowskiEngine:
         self._log_lock = Lock()
 
         self.bin_polygon = Polygon([(0, 0), (self.bin_width, 0), (self.bin_width, self.bin_height), (0, self.bin_height)])
-        self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0}
+        self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0, 'rotations_skipped': 0}
         self._perf_lock = Lock()
         self._cand_cache_lock = Lock()
 
@@ -91,120 +129,65 @@ class MinkowskiEngine:
         if self.log_callback:
             with self._log_lock:
                 self.log_callback("MINKOWSKI_ENGINE: " + message)
-        else:
+        elif FreeCAD and hasattr(FreeCAD, 'Console'):
              FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {message}\n")
 
-    def get_global_nfp_for(self, part_to_place, angle, sheet):
+    @staticmethod
+    def _nfp_cache_key(placed_shape, placed_angle, part_to_place, part_label, angle):
+        """Build the Shape.nfp_cache key for (placed_shape, part_to_place) at their relative angle.
+
+        Key layout must stay in sync with enumerate_nfp_jobs / _calculate_and_cache_nfp.
         """
-        Build placement collision data for part_to_place at angle on sheet.
+        placed_label = getattr(placed_shape, 'type_label', None) or placed_shape.source_freecad_object.Label
+        relative_angle = (angle - placed_angle) % 360.0
+        if abs(relative_angle - 360.0) < ANGLE_WRAP_EPS_DEG:
+            relative_angle = 0.0
+        relative_angle = round(relative_angle, 4)
+        return (
+            placed_label, part_label, relative_angle,
+            part_to_place.spacing, part_to_place.deflection, part_to_place.simplification,
+        ), relative_angle
 
-        GEOMETRIC & ALGORITHMIC PRINCIPLES:
-        1. Container Boundaries & Inner Fit Polygons (IFPs):
-           The container (sheet) boundary defines the outer limits. An Inner Fit Polygon (IFP)
-           represents the set of valid centroid positions where the part remains entirely inside 
-           the container bounds. Any candidate placement outside the IFP is discarded.
-        2. Holes & Nested Inner Regions:
-           If a placed part contains interior loops (holes), the engine computes the Inner Fit 
-           Polygon of the hole with respect to the part being nested. This allows smaller shapes
-           to be packed inside the negative spaces of larger, already placed parts.
-        3. Pairwise NFPs & The "No-Union" Architecture:
-           Rather than merging all placed parts into a single global union polygon (which gets 
-           quadratically slower, prone to self-intersection errors, and loses fine detail), 
-           the engine computes individual pairwise NFPs between the current part and each placed 
-           part. Candidate centroids are evaluated against these individual NFPs.
-           This preserves exact contact boundaries, allowing parts to pack tightly (touching) 
-           without numeric/geometric overlap false positives.
+    @staticmethod
+    def candidate_cache_key(part_to_place, angle):
+        """Key for this part TYPE at this angle in a sheet's `_cand_cache`.
 
-        Returns dict:
-          'points'       — (N,2) float32: candidate positions
-        Returns None if any pairwise NFP has an error flag.
+        Type-level, not instance-level: every instance of a master shares one
+        entry, which is what makes a repeat attempt cheap. Must stay in sync
+        with the key `get_incremental_candidates` stores under — it calls
+        this method for exactly that reason.
         """
-        part_label = part_to_place.source_freecad_object.Label
-        _pt_arrays = []
-        t0_total = time.perf_counter()
-        n_hits = 0
-        n_misses = 0
+        part_label = (getattr(part_to_place, 'type_label', None)
+                      or part_to_place.source_freecad_object.Label)
+        return (part_label, round(angle % 360.0, 4), part_to_place.spacing,
+                part_to_place.deflection, part_to_place.simplification)
 
-        for p in sheet.parts:
-            placed_label = p.shape.source_freecad_object.Label
-            placed_angle = p.angle
+    def is_known_infeasible(self, part_to_place, angle, sheet):
+        """True when this part type at this angle has already been shown to
+        have no valid position on this sheet, AND the sheet has not changed
+        since — so re-running the sweep cannot produce a different answer.
 
-            relative_angle = (angle - placed_angle) % 360.0
-            if abs(relative_angle - 360.0) < 1e-5:
-                relative_angle = 0.0
-            relative_angle = round(relative_angle, 4)
+        Scoped to an unchanged occupancy on purpose. `entry['pts']` does not
+        shrink monotonically: placing a part contributes new candidate points
+        from its own NFP boundary, so an empty set can in principle refill.
+        Never promote this to a permanent retirement — see the `nw_nfp_algorithm`
+        skill, "Invariant: infeasibility holds only at a fixed occupancy".
+        """
+        cache = sheet.__dict__.get('_cand_cache')
+        if not cache:
+            return False
+        entry = cache.get(self.candidate_cache_key(part_to_place, angle))
+        return (entry is not None
+                and entry['pts'] is not None
+                and entry['n'] == len(sheet.parts)
+                and len(entry['pts']) == 0)
 
-            nfp_cache_key = (
-                placed_label, part_label, relative_angle,
-                part_to_place.spacing, part_to_place.deflection, part_to_place.simplification,
-            )
-
-            nfp_data = Shape.nfp_cache.get(nfp_cache_key)
-
-            if not nfp_data:
-                n_misses += 1
-                t_miss = time.perf_counter()
-                nfp_data = self._calculate_and_cache_nfp(
-                    p.shape, 0.0, part_to_place, relative_angle, nfp_cache_key
-                )
-                dt_miss = (time.perf_counter() - t_miss) * 1000
-                if self.verbose:
-                    self.log(f"[PERF] NFP cache MISS key={nfp_cache_key[:3]} angle={relative_angle:.1f} -> {dt_miss:.1f}ms")
-                with self._perf_lock:
-                    self._perf_stats['nfp_compute_ms'] += dt_miss
-            else:
-                n_hits += 1
-
-            if not nfp_data:
-                continue
-            if nfp_data.get('error'):
-                self.log(f"Skipping rotation due to NFP error: {nfp_data['error']}")
-                return None
-
-            cent = p.shape.centroid
-            master = nfp_data.get('polygon')
-            if not master:
-                continue
-
-            # Candidate points — use pre-discretized local_points when available
-            local_pts = nfp_data.get('local_points')
-            if local_pts is not None and len(local_pts):
-                pts = local_pts.copy()
-                if abs(placed_angle) > 1e-9:
-                    a = math.radians(placed_angle)
-                    ca, sa = math.cos(a), math.sin(a)
-                    pts = pts @ np.array([[ca, -sa], [sa, ca]], dtype=np.float64).T
-                pts[:, 0] += cent.x
-                pts[:, 1] += cent.y
-                _pt_arrays.append(pts.astype(np.float32))
-            else:
-                rotated = rotate(master, placed_angle, origin=(0, 0))
-                translated = translate(rotated, xoff=cent.x, yoff=cent.y)
-                ring_pts = self._discretize_ring_np(translated.exterior, self.step_size)
-                if len(ring_pts):
-                    _pt_arrays.append(ring_pts.astype(np.float32))
-                for interior in translated.interiors:
-                    int_pts = self._discretize_ring_np(interior, self.step_size)
-                    if len(int_pts):
-                        _pt_arrays.append(int_pts.astype(np.float32))
-
-        dt_total = (time.perf_counter() - t0_total) * 1000
+    def count_skipped_rotations(self, n):
+        """Records rotation sweeps skipped as known-infeasible (DEDUP-002)."""
+        if n <= 0:
+            return
         with self._perf_lock:
-            self._perf_stats['cache_hits'] += n_hits
-            self._perf_stats['cache_misses'] += n_misses
-        if _pt_arrays:
-            all_pts = np.concatenate(_pt_arrays, axis=0)
-            grid = max(1.0, self.step_size)
-            rounded = np.round(all_pts / grid).astype(np.int32)
-            _, unique_idx = np.unique(rounded, axis=0, return_index=True)
-            points = all_pts[unique_idx]
-        else:
-            points = np.empty((0, 2), dtype=np.float32)
-        if self.verbose and (n_misses > 0 or dt_total > 10.0):
-            self.log(f"[PERF] get_global_nfp_for angle={angle:.1f} "
-                     f"hits={n_hits} misses={n_misses} "
-                     f"total={dt_total:.1f}ms candidates={len(points)}")
-        return {'points': points}
+            self._perf_stats['rotations_skipped'] += n
 
     def get_incremental_candidates(self, part_to_place, angle, sheet, corner_candidates, part_extents):
         """Return valid candidate centroid positions for part_to_place at angle on sheet.
@@ -223,9 +206,8 @@ class MinkowskiEngine:
         Returns (N,2) float64 array of currently-valid positions, or None when
         a pairwise NFP carries an error flag (skip this rotation).
         """
-        part_label = part_to_place.source_freecad_object.Label
-        key = (part_label, round(angle % 360.0, 4), part_to_place.spacing,
-               part_to_place.deflection, part_to_place.simplification)
+        part_label = getattr(part_to_place, 'type_label', None) or part_to_place.source_freecad_object.Label
+        key = self.candidate_cache_key(part_to_place, angle)
         with self._cand_cache_lock:
             cache = sheet.__dict__.setdefault('_cand_cache', {})
             entry = cache.get(key)
@@ -276,18 +258,8 @@ class MinkowskiEngine:
         new_pt_arrays = []
 
         for p in sheet.parts[n_prev:m]:
-            placed_label = p.shape.source_freecad_object.Label
             placed_angle = p.angle
-
-            relative_angle = (angle - placed_angle) % 360.0
-            if abs(relative_angle - 360.0) < 1e-5:
-                relative_angle = 0.0
-            relative_angle = round(relative_angle, 4)
-
-            nfp_cache_key = (
-                placed_label, part_label, relative_angle,
-                part_to_place.spacing, part_to_place.deflection, part_to_place.simplification,
-            )
+            nfp_cache_key, relative_angle = self._nfp_cache_key(p.shape, placed_angle, part_to_place, part_label, angle)
             nfp_data = Shape.nfp_cache.get(nfp_cache_key)
             if not nfp_data:
                 n_misses += 1
@@ -414,7 +386,7 @@ class MinkowskiEngine:
 
     def reset_perf_stats(self):
         with self._perf_lock:
-            self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0}
+            self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0, 'rotations_skipped': 0}
 
     @staticmethod
     def _discretize_ring_np(ring, step_size):

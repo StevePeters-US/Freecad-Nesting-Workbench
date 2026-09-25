@@ -14,20 +14,17 @@ import Part
 from ..Nesting.algorithms.shape_processor import get_2d_profile_from_obj
 from ...freecad_helpers import get_nested_containers
 
+SILHOUETTE_COLOR = (0.2, 0.6, 1.0)   # light blue
+SILHOUETTE_TRANSPARENCY = 50
+SILHOUETTE_LINE_WIDTH = 2.0
+
+def _apply_silhouette_style(view_object):
+    view_object.ShapeColor = SILHOUETTE_COLOR
+    view_object.Transparency = SILHOUETTE_TRANSPARENCY
+    view_object.LineWidth = SILHOUETTE_LINE_WIDTH
+
 def create_cross_section(obj, cut_height=None):
-    """
-    Creates a 2D silhouette by cutting the object with a horizontal plane.
-    
-    This is simpler and more reliable than full projection for most parts.
-    The resulting wires are converted to a filled face.
-    
-    Args:
-        obj: FreeCAD object with a Shape property
-        cut_height: Z height at which to cut. If None, uses midpoint of bounding box.
-        
-    Returns:
-        Part.Shape: A 2D Face (or Compound of Faces) representing the cross-section, or None on failure
-    """
+    """Cut *obj* with a horizontal plane at *cut_height* (Z height, None=midpoint), returning a 2D Face."""
     try:
         shape = obj.Shape
         
@@ -64,11 +61,45 @@ def create_cross_section(obj, cut_height=None):
             FreeCAD.Console.PrintWarning(f"[CrossSection] No closed wires found for '{obj.Label}'\n")
             return None
         
-        # Combine faces if multiple
-        if len(faces) == 1:
-            result = faces[0]
+        # Sort faces by Area descending
+        faces.sort(key=lambda f: getattr(f, "Area", 0.0), reverse=True)
+        
+        # Separate outer boundaries from holes (handling multiple disjoint bodies)
+        outer_faces = []
+        for face in faces:
+            bb = face.BoundBox
+            is_hole = False
+            for idx, outer in enumerate(outer_faces):
+                outer_bb = outer.BoundBox
+                if (bb.XMin >= outer_bb.XMin - 1e-4 and bb.XMax <= outer_bb.XMax + 1e-4 and
+                    bb.YMin >= outer_bb.YMin - 1e-4 and bb.YMax <= outer_bb.YMax + 1e-4):
+                    try:
+                        # BoundBox containment is only a pre-filter: a separate body can
+                        # sit inside another's bbox (an island in a hole, a piece in a
+                        # U-notch). Slice wires never cross, so a face lies either wholly
+                        # on the outer's material (a hole) or wholly off it (a body).
+                        if outer.common(face).Area < 0.5 * face.Area:
+                            continue
+                        outer_faces[idx] = outer.cut(face)
+                        is_hole = True
+                        break
+                    except Exception as e:
+                        # Can't tell hole from island without the boolean op, and
+                        # appending the face as a body would fill the hole in.
+                        FreeCAD.Console.PrintError(
+                            f"[CrossSection] Could not cut a hole out of '{obj.Label}': {e}. "
+                            f"No silhouette created rather than one with the hole filled in.\n"
+                        )
+                        return None
+            if not is_hole:
+                outer_faces.append(face)
+        
+        if not outer_faces:
+            return None
+        elif len(outer_faces) == 1:
+            result = outer_faces[0]
         else:
-            result = Part.Compound(faces)
+            result = Part.Compound(outer_faces)
         
         # Move the result to Z=0
         result.translate(FreeCAD.Vector(0, 0, -cut_height))
@@ -80,15 +111,7 @@ def create_cross_section(obj, cut_height=None):
         return None
 
 def is_valid_shape_object(obj):
-    """
-    Check if an object is a valid geometric shape (not a group or container).
-    
-    Args:
-        obj: FreeCAD object to check
-        
-    Returns:
-        tuple: (is_valid, reason) - reason explains why it's not valid if applicable
-    """
+    """Check if *obj* is a valid non-empty Part::Feature; returns (is_valid, reason)."""
     # Check if object exists
     if obj is None:
         return False, "Object is None"
@@ -120,19 +143,7 @@ def is_valid_shape_object(obj):
     return True, "Valid"
 
 def create_silhouette(obj, up_direction="Z+"):
-    """
-    Creates a 2D silhouette face from a 3D object.
-    
-    The silhouette is created by projecting the 3D shape onto the XY plane
-    and converting the resulting polygon to a filled FreeCAD face.
-    
-    Args:
-        obj: FreeCAD object with a Shape property
-        up_direction: Which direction to project from ("Z+", "Z-", "Y+", "Y-", "X+", "X-")
-        
-    Returns:
-        Part.Shape: A 2D Face representing the silhouette, or None on failure
-    """
+    """Project *obj* onto the XY plane along *up_direction* (e.g. 'Z+', 'Y-'), returning a 2D Face."""
     try:
         # Use existing projection function to get Shapely polygon
         shapely_polygon = get_2d_profile_from_obj(obj, up_direction)
@@ -150,17 +161,7 @@ def create_silhouette(obj, up_direction="Z+"):
         return None
 
 def shapely_to_fc_face(shapely_polygon):
-    """
-    Converts a Shapely polygon to a FreeCAD Face.
-    
-    Handles both simple polygons and polygons with holes.
-    
-    Args:
-        shapely_polygon: A shapely.geometry.Polygon
-        
-    Returns:
-        Part.Face: The FreeCAD face
-    """
+    """Convert a shapely.geometry.Polygon (with or without holes) to a FreeCAD Face."""
     from shapely.geometry import Polygon
     
     if not isinstance(shapely_polygon, Polygon):
@@ -204,18 +205,33 @@ def shapely_to_fc_face(shapely_polygon):
     
     return face
 
-def is_layout_group(obj):
-    """
-    Check if an object is a Layout group.
-    
-    Args:
-        obj: FreeCAD object to check
-        
-    Returns:
-        bool: True if it's a Layout group
-    """
-    return (obj.isDerivedFrom("App::DocumentObjectGroup") and 
-            obj.Label.startswith("Layout_"))
+
+def _find_valid_part_in_container(container):
+    """Find the valid part_* child object inside a container."""
+    if hasattr(container, "Group"):
+        for child in container.Group:
+            if child.Label.startswith("part_"):
+                is_valid, _ = is_valid_shape_object(child)
+                if is_valid:
+                    return child
+    return None
+
+def _compute_silhouette_face(part_obj, cut_height=None, method="cross_section"):
+    """Compute the silhouette face using either cross_section or projection."""
+    if method == "cross_section":
+        return create_cross_section(part_obj, cut_height)
+    return create_silhouette(part_obj)
+
+def _create_silhouette_object(doc, label_base, silhouette_face, parent_container=None):
+    """Create and style a silhouette Part::Feature, optionally adding to a container."""
+    silhouette_obj = doc.addObject("Part::Feature", f"outline_{label_base}")
+    silhouette_obj.Shape = silhouette_face
+    silhouette_obj.Placement = FreeCAD.Placement()
+    if hasattr(silhouette_obj, "ViewObject"):
+        _apply_silhouette_style(silhouette_obj.ViewObject)
+    if parent_container and hasattr(parent_container, "addObject"):
+        parent_container.addObject(silhouette_obj)
+    return silhouette_obj
 
 def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cross_section"):
     """
@@ -247,17 +263,11 @@ def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cr
         sheets_processed.add(sheet_group.Label)
         
         for container in get_nested_containers(sheet_group):
-            # Find the part_* object inside the container
-            # Also check for existing outline_* objects to remove them
-            part_obj = None
+            # Check for existing outline_* objects to remove them
             existing_outlines = []
             if hasattr(container, "Group"):
                 for child in container.Group:
-                    if child.Label.startswith("part_"):
-                        is_valid, reason = is_valid_shape_object(child)
-                        if is_valid:
-                            part_obj = child
-                    elif child.Label.startswith("outline_"):
+                    if child.Label.startswith("outline_"):
                         existing_outlines.append(child)
             
             # Remove existing silhouettes before creating new ones
@@ -267,37 +277,18 @@ def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cr
                 except Exception as e:
                     FreeCAD.Console.PrintWarning(f"[Silhouette] Could not remove old outline '{old_outline.Label}': {e}\n")
             
+            part_obj = _find_valid_part_in_container(container)
             if part_obj is None:
                 continue
             
             try:
-                # Create silhouette
-                if method == "cross_section":
-                    silhouette_face = create_cross_section(part_obj, cut_height)
-                else:
-                    silhouette_face = create_silhouette(part_obj)
-                
+                silhouette_face = _compute_silhouette_face(part_obj, cut_height, method)
                 if silhouette_face is None:
                     FreeCAD.Console.PrintWarning(f"[Silhouette] Could not create silhouette for '{container.Label}'\n")
                     continue
                 
-                # Create silhouette object INSIDE the container
-                silhouette_obj = doc.addObject("Part::Feature", f"outline_{container.Label}")
-                silhouette_obj.Shape = silhouette_face
-                
-                # Position at Z=0 with no offset (cross-section already translated)
-                silhouette_obj.Placement = FreeCAD.Placement()
-                
-                # Style the silhouette
-                if hasattr(silhouette_obj, "ViewObject"):
-                    silhouette_obj.ViewObject.ShapeColor = (0.2, 0.6, 1.0)  # Light blue
-                    silhouette_obj.ViewObject.Transparency = 50
-                    silhouette_obj.ViewObject.LineWidth = 2.0
-                
-                # Add to the container (alongside the part)
-                container.addObject(silhouette_obj)
+                silhouette_obj = _create_silhouette_object(doc, container.Label, silhouette_face, container)
                 all_silhouettes.append(silhouette_obj)
-                
             except Exception as e:
                 FreeCAD.Console.PrintError(f"[Silhouette] Error for '{container.Label}': {e}\n")
                 continue
@@ -322,112 +313,34 @@ def is_nested_container(obj):
     return obj.Label.startswith("nested_")
 
 def create_silhouette_for_container(doc, container, cut_height=None, method="cross_section"):
-    """
-    Creates a silhouette for the part inside a nested container (App::Part).
-    
-    The silhouette is placed INSIDE the container alongside the part.
-    
-    Args:
-        doc: FreeCAD document
-        container: App::Part container (like nested_Side_1)
-        cut_height: Z height to cut at (None = midpoint)
-        method: "cross_section" or "projection"
-        
-    Returns:
-        Part::Feature: The created silhouette object, or None on failure
-    """
+    """Create a silhouette for the part inside *container* (placed inside alongside the part)."""
     if not is_nested_container(container):
         FreeCAD.Console.PrintWarning(f"[Silhouette] '{container.Label}' is not a nested container\n")
         return None
     
-    # Find the part_* object inside the container
-    part_obj = None
-    if hasattr(container, "Group"):
-        for child in container.Group:
-            if child.Label.startswith("part_"):
-                is_valid, reason = is_valid_shape_object(child)
-                if is_valid:
-                    part_obj = child
-                    break
-    
+    part_obj = _find_valid_part_in_container(container)
     if part_obj is None:
         FreeCAD.Console.PrintWarning(f"[Silhouette] No part object found in '{container.Label}'\n")
         return None
     
-    # Create the silhouette
-    if method == "cross_section":
-        silhouette_face = create_cross_section(part_obj, cut_height)
-    else:
-        silhouette_face = create_silhouette(part_obj)
-    
+    silhouette_face = _compute_silhouette_face(part_obj, cut_height, method)
     if silhouette_face is None:
         FreeCAD.Console.PrintWarning(f"[Silhouette] Could not create silhouette for '{container.Label}'\n")
         return None
     
-    # Create silhouette object inside the container
-    silhouette_obj = doc.addObject("Part::Feature", f"outline_{container.Label}")
-    silhouette_obj.Shape = silhouette_face
-    
-    # Position at Z=0, no additional offset needed (cross-section is already translated)
-    silhouette_obj.Placement = FreeCAD.Placement()
-    
-    # Style the silhouette
-    if hasattr(silhouette_obj, "ViewObject"):
-        silhouette_obj.ViewObject.ShapeColor = (0.2, 0.6, 1.0)  # Light blue
-        silhouette_obj.ViewObject.Transparency = 50
-        silhouette_obj.ViewObject.LineWidth = 2.0
-    
-    # Add to the container
-    container.addObject(silhouette_obj)
-    
-    return silhouette_obj
+    return _create_silhouette_object(doc, container.Label, silhouette_face, container)
 
 def create_silhouette_for_part(doc, part_obj, parent_container=None, cut_height=None, method="cross_section"):
-    """
-    Creates a silhouette for an individual part.
-    
-    If parent_container is provided, the silhouette is added there.
-    Otherwise it's placed at document root level.
-    
-    Args:
-        doc: FreeCAD document
-        part_obj: Part::Feature object
-        parent_container: Optional container to add the silhouette to
-        cut_height: Z height to cut at (None = midpoint)
-        method: "cross_section" or "projection"
-        
-    Returns:
-        Part::Feature: The created silhouette object, or None on failure
-    """
+    """Create a silhouette for *part_obj*, placed in *parent_container* or at document root."""
     is_valid, reason = is_valid_shape_object(part_obj)
     if not is_valid:
         FreeCAD.Console.PrintWarning(f"[Silhouette] '{part_obj.Label}' is not valid: {reason}\n")
         return None
     
-    # Create the silhouette
-    if method == "cross_section":
-        silhouette_face = create_cross_section(part_obj, cut_height)
-    else:
-        silhouette_face = create_silhouette(part_obj)
-    
+    silhouette_face = _compute_silhouette_face(part_obj, cut_height, method)
     if silhouette_face is None:
         FreeCAD.Console.PrintWarning(f"[Silhouette] Could not create silhouette for '{part_obj.Label}'\n")
         return None
     
-    # Create silhouette object
-    silhouette_obj = doc.addObject("Part::Feature", f"outline_{part_obj.Label}")
-    silhouette_obj.Shape = silhouette_face
-    silhouette_obj.Placement = FreeCAD.Placement()
-    
-    # Style the silhouette
-    if hasattr(silhouette_obj, "ViewObject"):
-        silhouette_obj.ViewObject.ShapeColor = (0.2, 0.6, 1.0)  # Light blue
-        silhouette_obj.ViewObject.Transparency = 50
-        silhouette_obj.ViewObject.LineWidth = 2.0
-    
-    # Add to container if provided
-    if parent_container and hasattr(parent_container, "addObject"):
-        parent_container.addObject(silhouette_obj)
-    
-    return silhouette_obj
+    return _create_silhouette_object(doc, part_obj.Label, silhouette_face, parent_container)
 

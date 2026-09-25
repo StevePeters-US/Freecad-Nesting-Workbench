@@ -9,6 +9,50 @@ from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
 from ...freecad_helpers import get_up_direction_rotation, create_part_feature
+from ...constants import (
+    PROP_BOOL, PROP_INTEGER, PROP_STRING,
+    PROP_QUANTITY, PROP_UP_DIRECTION, PROP_FILL_SHEET,
+    PROP_PART_ROTATION_OVERRIDE, PROP_PART_ROTATION_STEPS,
+)
+
+
+def write_master_metadata(container, part_params):
+    """Writes the per-part metadata NestingController._load_shapes_from_layout
+    reads back when a saved layout is reopened.
+
+    Every property here must be written on BOTH master-container paths:
+    _create_master_container (fresh nest) and _create_temp_from_reloading
+    (re-nest of an existing layout). NestingJob.commit() deletes the old
+    MasterShapes group and promotes the reload path's containers in its
+    place (nesting_job.py:47-61), so a property written on only one path
+    is silently lost the first time a layout is re-nested.
+
+    part_params is one value from the `quantities` dict built by
+    NestingController._collect_job_parameters. The legacy tuple form is
+    tolerated for the same reason the existing callers tolerate it.
+    """
+    if isinstance(part_params, tuple):
+        part_params = {'quantity': part_params[0]}
+
+    specs = (
+        (PROP_INTEGER, PROP_QUANTITY, "Number of instances",
+         int(part_params.get('quantity', 1))),
+        (PROP_STRING, PROP_UP_DIRECTION, "Up direction for 2D projection",
+         str(part_params.get('up_direction', 'Z+'))),
+        (PROP_BOOL, PROP_FILL_SHEET, "Use to fill remaining space",
+         bool(part_params.get('fill_sheet', False))),
+        (PROP_BOOL, PROP_PART_ROTATION_OVERRIDE,
+         "Per-part rotation steps override the global setting",
+         bool(part_params.get('override_rotation', False))),
+        (PROP_INTEGER, PROP_PART_ROTATION_STEPS,
+         "Per-part rotation steps, used when the override is set",
+         int(part_params.get('part_rotation_steps', 0))),
+    )
+    for type_str, name, doc, value in specs:
+        if not hasattr(container, name):
+            container.addProperty(type_str, name, "Nest", doc)
+        setattr(container, name, value)
+
 
 class ShapePreparer:
     """
@@ -151,13 +195,20 @@ class ShapePreparer:
             self.doc, f"temp_shape_{original_label}", master_obj.Shape.copy(), group=temp_container, visible=True
         )
         temp_master_obj.Label = f"master_shape_{original_label}"
-        # Center the shape at the container's origin
-        source_centroid = temp_container.SourceCentroid
-        temp_master_obj.Placement = FreeCAD.Placement(source_centroid.negative(), FreeCAD.Rotation())
+        # `master_obj` is an existing master_shape_*, so its geometry is ALREADY
+        # centred on the nesting polygon's centroid and its Placement carries
+        # only the up-direction rotation. Re-centring it on SourceCentroid here
+        # shifted the visible shape off its origin-centred boundary (and off
+        # every part instance's boundary, since _create_nesting_instances copies
+        # this placement) by the source geometry's world centroid. Mirror the
+        # source master's placement instead.
+        temp_master_obj.Placement = FreeCAD.Placement(
+            FreeCAD.Vector(0, 0, 0), master_obj.Placement.Rotation
+        )
         
         if hasattr(master_obj, "BoundaryObject") and master_obj.BoundaryObject:
             temp_bound = create_part_feature(
-                self.doc, f"temp_boundary_{original_label}", master_obj.BoundaryObject.Shape.copy(), group=temp_container, visible=False
+                self.doc, f"temp_boundary_{original_label}", master_obj.BoundaryObject.Shape.copy(), group=temp_container, visible=True
             )
             
             if not hasattr(temp_master_obj, "BoundaryObject"):
@@ -170,12 +221,10 @@ class ShapePreparer:
         if hasattr(temp_container, "ViewObject"): 
             temp_container.ViewObject.Visibility = True
 
+        # Keyed by the stripped label: `label` here is `master_shape_<name>`,
+        # while `quantities` is keyed by the table's display label.
         part_params = quantities.get(original_label, {'quantity': 1})
-        if isinstance(part_params, tuple):
-            quantity = part_params[0]
-        else:
-            quantity = part_params.get('quantity', 1)
-        temp_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
+        write_master_metadata(temp_container, part_params)
 
         temp_shape_wrapper = None
         if hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
@@ -188,6 +237,14 @@ class ShapePreparer:
                 if final_poly:
                     temp_shape_wrapper = Shape(temp_master_obj)
                     temp_shape_wrapper.polygon = final_poly
+                    # The saved boundary is the buffered outline at angle 0,
+                    # so it is also the rotation base. Leaving this at None
+                    # makes compute_and_cache_nfp raise on `mA.centroid` and
+                    # cache an error for every pair key (issue #19).
+                    temp_shape_wrapper.original_polygon = final_poly
+                    temp_shape_wrapper.spacing = spacing
+                    temp_shape_wrapper.deflection = float(deflection)
+                    temp_shape_wrapper.simplification = float(simplification)
                     temp_shape_wrapper.source_centroid = temp_container.SourceCentroid
                     self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
             except Exception as e:
@@ -208,7 +265,7 @@ class ShapePreparer:
         if not temp_shape_wrapper:
             # Get up_direction for initial processing
             part_params = quantities.get(label, {'up_direction': 'Z+'})
-            up_direction = part_params[0] if isinstance(part_params, tuple) else part_params.get('up_direction', 'Z+')
+            up_direction = 'Z+' if isinstance(part_params, tuple) else part_params.get('up_direction', 'Z+')
             
             temp_shape_wrapper = Shape(master_obj)
             shape_processor.create_single_nesting_part(temp_shape_wrapper, master_obj, spacing, deflection, simplification, up_direction, verbose=verbose)
@@ -264,9 +321,7 @@ class ShapePreparer:
             up_direction = part_params.get('up_direction', 'Z+')
             fill_sheet = part_params.get('fill_sheet', False)
         
-        master_container.addProperty("App::PropertyInteger", "Quantity", "Nest", "Number of instances").Quantity = quantity
-        master_container.addProperty("App::PropertyString", "UpDirection", "Nest", "Up direction for 2D projection").UpDirection = up_direction
-        master_container.addProperty("App::PropertyBool", "FillSheet", "Nest", "Use to fill remaining space").FillSheet = fill_sheet
+        write_master_metadata(master_container, part_params)
         master_container.addProperty("App::PropertyVector", "SourceCentroid", "Nesting", "Original geometry center").SourceCentroid = source_centroid
 
         if hasattr(master_container, "ViewObject"):
@@ -347,8 +402,11 @@ class ShapePreparer:
                 boundary_obj.Placement = FreeCAD.Placement()
                 master_shape_obj.BoundaryObject = boundary_obj
                 master_shape_obj.ShowBounds = False
+                # The outline stays on screen alongside its master for as long
+                # as the nesting panel is open; the panel hides the whole row
+                # again when it closes.
                 if hasattr(boundary_obj, "ViewObject"): 
-                    boundary_obj.ViewObject.Visibility = False
+                    boundary_obj.ViewObject.Visibility = True
                 if verbose:
                     FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
 
@@ -399,7 +457,7 @@ class ShapePreparer:
 
         def _spawn_factory(original_obj, master_wrapper, lookup_label,
                            part_rotation_steps, fill_sheet, up_direction,
-                           master_shape_obj):
+                           master_shape_obj, master_container):
             """Binds one part type's parameters into a dedicated closure scope.
 
             make_instance is handed out as spawn_next and called long after the
@@ -409,7 +467,7 @@ class ShapePreparer:
             """
             next_instance_num = [0]
 
-            def make_instance():
+            def make_instance(as_fill=fill_sheet):
                 next_instance_num[0] += 1
                 i = next_instance_num[0]
 
@@ -426,8 +484,12 @@ class ShapePreparer:
                 shape_instance.id = f"{lookup_label}_{i}"
                 shape_instance.master_label = lookup_label  # type identity — never parse .id
                 shape_instance.rotation_steps = part_rotation_steps
-                shape_instance.fill_sheet = fill_sheet
+                shape_instance.fill_sheet = as_fill
                 shape_instance.up_direction = up_direction
+                # The simulation highlighter needs the row this instance came
+                # from; it must never go looking for it by label (see
+                # nesting_logic._find_master_container_for_part).
+                shape_instance.master_container = master_container
 
                 part_copy = create_part_feature(
                     self.doc, f"part_{shape_instance.id}", master_shape_obj.Shape.copy(), group=parts_to_place_group, visible=False
@@ -454,7 +516,7 @@ class ShapePreparer:
                 if add_labels and Draft and font_path:
                     shape_instance.label_text = shape_instance.id
 
-                if fill_sheet:
+                if as_fill:
                     shape_instance.spawn_next = make_instance
 
                 return shape_instance
@@ -478,17 +540,22 @@ class ShapePreparer:
             
             if not master_shape_obj or not master_wrapper: continue
 
-            # Fill-sheet parts don't know in advance how many copies will fit,
-            # so instance creation lives in a closure; fill parts carry a
-            # spawn_next handle that mints one more instance on demand.
-            if fill_sheet:
-                quantity = max(quantity, 1)
+
+            master_container = master_shape_obj.InList[0] if master_shape_obj.InList else None
 
             make_instance = _spawn_factory(
                 original_obj, master_wrapper, lookup_label, part_rotation_steps,
-                fill_sheet, up_direction, master_shape_obj
+                fill_sheet, up_direction, master_shape_obj, master_container
             )
+            # The quantity is a requirement even when Fill is on: those copies
+            # are regular parts the GA arranges with everything else. Fill only
+            # adds extras on top — one fill seed whose spawn_next mints another
+            # copy on demand until no gap fits. (Marking the required copies as
+            # fill parts queued them behind every other part and dropped the
+            # ones that no longer fit, so 20 requested circles nested as 12.)
             for _ in range(quantity):
-                parts_to_nest.append(make_instance())
+                parts_to_nest.append(make_instance(as_fill=False))
+            if fill_sheet:
+                parts_to_nest.append(make_instance(as_fill=True))
 
         return parts_to_nest

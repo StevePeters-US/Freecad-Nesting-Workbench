@@ -6,7 +6,12 @@ Shared utility functions for FreeCAD operations used across the Nesting Workbenc
 Consolidates common logic that was previously duplicated in multiple modules.
 """
 
-import FreeCAD
+try:
+    import FreeCAD
+except ImportError:
+    FreeCAD = None
+
+from .constants import LAYOUT_PREFIX
 
 def get_up_direction_rotation(up_direction):
     """
@@ -99,6 +104,11 @@ def get_layout_group(doc):
 
     return None
 
+def is_layout_group(obj):
+    """True if *obj* is a nesting Layout_* document group."""
+    return (obj.isDerivedFrom("App::DocumentObjectGroup") and
+            obj.Label.startswith(LAYOUT_PREFIX))
+
 def get_sheet_groups(layout_group):
     """
     Gets all the direct child Sheet groups from a layout group, sorted numerically.
@@ -139,6 +149,76 @@ def get_nested_containers(sheet_group):
                 if obj.TypeId == "App::Part" and obj.Label.startswith("nested_")
             )
     return containers
+
+def get_master_shapes_group(layout_group):
+    """
+    Gets the MasterShapes group of a layout.
+
+    The label is matched by prefix, not equality: a document that already
+    holds a MasterShapes group gets MasterShapes001, MasterShapes002, ... for
+    every layout created after it.
+
+    Args:
+        layout_group: A Layout_* App::DocumentObjectGroup.
+
+    Returns:
+        The MasterShapes group object, or None.
+    """
+    if not layout_group or not hasattr(layout_group, "Group"):
+        return None
+    return next((c for c in layout_group.Group if c.Label.startswith("MasterShapes")), None)
+
+def _set_visibility(obj, visible):
+    """Sets an object's visibility, tolerating console mode and dead references."""
+    try:
+        view_object = getattr(obj, "ViewObject", None)
+        if view_object is not None:
+            view_object.Visibility = visible
+    except (AttributeError, ReferenceError, RuntimeError):
+        pass  # Object deleted or running without the GUI
+
+def set_master_shapes_visible(layout_group, visible):
+    """
+    Shows or hides a layout's master shapes together with their boundary outlines.
+
+    Toggling only the group is not enough. FreeCAD pushes a group's visibility
+    down to its children at the moment the group changes, so a boundary that is
+    switched on afterwards - by the placement highlighter or the Show Bounds
+    checkbox - keeps rendering even though its group reads as hidden, and ghosts
+    over the master row of the next run. Every level is set explicitly.
+
+    Args:
+        layout_group: A Layout_* App::DocumentObjectGroup.
+        visible (bool): Target visibility for the whole master row.
+    """
+    master_shapes_group = get_master_shapes_group(layout_group)
+    if not master_shapes_group:
+        return
+
+    _set_visibility(master_shapes_group, visible)
+    for container in master_shapes_group.Group:
+        _set_visibility(container, visible)
+        for child in getattr(container, "Group", []):
+            _set_visibility(child, visible)
+            boundary = getattr(child, "BoundaryObject", None)
+            if boundary:
+                _set_visibility(boundary, visible)
+
+def hide_all_master_shapes(doc, except_layout=None):
+    """
+    Hides the master row of every layout in the document.
+
+    Args:
+        doc: The FreeCAD document.
+        except_layout: Optional layout group to leave untouched.
+    """
+    if not doc:
+        return
+    for obj in doc.Objects:
+        if obj is except_layout:
+            continue
+        if obj.isDerivedFrom("App::DocumentObjectGroup") and obj.Label.startswith("Layout"):
+            set_master_shapes_visible(obj, False)
 
 def get_all_objects_recursive(group):
     """

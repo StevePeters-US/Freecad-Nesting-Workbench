@@ -11,9 +11,10 @@ import FreeCADGui
 from PySide import QtCore
 import math
 from .ui_manual_nester import ManualNesterToolUI
-from .physics_engine import PhysicsEngine
+from .physics_engine import PhysicsEngine, RADIUS_MIN_MM, RADIUS_MAX_MM
 from .collision_resolver import CollisionResolver
 from .input_manager import InputManager
+from ...constants import SHEET_BOUNDARY_PREFIX
 
 def _compute_physics_frame(
     working_cache,
@@ -168,6 +169,14 @@ def _compute_physics_frame(
         'total_peers': total_peers, 'peers_in_range': peers_in_range,
     }
 
+
+def _find_sheet_boundary(group):
+    """The Sheet_Boundary_* child of *group*, or None. Matches startswith("Sheet_Boundary_")."""
+    if not group or not hasattr(group, "Group"):
+        return None
+    return next((c for c in group.Group if c.Label.startswith(SHEET_BOUNDARY_PREFIX)), None)
+
+
 try:
     from pivy import coin
 except ImportError:
@@ -184,14 +193,15 @@ class ManualNesterToolObserver:
         self.obj_to_move = None
         self.start_pos = None
         self.start_placement = None
+        self._drag_origin_placement = None
         self.layout_group = None
         self.master_group = None
         self.new_objects = [] # Track objects created during this session
         self.original_placements = {}
         self.original_visibilities = {}
         self.selected_obj = None
-        self.pre_drag_placements = {} # Track placements for undo/cancel (M-009)
-        self.radius_indicator = None # M-010: Coin3D overlay for influence radius
+        self.pre_drag_placements = {} # Track placements for undo/cancel
+        self.radius_indicator = None # Coin3D overlay for influence radius
         self.warned_missing_bounds = set() # M-B08: One-time debug warning for no-bounds parts
 
         # Physics initialization
@@ -225,10 +235,10 @@ class ManualNesterToolObserver:
         self.input.on("move", self.handle_move)
         self.input.on("cancel", self.cancel_operation)
         self.input.on("confirm", self.finish_operation)
-        self.input.on("force_drop", self._on_force_drop)
         self.input.on("scroll_radius", self._on_scroll_radius)
         self.input.on("constraint_toggle", self._on_constraint_toggle)
         self.input.on("mode_switched", self._on_mode_switched)
+        self.input.on("context_menu", self.on_context_menu)
 
         # Connect UI signals
         if hasattr(self.panel_manager, 'form'):
@@ -339,7 +349,7 @@ class ManualNesterToolObserver:
         for sheet_group in self.layout_group.Group:
             if sheet_group.isDerivedFrom("App::DocumentObjectGroup") and sheet_group.Label.startswith("Sheet_"):
                 # Ensure sheet boundary is visible
-                sheet_boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
+                sheet_boundary = _find_sheet_boundary(sheet_group)
                 if sheet_boundary and hasattr(sheet_boundary, "ViewObject"):
                     self.original_visibilities[sheet_boundary] = sheet_boundary.ViewObject.Visibility
                     sheet_boundary.ViewObject.Visibility = True
@@ -407,6 +417,7 @@ class ManualNesterToolObserver:
                 # release drops it (same path as hold-to-drag for existing parts).
                 self.selected_obj = clicked_obj
                 self.start_placement = self.selected_obj.Placement.copy()
+                self._drag_origin_placement = self.selected_obj.Placement.copy()
                 self.input.set_mode("TRANSLATE")
                 self.input.is_implicit_drag = True
                 FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}. Release to place.\n")
@@ -419,12 +430,13 @@ class ManualNesterToolObserver:
             # Prepare for potential drag
             self.start_pos = self.view.getPoint(pos[0], pos[1]) # 3D point
             self.start_placement = self.selected_obj.Placement.copy()
+            self._drag_origin_placement = self.selected_obj.Placement.copy()
 
         else:
             # Clicked on empty space
             self.selected_obj = None
 
-    def handle_move(self, pos, snap=False, _shift_held=False):
+    def handle_move(self, pos, ctrl_held=False, _shift_held=False):
         """Process mouse movement during an active drag or free-grab."""
         if not self.selected_obj:
             return
@@ -467,7 +479,7 @@ class ManualNesterToolObserver:
 
             actual_pos = self.selected_obj.Placement.Base
 
-            # M-010: Show radius indicator at the part's ACTUAL position
+            # Show radius indicator at the part's ACTUAL position
             # (may differ from new_pos if clamping moved it)
             if self.physics_enabled:
                 self._show_radius_indicator(actual_pos, self.physics_engine.radius)
@@ -495,7 +507,7 @@ class ManualNesterToolObserver:
             angle_deg = math.degrees(angle_rad)
 
             # Snap to 45° increments with Ctrl
-            if snap:
+            if ctrl_held:
                 step = 45.0
                 angle_deg = round(angle_deg / step) * step
 
@@ -504,7 +516,7 @@ class ManualNesterToolObserver:
             new_placement.Rotation = rot.multiply(self.start_placement.Rotation)
             self.selected_obj.Placement = new_placement
 
-            # M-010: Show radius indicator even in rotation mode if physics active
+            # Show radius indicator even in rotation mode if physics active
             if self.physics_enabled:
                 self._show_radius_indicator(self.selected_obj.Placement.Base, self.physics_engine.radius)
 
@@ -560,20 +572,9 @@ class ManualNesterToolObserver:
         self.input.is_mouse_down = False
         self.input.is_implicit_drag = False
 
-    def _on_force_drop(self):
-        """Deferred handler for a missed mouse-UP event."""
-        try:
-            if not self.layout_group:
-                return
-            self.handle_release()
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Force-drop failed: {e}\n")
-            self.finish_operation()
-            self.input.is_mouse_down = False
-
     def _on_scroll_radius(self, delta):
         """Ctrl+scroll adjusts the physics influence radius."""
-        new_radius = max(0.0, min(2000.0, self.physics_engine.radius + delta))
+        new_radius = max(RADIUS_MIN_MM, min(RADIUS_MAX_MM, self.physics_engine.radius + delta))
         self.physics_engine.radius = new_radius
 
         # Sync to UI
@@ -595,8 +596,22 @@ class ManualNesterToolObserver:
     def _on_mode_switched(self, pos):
         """Re-base drag state when the mode switches mid-drag (Shift key)."""
         if self.selected_obj:
+            # Note: _drag_origin_placement is intentionally not re-based here so snap-back reverts to drag origin.
             self.start_placement = self.selected_obj.Placement.copy()
             self.start_pos = self.view.getPoint(pos[0], pos[1])
+            # ROTATE changes Placement.Rotation, which translate_from_placement cannot
+            # follow — drop the entry so the next clamp/overlap test recomputes it.
+            self.collision_resolver.invalidate(self.selected_obj)
+
+    def on_context_menu(self, event_dict=None):
+        """Show dynamic context menu on right-click."""
+        from freecad.nestingworkbench.core.input.nw_menu import NWMenuManager
+
+        items = [
+            ("Finish Nesting", self.finish_operation),
+            ("Cancel", self.cancel_operation),
+        ]
+        NWMenuManager.get_instance().trigger_dynamic_menu(items)
 
     # Deferred helpers (called via QTimer to avoid Coin3D scene-graph crashes)
 
@@ -661,11 +676,18 @@ class ManualNesterToolObserver:
                 )
         if not clamp_sheet:
             return
-        boundary = next((c for c in clamp_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
+        boundary = _find_sheet_boundary(clamp_sheet)
         if not boundary or not hasattr(boundary, "Shape") or not hasattr(boundary.Shape, "BoundBox"):
             return
+        self.collision_resolver.translate_from_placement(self.selected_obj)
         # Shape.BoundBox already includes placement (world coords)
-        self.collision_resolver.clamp_to_sheet(self.selected_obj, boundary.Shape.BoundBox)
+        clamped = self.collision_resolver.clamp_to_sheet(self.selected_obj, boundary.Shape.BoundBox)
+        if clamped:
+            lx, ly = self.collision_resolver._get_logical_pos(self.selected_obj)
+            p = self.selected_obj.Placement.copy()
+            b = p.Base
+            p.Base = type(b)(lx, ly, b.z)
+            self.selected_obj.Placement = p
 
     def _get_same_sheet_others(self):
         """Return tracked objects on the same sheet as the currently dragged part, excluding it."""
@@ -680,10 +702,13 @@ class ManualNesterToolObserver:
         """With physics off: highlight illegal positions but don't move other parts.
         If the dragged part overlaps any neighbour, snap it back to its pre-drag placement."""
         others = self._get_same_sheet_others()
+        self.collision_resolver.translate_from_placement(self.selected_obj)
         if self.collision_resolver.overlaps_any(self.selected_obj, others):
             # Snap back to where the drag started so the part can't be pushed into others
-            if self.selected_obj in self.pre_drag_placements:
-                self.selected_obj.Placement = self.pre_drag_placements[self.selected_obj].copy()
+            if self._drag_origin_placement is not None:
+                self.selected_obj.Placement = self._drag_origin_placement.copy()
+                # The origin may carry a different rotation (Shift-rotate mid-drag)
+                self.collision_resolver.invalidate(self.selected_obj)
 
     def _auto_rotate(self, drag_delta):
         """Rotate the dragged part toward the weighted-average centroid of nearby parts.
@@ -764,7 +789,7 @@ class ManualNesterToolObserver:
         dragged_sheet = self._drag_active_sheet or self.obj_to_sheet.get(obj)
         if not dragged_sheet: return 0.0, 0.0
         
-        boundary = next((c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None)
+        boundary = _find_sheet_boundary(dragged_sheet)
         if not boundary or not hasattr(boundary, "Shape"): return 0.0, 0.0
         
         sheet_bb, part_bb = boundary.Shape.BoundBox, self._get_shape_bbox(obj)
@@ -862,9 +887,7 @@ class ManualNesterToolObserver:
         # Read sheet bbox while still on main thread (FreeCAD API).
         dragged_sheet_bbox = None
         if dragged_sheet:
-            boundary = next(
-                (c for c in dragged_sheet.Group if c.Label.startswith("Sheet_Boundary_")), None
-            )
+            boundary = _find_sheet_boundary(dragged_sheet)
             if boundary and hasattr(boundary, "Shape"):
                 dragged_sheet_bbox = boundary.Shape.BoundBox
 
@@ -1153,7 +1176,7 @@ class ManualNesterToolObserver:
 
         FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
 
-        # M-009: Revert physics-displaced parts.
+        # Revert physics-displaced parts.
         # obj.Placement was never written during Coin3D drag, so visual revert is
         # just removing the injected SoTranslation nodes.  obj.Placement is already
         # at the original position, so no Placement write is needed.
@@ -1163,6 +1186,7 @@ class ManualNesterToolObserver:
         # Reset input state
         self.input.reset()
         self.start_placement = None
+        self._drag_origin_placement = None
         self.start_pos = None
         if self.selected_obj:
             self._set_part_highlight(self.selected_obj, False)
@@ -1180,6 +1204,9 @@ class ManualNesterToolObserver:
         QtCore.QTimer.singleShot(0, self._hide_radius_indicator)
 
     def finish_operation(self):
+        # Note: A physics frame still in flight at release is intentionally discarded
+        # (to avoid a blocking wait on the worker thread); _commit_displaced_placements()
+        # therefore commits the second-to-last frame's positions.
         # Commit Coin3D-displaced parts' logical positions to obj.Placement before
         # clearing state, so the session is saved with correct placements.
         self._commit_displaced_placements()
@@ -1188,8 +1215,9 @@ class ManualNesterToolObserver:
             self._set_part_highlight(self.selected_obj, False)
         self.selected_obj = None # Clear selection to prevent stickiness
         self.start_placement = None
+        self._drag_origin_placement = None
         self.start_pos = None
-        self.pre_drag_placements = {} # M-009: Clear pre-drag placements
+        self.pre_drag_placements = {} # Clear pre-drag placements
         self._drag_active_sheet = None
         self._dragged_original_color = None
         self._physics_logged_empty_sheet = None
@@ -1199,7 +1227,7 @@ class ManualNesterToolObserver:
         self._stop_physics_timer()
         self.collision_resolver.clear_cache()
         try:
-            self._hide_radius_indicator() # M-010
+            self._hide_radius_indicator()
         except Exception:
             pass  # Radius indicator scene graph node already detached or view closed
         try:
@@ -1357,7 +1385,7 @@ class ManualNesterToolObserver:
             for sheet_group in self.layout_group.Group:
                 try:
                     if sheet_group.Label.startswith("Sheet_"):
-                        boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
+                        boundary = _find_sheet_boundary(sheet_group)
                         if boundary and hasattr(boundary, "ViewObject"):
                             if hasattr(boundary.ViewObject, "Selectable"):
                                 boundary.ViewObject.Selectable = True
@@ -1385,7 +1413,7 @@ class ManualNesterToolObserver:
         for sheet_group in self.layout_group.Group:
             if sheet_group.isDerivedFrom("App::DocumentObjectGroup") and sheet_group.Label.startswith("Sheet_"):
                 # Check boundary
-                boundary = next((obj for obj in sheet_group.Group if obj.Label.startswith("Sheet_Boundary_")), None)
+                boundary = _find_sheet_boundary(sheet_group)
                 if boundary:
                     # Shape.BoundBox already includes placement (world coords)
                     bb = boundary.Shape.BoundBox
@@ -1420,7 +1448,7 @@ class ManualNesterToolObserver:
         """Returns (width, height) from the first existing sheet, or (1000, 1000) as default."""
         for child in self.layout_group.Group:
             if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_"):
-                boundary = next((c for c in child.Group if c.Label.startswith("Sheet_Boundary_")), None)
+                boundary = _find_sheet_boundary(child)
                 if boundary and hasattr(boundary, "Shape"):
                     bb = boundary.Shape.BoundBox
                     return bb.XLength, bb.YLength
@@ -1443,7 +1471,7 @@ class ManualNesterToolObserver:
         sheet_origins = []
         for child in self.layout_group.Group:
             if child.isDerivedFrom("App::DocumentObjectGroup") and child.Label.startswith("Sheet_") and child != sheet_group:
-                b = next((c for c in child.Group if c.Label.startswith("Sheet_Boundary_")), None)
+                b = _find_sheet_boundary(child)
                 if b and hasattr(b, "Shape"):
                     bb = b.Shape.BoundBox
                     right_edge = bb.XMax          # BoundBox already includes Placement
@@ -1459,7 +1487,7 @@ class ManualNesterToolObserver:
         offset_x = max_right + spacing if max_right > 0 else 0.0
 
         # Add Boundary
-        boundary = doc.addObject("Part::Feature", f"Sheet_Boundary_{index}")
+        boundary = doc.addObject("Part::Feature", f"{SHEET_BOUNDARY_PREFIX}{index}")
         import Part
         boundary.Shape = Part.makePlane(width, height)
         boundary.Placement = FreeCAD.Placement(FreeCAD.Vector(offset_x, 0, 0), FreeCAD.Rotation())
@@ -1483,7 +1511,7 @@ class ManualNesterToolObserver:
     # Coin3D overlays
 
     def _show_radius_indicator(self, center, radius):
-        """M-010: Creates/updates a Coin3D indicator for the physics radius."""
+        """Creates/updates a Coin3D indicator for the physics radius."""
         if not coin or not self.view:
             return
 
@@ -1543,7 +1571,7 @@ class ManualNesterToolObserver:
             self._indicator_last_radius = radius
 
     def _hide_radius_indicator(self):
-        """M-010: Removes the radius indicator from the view."""
+        """Removes the radius indicator from the view."""
         if self.radius_indicator and self.view:
             try:
                 self.view.getSceneGraph().removeChild(self.radius_indicator)

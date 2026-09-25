@@ -4,51 +4,43 @@
 """
 Input manager for the Manual Nester tool.
 
-Handles raw Coin3D events (mouse, keyboard) and dispatches high-level
-actions to registered handlers. Owns all transient input state: mode,
-constraints, drag detection, free-grab flag.
-
-The tool registers callbacks for semantic actions and reads input state
-(e.g. ``im.mode``, ``im.constraint``) when computing movement vectors.
+Handles Qt-native viewport events dispatched from NWInputManager and
+dispatches semantic high-level actions to registered handlers. Owns all
+transient input state: mode, constraints, drag detection, free-grab flag.
 """
 
 import FreeCAD
-from PySide import QtCore, QtWidgets
+from PySide import QtCore
 import math
 import time
 
-# Coin3D event dicts do NOT reliably carry modifier-key state.
-# Query Qt directly instead — same pattern as the button-state poll.
-def _qt_modifiers():
-    """Return (shift, ctrl) booleans from Qt's live modifier state."""
-    mods = QtWidgets.QApplication.queryKeyboardModifiers()
-    return (
-        bool(mods & QtCore.Qt.ShiftModifier),
-        bool(mods & QtCore.Qt.ControlModifier),
-    )
+from freecad.nestingworkbench.core.input.nw_input_manager import NWInputManager
+
 
 class InputManager:
     """
-    Translates Coin3D events into high-level manual-nester actions.
+    Translates viewport Qt events into high-level manual-nester actions.
 
     Registerable actions
     --------------------
     click(pos)            Left-button down after guards pass.
     release()             Left-button up.
-    move(pos, snap, shift)  Mouse move during active drag / free-grab.
+    move(pos, ctrl_held, shift)  Mouse move during active drag / free-grab.
     cancel()              Escape key or right-click during operation.
     confirm()             Enter / Return key.
-    scroll_radius(delta)  Ctrl + scroll wheel (delta in mm).
-    force_drop()          Deferred recovery from a missed mouse-up.
+    scroll_radius(delta)  Ctrl + horizontal mouse move / scroll wheel (delta in mm).
     constraint_toggle(axis)  X or Y key pressed in TRANSLATE mode.
     mode_switched(pos)    Mode changed mid-drag (Shift held/released).
+    context_menu(event_dict) Right-click release in viewport.
     """
 
-    DRAG_THRESHOLD = 5  # pixels before a click becomes a drag
+    DRAG_THRESHOLD = 5              # pixels before a click becomes a drag
+    REPEAT_PRESS_GUARD_S = 0.2      # ignore a second mouse-down this soon after the first
+    RADIUS_MM_PER_PIXEL = 3.0       # Ctrl + horizontal drag sensitivity
+    RADIUS_MM_PER_WHEEL_STEP = 25.0 # Ctrl + wheel notch
 
-    def __init__(self, view):
+    def __init__(self, view=None):
         self.view = view
-        self._callback_ids = []
         self._handlers = {}
         self._active = False
 
@@ -63,11 +55,7 @@ class InputManager:
         self.last_known_screen_pos = (0, 0)
         self._ctrl_adjusting_radius = False  # True while Ctrl is held during TRANSLATE
         self._ctrl_prev_pos = None           # Previous screen pos for Ctrl-radius delta
-
-        # Poll timer: FreeCAD's viewport navigation can swallow the mouse-UP
-        # Coin3D event. We poll Qt's actual button state to catch missed UPs.
-        self._button_poll_timer = QtCore.QTimer()
-        self._button_poll_timer.timeout.connect(self._poll_button_state)
+        self._rmb_cancelled = False          # Latched at RMB press; cleared by RMB release/menu
 
     # Public API
 
@@ -76,25 +64,20 @@ class InputManager:
         self._handlers[action] = handler
 
     def activate(self):
-        """Start listening for Coin3D events on the view."""
+        """Start listening for viewport events via NWInputManager."""
         if self._active:
             return
-        for evt in ("SoMouseButtonEvent", "SoLocation2Event", "SoKeyboardEvent"):
-            cb_id = self.view.addEventCallback(evt, self._make_callback(evt))
-            self._callback_ids.append((evt, cb_id))
+        NWInputManager.get_instance().initialize()
+        NWInputManager.get_instance().set_active_handler(self)
         self._active = True
 
     def deactivate(self):
-        """Remove all Coin3D event callbacks."""
-        self._button_poll_timer.stop()
-        for evt, cb_id in self._callback_ids:
-            try:
-                self.view.removeEventCallback(evt, cb_id)
-            except Exception as e:
-                FreeCAD.Console.PrintWarning(
-                    f"[InputManager] Could not remove {evt} callback: {e}\n"
-                )
-        self._callback_ids = []
+        """Stop listening for viewport events."""
+        if not self._active:
+            return
+        mgr = NWInputManager.get_instance()
+        mgr.clear_active_handler()
+        mgr.restore()
         self._active = False
 
     def set_mode(self, mode):
@@ -108,7 +91,7 @@ class InputManager:
             )
 
     def set_constraint(self, axis, lock_pos=None):
-        """Toggle an axis constraint.  *lock_pos* is the object position to lock to."""
+        """Toggle an axis constraint. *lock_pos* is the object position to lock to."""
         if self.constraint == axis:
             self.constraint = None
             self.constraint_lock_pos = None
@@ -124,7 +107,6 @@ class InputManager:
 
     def finish(self):
         """Reset to IDLE after a successfully completed operation."""
-        self._button_poll_timer.stop()
         self.mode = "IDLE"
         self.constraint = None
         self.constraint_lock_pos = None
@@ -133,154 +115,75 @@ class InputManager:
         self.is_mouse_down = False
         self._ctrl_adjusting_radius = False
         self._ctrl_prev_pos = None
+        # Note: finish() and reset() must NOT clear self._rmb_cancelled.
+        # They run inside the RMB press handler (via cancel_operation), between
+        # the latch being set and the RMB release reading it. Clearing it here
+        # would recreate the RMB double-fire defect (cancel + context menu both firing).
 
     def reset(self):
         """Hard-reset all input state (used on cancel)."""
         self.finish()
 
-    # Internal — Coin3D callback wiring
+    # NWInputManager Tool Hooks
 
-    def _poll_button_state(self):
-        """Detect missed mouse-UP events by polling Qt's actual button state."""
-        if not self.is_mouse_down:
-            self._button_poll_timer.stop()
-            return
-        try:
-            buttons = QtWidgets.QApplication.mouseButtons()
-            if not (buttons & QtCore.Qt.LeftButton):
-                self._button_poll_timer.stop()
-                self.is_mouse_down = False
-                self._emit("release")
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[InputManager] Poll error: {e}\n")
-            self._button_poll_timer.stop()
-
-    def _make_callback(self, event_type):
-        """Return a closure that tags the raw dict with *event_type*."""
-        def callback(event_dict):
-            return self._dispatch(event_type, event_dict)
-        return callback
-
-    def _dispatch(self, event_type, event_dict):
-        """Top-level dispatcher — routes to the correct sub-handler."""
-        try:
-            if event_type == "SoKeyboardEvent":
-                return self._handle_keyboard(event_dict)
-            elif event_type == "SoMouseButtonEvent":
-                return self._handle_mouse_button(event_dict)
-            elif event_type == "SoLocation2Event":
-                return self._handle_mouse_move(event_dict)
-            return False
-        except Exception as e:
-            FreeCAD.Console.PrintWarning(
-                f"[InputManager] Event dispatch failed: {e}\n"
-            )
-            return False
-
-    # Keyboard
-
-    def _handle_keyboard(self, event_dict):
-        if event_dict["State"] != "DOWN":
-            return False
-
-        key = str(event_dict["Key"]).upper()
-
-        if key == "ESCAPE":
-            self._emit("cancel")
-            return True
-
-        if key == "X" and self.mode == "TRANSLATE":
-            self._emit("constraint_toggle", "X")
-            return True
-
-        if key == "Y" and self.mode == "TRANSLATE":
-            self._emit("constraint_toggle", "Y")
-            return True
-
-        if key in ("RETURN", "ENTER"):
-            self._emit("confirm")
-            return True
-
-        return False
-
-    # Mouse buttons
-
-    def _handle_mouse_button(self, event_dict):
+    def on_mouse_press(self, event_dict):
+        """Handle mouse button press events."""
         pos = event_dict.get("Position", (0, 0))
         btn = event_dict.get("Button")
-        state = event_dict.get("State")
 
-        if btn in ("BUTTON1", 1):
-            if state == "DOWN":
-                current_time = time.time()
+        if btn == QtCore.Qt.LeftButton:
+            current_time = time.time()
 
-                # Guard: rapid repeat DOWN events
-                if self.is_mouse_down and (current_time - self.last_down_time < 0.2):
-                    return True
-                self.last_down_time = current_time
+            # Guard: rapid repeat DOWN events
+            if self.is_mouse_down and (current_time - self.last_down_time < self.REPEAT_PRESS_GUARD_S):
+                return True
+            self.last_down_time = current_time
 
-                # Guard: missed UP — force-drop via QTimer so we don't
-                # modify the Coin3D scene graph inside its own callback.
-                if self.is_mouse_down:
-                    if self.is_implicit_drag or self.is_free_grab:
-                        FreeCAD.Console.PrintMessage(
-                            "Manual Nester: Forcing drop (missed UP event).\n"
-                        )
-                        QtCore.QTimer.singleShot(0, lambda: self._emit("force_drop"))
-                        return True
-
-                # Guard: double-click
-                if event_dict.get("DoubleClick", False):
-                    return True
-
-                self.is_mouse_down = True
-                self.drag_start_screen_pos = pos
-                self._button_poll_timer.start(30)  # Watch for missed UP events
-
-                # Initial mode from Shift key — read from Qt, not Coin3D event dict
-                # (Coin3D event dicts don't reliably carry modifier state)
-                shift, _ctrl = _qt_modifiers()
-                if shift:
-                    self.set_mode("ROTATE")
-                else:
-                    self.set_mode("TRANSLATE")
-
-                self._emit("click", pos)
+            # Guard: double-click
+            if event_dict.get("DoubleClick", False):
                 return True
 
-            else:  # UP
-                if self.is_mouse_down:
-                    FreeCAD.Console.PrintMessage("Manual Nester: Mouse UP received.\n")
-                    self._button_poll_timer.stop()
-                    self.is_mouse_down = False
-                    self._emit("release")
-                return True
+            self.is_mouse_down = True
+            self.drag_start_screen_pos = pos
 
-        elif btn in ("BUTTON2", "BUTTON3", 2, 3):
-            if state == "DOWN":
-                if self.mode != "IDLE" or self.is_free_grab:
-                    self._emit("cancel")
-                return True
+            # Initial mode from Shift key
+            shift = NWInputManager.get_instance().is_shift_down()
+            if shift:
+                self.set_mode("ROTATE")
             else:
-                return True  # consume UP to suppress context menu
+                self.set_mode("TRANSLATE")
 
-        elif btn in ("BUTTON4", "BUTTON5", 4, 5):
-            _shift, ctrl = _qt_modifiers()
-            if state == "DOWN" and ctrl:
-                delta = 25.0 if btn in ("BUTTON4", 4) else -25.0
-                self._emit("scroll_radius", delta)
+            self._emit("click", pos)
+            return True
+
+        elif btn == QtCore.Qt.RightButton:
+            self._rmb_cancelled = self.mode != "IDLE" or self.is_free_grab
+            if self._rmb_cancelled:
+                self._emit("cancel")
                 return True
-            # Without Ctrl, don't consume — let FreeCAD handle zoom
+            return False
 
         return False
 
-    # Mouse movement
+    def on_mouse_release(self, event_dict):
+        """Handle mouse button release events."""
+        btn = event_dict.get("Button")
 
-    def _handle_mouse_move(self, event_dict):
-        pos = event_dict["Position"]
+        if btn == QtCore.Qt.LeftButton:
+            if self.is_mouse_down:
+                FreeCAD.Console.PrintMessage("Manual Nester: Mouse UP received.\n")
+                self.is_mouse_down = False
+                self._emit("release")
+            return True
+
+        return False
+
+    def on_mouse_move(self, event_dict):
+        """Handle mouse move events."""
+        pos = event_dict.get("Position", (0, 0))
         self.last_known_screen_pos = pos
-        # Read modifiers from Qt — Coin3D event dict omits them during drag
-        shift, ctrl = _qt_modifiers()
+        shift = NWInputManager.get_instance().is_shift_down()
+        ctrl = NWInputManager.get_instance().is_ctrl_down()
 
         # Only process when there is an active interaction
         if not self.is_mouse_down and not self.is_free_grab:
@@ -298,7 +201,7 @@ class InputManager:
                 dx = pos[0] - (self._ctrl_prev_pos[0] if self._ctrl_prev_pos else pos[0])
                 self._ctrl_prev_pos = pos
                 if dx != 0:
-                    self._emit("scroll_radius", dx * 3.0)  # 3 mm per pixel
+                    self._emit("scroll_radius", dx * self.RADIUS_MM_PER_PIXEL)
                 return True  # consume — don't move the part
             elif self._ctrl_adjusting_radius:
                 # Ctrl released — exit radius-adjust and rebaseline the drag
@@ -334,6 +237,51 @@ class InputManager:
         if self.mode != "IDLE" or self.is_free_grab:
             return True
         return False
+
+    def on_key_press(self, event_dict):
+        """Handle keyboard press events."""
+        key = event_dict.get("Key")
+
+        if key == QtCore.Qt.Key_Escape:
+            self._emit("cancel")
+            return True
+
+        if key == QtCore.Qt.Key_X and self.mode == "TRANSLATE":
+            self._emit("constraint_toggle", "X")
+            return True
+
+        if key == QtCore.Qt.Key_Y and self.mode == "TRANSLATE":
+            self._emit("constraint_toggle", "Y")
+            return True
+
+        if key in (QtCore.Qt.Key_Return, QtCore.Qt.Key_Enter):
+            self._emit("confirm")
+            return True
+
+        return False
+
+    def on_key_release(self, event_dict):
+        """Handle keyboard release events."""
+        return False
+
+    def on_wheel(self, event_dict):
+        """Handle wheel events."""
+        ctrl = NWInputManager.get_instance().is_ctrl_down()
+        if ctrl:
+            delta_val = event_dict.get("Delta", 0)
+            if delta_val == 0:
+                return True  # Ctrl held, no vertical component: consume, don't resize
+            delta = self.RADIUS_MM_PER_WHEEL_STEP if delta_val > 0 else -self.RADIUS_MM_PER_WHEEL_STEP
+            self._emit("scroll_radius", delta)
+            return True
+        return False
+
+    def on_context_menu(self, event_dict):
+        """Show the context menu — only when idle; RMB cancels an active drag."""
+        if self._rmb_cancelled:
+            self._rmb_cancelled = False
+            return
+        self._emit("context_menu", event_dict)
 
     # Helpers
 

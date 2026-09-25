@@ -2,6 +2,8 @@
 import FreeCAD
 import FreeCADGui
 from freecad.nestingworkbench.Tools.ManualNester import manual_nester_panel_manager
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.freecad_helpers import is_layout_group
 
 class ManualNesterCommand:
     """The command to manually nest parts in a layout."""
@@ -10,8 +12,8 @@ class ManualNesterCommand:
     def GetResources(self):
         return {
             'Pixmap': 'Nesting_Transform_Icon.svg',
-            'MenuText': 'Manual Nester',
-            'ToolTip': 'Activates a tool to manually nest parts in the selected layout.'
+            'MenuText': QT_TRANSLATE_NOOP('ManualNesterCommand', 'Manual Nester'),
+            'ToolTip': QT_TRANSLATE_NOOP('ManualNesterCommand', 'Activates a tool to manually nest parts in the selected layout.')
         }
 
     def Activated(self):
@@ -28,7 +30,7 @@ class ManualNesterCommand:
         if not selection:
             return False
         selected = selection[0]
-        return selected.isDerivedFrom("App::DocumentObjectGroup") and selected.Label.startswith("Layout_")
+        return is_layout_group(selected)
 
 
 if FreeCAD.GuiUp:

@@ -6,9 +6,15 @@ This module contains the Shape class, which represents a single part to be
 nested. It holds the source FreeCAD object, its shapely-based geometry for
 the nesting algorithm, and its final placement information.
 """
-import Part
+try:
+    import Part
+except ImportError:
+    Part = None
 import copy
-import FreeCAD
+try:
+    import FreeCAD
+except ImportError:
+    FreeCAD = None
 import threading
 from ..freecad_helpers import get_up_direction_rotation, calculate_container_centroid
 
@@ -68,7 +74,21 @@ class Shape:
         self.fill_sheet = False # If True, use to fill remaining space
         
         self.fc_object = None # Link to the physical FreeCAD object in the 'PartsToPlace' group
+        self.master_container = None # The master_* App::Part this instance was spawned from
         self.placement = None # This will be populated with the final FreeCAD.Placement after nesting.
+        self._type_label = getattr(source_freecad_object, 'Label', None) if source_freecad_object else None
+
+    @property
+    def type_label(self):
+        if getattr(self, '_type_label', None) is not None:
+            return self._type_label
+        if self.source_freecad_object and hasattr(self.source_freecad_object, 'Label'):
+            return self.source_freecad_object.Label
+        return "unknown"
+
+    @type_label.setter
+    def type_label(self, value):
+        self._type_label = value
 
     def __repr__(self):
         return f"<Shape: {self.id}, polygon={'set' if self.polygon else 'unset'}>"
@@ -90,9 +110,15 @@ class Shape:
         # for creating copies for the nesting algorithm without causing pickling errors.
         result.fc_object = None 
 
+        # The master container is a live document object too, but unlike
+        # fc_object it is shared by every instance of the type rather than owned
+        # by one, so the copy keeps the reference (the simulation highlighter
+        # reads it).
+        result.master_container = getattr(self, 'master_container', None)
+
         # Deepcopy other attributes, explicitly skipping the non-copyable ones.
         for k, v in self.__dict__.items():
-            if k in ['source_freecad_object', 'fc_object']:
+            if k in ['source_freecad_object', 'fc_object', 'master_container']:
                 continue
 
             if isinstance(v, FreeCAD.Vector):

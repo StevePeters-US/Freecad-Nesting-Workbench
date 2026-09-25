@@ -18,59 +18,14 @@ import math
 from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
 from ...freecad_helpers import recursive_delete
+from .algorithms.genetic_utils import (
+    largest_open_area,
+    compute_layout_fitness,
+    set_warning_logger,
+    SHAPELY_AVAILABLE,
+)
 
-try:
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-    SHAPELY_AVAILABLE = True
-except ImportError:
-    SHAPELY_AVAILABLE = False
-
-def largest_open_area(parts, sheet_width, sheet_height):
-    """
-    Area of the largest contiguous free region on a sheet.
-
-    Computed exactly with Shapely: bin polygon minus the union of the placed
-    part polygons (sheet-local coordinates); the largest resulting polygon's
-    area is returned. Falls back to the full sheet area (i.e. a zero
-    compactness deficit) when Shapely is unavailable or geometry is degenerate,
-    so the fitness term degrades to a no-op instead of erroring.
-
-    Args:
-        parts: iterable of PlacedPart objects (each with .shape.polygon)
-        sheet_width: sheet width in mm
-        sheet_height: sheet height in mm
-
-    Returns:
-        float: area (mm^2) of the largest open region, in
-        [0, sheet_width * sheet_height].
-    """
-    sheet_area = sheet_width * sheet_height
-    if not SHAPELY_AVAILABLE:
-        return sheet_area
-
-    polygons = []
-    for p in parts:
-        try:
-            poly = p.shape.polygon
-            if poly is not None and not poly.is_empty:
-                polygons.append(poly.buffer(0))
-        except Exception:
-            continue
-    if not polygons:
-        return sheet_area
-
-    bin_polygon = Polygon([(0, 0), (sheet_width, 0),
-                           (sheet_width, sheet_height), (0, sheet_height)])
-    try:
-        free_space = bin_polygon.difference(unary_union(polygons))
-    except Exception:
-        return sheet_area
-
-    if free_space.is_empty:
-        return 0.0
-    regions = getattr(free_space, 'geoms', [free_space])
-    return max(region.area for region in regions)
+set_warning_logger(lambda m: FreeCAD.Console.PrintWarning(m + "\n"))
 
 
 class Layout:
@@ -110,7 +65,7 @@ class LayoutManager:
         self.rng = rng or random
     
     def create_layout(self, name, master_shapes_map, quantities, ui_params, 
-                      chromosome_ordering=None) -> Layout:
+                      chromosome_ordering=None, member_idx: int = 0) -> Layout:
         """
         Creates a new layout with master shapes and part instances.
         
@@ -120,6 +75,7 @@ class LayoutManager:
             quantities: Dict mapping labels to (quantity, rotation_steps)
             ui_params: UI parameters dict
             chromosome_ordering: Optional list of (part_id, angle) tuples for ordering
+            member_idx: Index of layout within population for deterministic tracking
             
         Returns:
             Layout object containing the layout group and prepared parts
@@ -127,7 +83,7 @@ class LayoutManager:
         # Create layout group
         layout_group = self.doc.addObject("App::DocumentObjectGroup", name)
         layout_group.Label = name
-        if hasattr(layout_group, "ViewObject"):
+        if getattr(layout_group, "ViewObject", None) is not None:
             layout_group.ViewObject.Visibility = True
         
         # Create parts bin
@@ -157,6 +113,7 @@ class LayoutManager:
         self._layout_counter += 1
         
         layout = Layout(layout_group, parts_group, parts, master_shapes_group)
+        layout.member_idx = member_idx
         if chromosome_ordering and parts:
             # Genotype drives nesting: only genes for parts that actually exist,
             # and never for fill parts (they are placed greedily after the genome)
@@ -254,59 +211,11 @@ class LayoutManager:
         Returns:
             (fitness, efficiency_percent) tuple
         """
-        if not layout.sheets:
-            return float('inf'), 0.0
-        
-        # Calculate total parts area
-        total_parts_area = 0
-        for sheet in layout.sheets:
-            for part in sheet.parts:
-                if hasattr(part, 'shape') and part.shape:
-                    total_parts_area += part.shape.area
-        
-        # Calculate total sheet area
-        total_sheet_area = len(layout.sheets) * sheet_width * sheet_height
-        
-        # Efficiency percentage
-        efficiency = (total_parts_area / total_sheet_area) * 100 if total_sheet_area > 0 else 0
-        
-        # Fitness: lower is better
-        # Prioritize fewer sheets, then tighter bounding box
-        fitness = len(layout.sheets) * sheet_width * sheet_height
-        
-        # Add bounding box of last sheet
-        last_sheet = layout.sheets[-1]
-        if last_sheet.parts:
-            min_x, min_y = float('inf'), float('inf')
-            max_x, max_y = float('-inf'), float('-inf')
-            found_valid = False
-            
-            for p in last_sheet.parts:
-                try:
-                    bx, by, bw, bh = p.shape.bounding_box()
-                    min_x = min(min_x, bx)
-                    min_y = min(min_y, by)
-                    max_x = max(max_x, bx + bw)
-                    max_y = max(max_y, by + bh)
-                    found_valid = True
-                except Exception as e:
-                    part_id = getattr(p.shape, 'id', 'unknown') if hasattr(p, 'shape') else 'unknown'
-                    FreeCAD.Console.PrintWarning(f"[LayoutManager] Bounding box failed for part '{part_id}': {e}\n")
-            
-            if found_valid:
-                bbox_area = (max_x - min_x) * (max_y - min_y)
-                tie_break = bbox_area
-                if compactness_weight > 0:
-                    open_deficit = (sheet_width * sheet_height
-                                    - largest_open_area(last_sheet.parts,
-                                                        sheet_width, sheet_height))
-                    tie_break = ((bbox_area + compactness_weight * open_deficit)
-                                 / (1.0 + compactness_weight))
-                fitness += tie_break
-        
+        fitness, efficiency = compute_layout_fitness(
+            layout.sheets, sheet_width, sheet_height, compactness_weight=compactness_weight
+        )
         layout.fitness = fitness
         layout.efficiency = efficiency
-
         return fitness, efficiency
     
     def create_ga_population(self, master_shapes_map, quantities, ui_params, 
@@ -330,7 +239,7 @@ class LayoutManager:
             name = f"Layout_GA_{i+1}"
             
             # Create the layout
-            layout = self.create_layout(name, master_shapes_map, quantities, ui_params)
+            layout = self.create_layout(name, master_shapes_map, quantities, ui_params, member_idx=i)
             
             if layout.parts and i > 0:  # First layout keeps original ordering
                 regular = [p for p in layout.parts if getattr(p, 'fill_sheet', False) is not True]
