@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 160" width="320" height="160" version="1.1">
+  <rect x="0.5" y="0.5" width="319" height="159" rx="6" style="fill:#f8fafc;stroke:#cbd5e1;stroke-width:1"/>
+  <path d="M 30.0,138.0 L 130.0,138.0 L 130.0,104.0 L 68.0,104.0 L 68.0,22.0 L 30.0,22.0 L 30.0,138.0 Z" style="stroke:#64748b;stroke-width:1.5;stroke-dasharray:4,3;fill:none"/>
+  <path d="M 36.0,132.0 L 124.0,132.0 L 124.0,110.0 L 62.0,110.0 L 62.0,28.0 L 36.0,28.0 L 36.0,132.0 Z" style="fill:#e0e0e0;stroke:#1e293b;stroke-width:1.5"/>
+  <circle cx="30.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="40.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="50.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="60.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="70.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="80.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="90.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="100.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="110.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="120.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="130.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="130.0" cy="128.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="130.0" cy="118.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="130.0" cy="108.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="122.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="114.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="106.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="98.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="90.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="82.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="74.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="95.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="86.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="77.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="68.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="59.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="50.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="41.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="32.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="68.0" cy="23.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="59.0" cy="22.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="50.0" cy="22.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="41.0" cy="22.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="32.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="42.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="52.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="62.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="72.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="82.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="92.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="102.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="112.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="122.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="30.0" cy="132.0" r="2.2" style="fill:#00a86b"/>
+  <path d="M 68.0,104.0 L 116.0,104.0 L 116.0,56.0 L 68.0,56.0 L 68.0,104.0 Z" style="stroke:#00a86b;stroke-width:1.5;stroke-dasharray:4,3;fill:none"/>
+  <path d="M 74.0,98.0 L 110.0,98.0 L 110.0,62.0 L 74.0,62.0 L 74.0,98.0 Z" style="fill:#00a86b;fill-opacity:0.35;stroke:#00a86b;stroke-width:1.5"/>
+  <circle cx="68.0" cy="104.0" r="5.0" style="fill:none;stroke:#ea580c;stroke-width:1.8"/>
+  <circle cx="68.0" cy="104.0" r="2.4" style="fill:#f97316"/>
+  <path d="M 180.0,138.0 L 280.0,138.0 L 280.0,104.0 L 218.0,104.0 L 218.0,22.0 L 180.0,22.0 L 180.0,138.0 Z" style="stroke:#64748b;stroke-width:1.5;stroke-dasharray:4,3;fill:none"/>
+  <path d="M 186.0,132.0 L 274.0,132.0 L 274.0,110.0 L 212.0,110.0 L 212.0,28.0 L 186.0,28.0 L 186.0,132.0 Z" style="fill:#e0e0e0;stroke:#1e293b;stroke-width:1.5"/>
+  <circle cx="180.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="212.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="244.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="276.0" cy="138.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="280.0" cy="120.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="274.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="242.0" cy="104.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="218.0" cy="72.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="218.0" cy="40.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="198.0" cy="22.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="180.0" cy="42.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="180.0" cy="74.0" r="2.2" style="fill:#00a86b"/>
+  <circle cx="180.0" cy="106.0" r="2.2" style="fill:#00a86b"/>
+  <path d="M 242.0,104.0 L 290.0,104.0 L 290.0,56.0 L 242.0,56.0 L 242.0,104.0 Z" style="stroke:#00a86b;stroke-width:1.5;stroke-dasharray:4,3;fill:none"/>
+  <path d="M 248.0,98.0 L 284.0,98.0 L 284.0,62.0 L 248.0,62.0 L 248.0,98.0 Z" style="fill:#00a86b;fill-opacity:0.35;stroke:#00a86b;stroke-width:1.5"/>
+  <circle cx="242.0" cy="104.0" r="5.0" style="fill:none;stroke:#ea580c;stroke-width:1.8"/>
+  <circle cx="242.0" cy="104.0" r="2.4" style="fill:#f97316"/>
+</svg>

@@ -11,6 +11,7 @@ try:
 except ImportError:
     FreeCAD = None
 
+from freecad.nestingworkbench import nw_logger
 from .constants import LAYOUT_PREFIX
 
 def get_up_direction_rotation(up_direction):
@@ -37,7 +38,7 @@ def get_up_direction_rotation(up_direction):
     elif up_direction == "X-":
         return FreeCAD.Rotation(FreeCAD.Vector(0, 1, 0), -90)
     else:
-        FreeCAD.Console.PrintWarning(f"Unknown up_direction '{up_direction}', using Z+\n")
+        nw_logger.warn(f"Unknown up_direction '{up_direction}', using Z+")
         return FreeCAD.Rotation()
 
 def recursive_delete(doc, obj, protected_names=None):
@@ -55,7 +56,8 @@ def recursive_delete(doc, obj, protected_names=None):
 
     try:
         obj_name = obj.Name
-    except Exception:
+    except Exception as e:
+        nw_logger.debug(f"[freecad_helpers] recursive_delete failed reading Name: {e}")
         return  # Object already deleted or invalid reference
 
     if protected_names and obj_name in protected_names:
@@ -70,8 +72,8 @@ def recursive_delete(doc, obj, protected_names=None):
     try:
         if doc.getObject(obj_name):
             doc.removeObject(obj_name)
-    except Exception:
-        pass  # Already deleted
+    except Exception as e:
+        nw_logger.debug(f"[freecad_helpers] recursive_delete removeObject failed: {e}")
 
 def get_layout_group(doc):
     """
@@ -174,8 +176,8 @@ def _set_visibility(obj, visible):
         view_object = getattr(obj, "ViewObject", None)
         if view_object is not None:
             view_object.Visibility = visible
-    except (AttributeError, ReferenceError, RuntimeError):
-        pass  # Object deleted or running without the GUI
+    except (AttributeError, ReferenceError, RuntimeError) as e:
+        nw_logger.debug(f"[freecad_helpers] visibility skipped (deleted object or no GUI): {e}")
 
 def set_master_shapes_visible(layout_group, visible):
     """

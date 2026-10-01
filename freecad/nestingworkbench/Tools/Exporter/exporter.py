@@ -10,6 +10,7 @@ import FreeCAD
 import Part
 import os
 import importDXF
+from freecad.nestingworkbench import nw_logger
 from ...freecad_helpers import get_layout_group, get_sheet_groups, get_all_objects_recursive, recursive_delete
 
 class SheetExporter:
@@ -27,12 +28,12 @@ class SheetExporter:
     def export_sheets(self, export_dir, delete_generated_objects=True):
         """Main method to create 2D projections of the layout in a new folder."""
         if not self.layout_group:
-            FreeCAD.Console.PrintMessage("No valid packed layout found to create views from.\n")
+            nw_logger.info("No valid packed layout found to create views from.")
             return
 
         sheet_groups = get_sheet_groups(self.layout_group)
         if not sheet_groups:
-            FreeCAD.Console.PrintMessage("No sheets found within the layout group.\n")
+            nw_logger.info("No sheets found within the layout group.")
             return
 
         # Create a new top-level folder for the 2D views
@@ -57,7 +58,7 @@ class SheetExporter:
             ]
             
             if not objects_to_project:
-                FreeCAD.Console.PrintWarning(f"No projectable geometry found in {sheet_group.Label}. Skipping.\n")
+                nw_logger.warn(f"No projectable geometry found in {sheet_group.Label}. Skipping.")
                 continue
 
             # Create a sub-folder for this specific sheet's views
@@ -90,22 +91,22 @@ class SheetExporter:
                 except Exception as e:
                     label = getattr(obj, "Label", obj.Name if hasattr(obj, "Name") else str(obj))
                     failed_objects.append(label)
-                    FreeCAD.Console.PrintError(f"An error occurred creating 2D view for '{label}' in {sheet_group.Label}: {e}\n")
+                    nw_logger.error(f"An error occurred creating 2D view for '{label}' in {sheet_group.Label}: {e}")
 
             if failed_objects:
                 msg = f"Failed to create 2D view for {len(failed_objects)} object(s) in {sheet_group.Label}: {', '.join(failed_objects)}"
-                FreeCAD.Console.PrintError(f"{msg}\n")
+                nw_logger.error(f"{msg}")
                 if hasattr(FreeCAD, "GuiUp") and FreeCAD.GuiUp:
                     try:
                         from freecad.nestingworkbench.ui_helpers import show_warning_dialog
                         show_warning_dialog(None, "Export Warning", msg)
-                    except Exception:
-                        # Already reported via PrintError above; the dialog is best-effort.
-                        pass
+                    except Exception as e:
+                        # Already reported via error above; the dialog is best-effort.
+                        nw_logger.debug(f"[SheetExporter] Warning dialog failed: {e}")
             else:
-                FreeCAD.Console.PrintMessage(f"Successfully created 2D views for {sheet_group.Label}\n")
+                nw_logger.info(f"Successfully created 2D views for {sheet_group.Label}")
 
-        FreeCAD.Console.PrintMessage(f"Finished creating 2D views in folder: {views_folder.Label}\n")
+        nw_logger.info(f"Finished creating 2D views in folder: {views_folder.Label}")
 
         # Export to DXF
         for sheet_view_folder in views_folder.Group:
@@ -113,10 +114,10 @@ class SheetExporter:
                 filename = f"{self.doc.Name}_{sheet_view_folder.Label}.dxf"
                 filepath = os.path.join(export_dir, filename)
                 importDXF.export(sheet_view_folder.Group, filepath)
-                FreeCAD.Console.PrintMessage(f"Exported {sheet_view_folder.Label} to {filepath}\n")
+                nw_logger.info(f"Exported {sheet_view_folder.Label} to {filepath}")
 
         # Delete the generated 2D views if requested
         if delete_generated_objects:
             recursive_delete(self.doc, views_folder)
-            FreeCAD.Console.PrintMessage("Deleted temporary 2D views folder.\n")
+            nw_logger.info("Deleted temporary 2D views folder.")
 

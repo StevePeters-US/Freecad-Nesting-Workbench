@@ -54,7 +54,8 @@ These cover gravity direction, step size, spawn attempts, and an **Annealing (Sh
 *   **Add Identifier Labels:** Engraves an identifier on each part, at the given **Size** and **Height (Z)**.
 
 #### Advanced Options
-*   **Simulate Nesting:** Shows each trial placement live. Slower.
+*   **Simulate Nesting:** Shows each trial placement live. Slower. It also evaluates the genetic algorithm one layout at a time.
+*   **GA worker processes:** How many processes evaluate the genetic algorithm at once. **Auto** (the default) shows how many it will use: one per physical CPU core, at most one per population member. 1 evaluates one layout at a time. Unavailable while Simulate Nesting is on.
 *   **Verbose Logging:** Writes detailed progress to the Report view.
 *   **Clear NFP Cache:** Recomputes every No-Fit Polygon from scratch. Slower, but it rules out stale cache data.
 *   **Show Bounds** and **Play sound on completion**.
@@ -77,6 +78,7 @@ Click **Run Nesting**. You can stop a run at any time with **Cancel Nesting**.
 *   **Create CAM Job:** Builds a CAM job from the selected layout, with parts, labels and sheet outlines organised for machining.
 *   **Create Silhouette:** Creates a 2D outline of a 3D part, for use in a CAM job.
 *   **Manual Nester:** (Experimental) Move and rotate parts in a nested layout by hand. Drag a part to move it; hold **Shift** to rotate it instead. **X** / **Y** lock the movement to one axis. **Esc** or a right-click cancels the current drag, and **Enter** confirms it. Three modes are available: push nearby parts out of the way, allow valid (non-overlapping) positions only, or auto-rotate to fit. **NOTE: This tool is still under construction. It may not work correctly, and future versions may change its behaviour or break layouts saved with it.**
+*   **Nesting Settings:** (Nesting menu) Configures crash logging (`Nesting.log`) and debug logging to the Report view.
 *   **About Nesting Workbench** (Nesting menu): Shows the installed version.
 
 ## Known issues

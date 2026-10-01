@@ -13,8 +13,9 @@ except ImportError:
     FreeCAD = None
 from ....datatypes.sheet import Sheet
 from ....datatypes.placed_part import PlacedPart
+from .... import nw_logger
 from . import genetic_utils
-from .minkowski_engine import MinkowskiEngine
+from .minkowski_engine import MinkowskiEngine, DEFAULT_CANDIDATE_SPACING
 
 class PlacementOptimizer:
     """
@@ -187,8 +188,8 @@ class Nester:
         self.cancel_callback = kwargs.get("cancel_callback") # Called to check if nesting should abort
         self.spawn_more_callback = kwargs.get("spawn_more_callback")  # Mints fill-part instances on the main thread
         
-        step_size = kwargs.get("step_size", 5.0) 
-        self.engine = MinkowskiEngine(width, height, step_size, log_callback=self.log_callback, verbose=self.verbose, search_direction=self.search_direction, rng=kwargs.get("rng"))
+        candidate_spacing = kwargs.get("candidate_spacing", DEFAULT_CANDIDATE_SPACING)
+        self.engine = MinkowskiEngine(width, height, candidate_spacing, log_callback=self.log_callback, verbose=self.verbose, search_direction=self.search_direction, rng=kwargs.get("rng"))
         # quiet (multi-layout GA) silences the optimizer's per-placement [TIMING] lines
         self.optimizer = PlacementOptimizer(self.engine, rotation_steps, self.search_direction,
                                             None if self.quiet else self.log_callback,
@@ -203,11 +204,10 @@ class Nester:
     def log(self, message, level="message"):
         if self.log_callback:
             self.log_callback(message)
-        elif FreeCAD and hasattr(FreeCAD, 'Console'):
-            if level == "warning":
-                FreeCAD.Console.PrintWarning(f"NESTER: {message}\n")
-            else:
-                FreeCAD.Console.PrintMessage(f"NESTER: {message}\n")
+        elif level == "warning":
+            nw_logger.warn(f"NESTER: {message}")
+        else:
+            nw_logger.info(f"NESTER: {message}")
 
     def nest(self, parts, sort=True):
         """
@@ -225,8 +225,8 @@ class Nester:
                 if doc and doc.getObject("MinkowskiDebug"):
                     doc.removeObject("MinkowskiDebug")
                     doc.recompute()
-        except Exception:
-            pass  # Cleanup of debug objects; swallow exceptions if GUI or document is unavailable
+        except Exception as e:
+            nw_logger.debug(f"[Nester] cleanup of debug objects skipped: {e}")
 
         return self._nest_standard(parts, sort=sort)
 

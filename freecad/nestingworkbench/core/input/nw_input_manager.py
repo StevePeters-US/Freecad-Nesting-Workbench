@@ -9,7 +9,7 @@ context-menu events in the 3D viewport, dispatching them to an active tool
 handler. Eliminates the dual-pipeline conflicts inherent in Coin3D callbacks.
 """
 
-import FreeCAD
+from freecad.nestingworkbench import nw_logger
 try:
     import FreeCADGui
 except ImportError:
@@ -34,7 +34,8 @@ def _is_qwindow(obj):
     if isinstance(qwindow_cls, type):
         try:
             return isinstance(obj, qwindow_cls)
-        except TypeError:
+        except TypeError as e:
+            nw_logger.debug(f"[NWInputManager] QWindow check failed: {e}")
             return False
     return False
 
@@ -54,9 +55,9 @@ def _is_text_input(obj):
         try:
             if isinstance(obj, valid_classes):
                 return True
-        except TypeError:
+        except TypeError as e:
             # Shim/mocked Qt class isn't a real type — treat as not a text widget.
-            pass
+            nw_logger.debug(f"[NWInputManager] Text input check failed: {e}")
     return False
 
 
@@ -67,15 +68,15 @@ def _wheel_delta(event):
             ad = event.angleDelta()
             if hasattr(ad, "y"):
                 return ad.y()
-        except Exception:
+        except Exception as e:
             # Not a Qt5+ wheel event — try the Qt4 delta() below.
-            pass
+            nw_logger.debug(f"[NWInputManager] angleDelta check failed: {e}")
     if hasattr(event, "delta"):
         try:
             return event.delta()
-        except Exception:
+        except Exception as e:
             # No usable delta — treat as no scroll.
-            pass
+            nw_logger.debug(f"[NWInputManager] delta check failed: {e}")
     return 0
 
 
@@ -124,7 +125,7 @@ class NWInputManager(QtCore.QObject):
                     app.installEventFilter(self)
                 self._is_initialized = True
         except Exception as e:
-            FreeCAD.Console.PrintError(f"[NWInputManager] Initialization error: {e}\n")
+            nw_logger.error(f"[NWInputManager] Initialization error: {e}")
 
     def restore(self):
         """Remove global event filter from QApplication."""
@@ -136,7 +137,7 @@ class NWInputManager(QtCore.QObject):
                 self._is_initialized = False
             self._reset_state()
         except Exception as e:
-            FreeCAD.Console.PrintError(f"[NWInputManager] Restore error: {e}\n")
+            nw_logger.error(f"[NWInputManager] Restore error: {e}")
 
     # Handler Registration
 
@@ -248,7 +249,7 @@ class NWInputManager(QtCore.QObject):
                         if not self._cached_viewport or "View3D" in vp_cls:
                             self._cached_viewport = obj
                 except Exception as e:
-                    FreeCAD.Console.PrintLog(f"[NWInputManager] Viewport detection: {e}\n")
+                    nw_logger.log(f"[NWInputManager] Viewport detection: {e}")
 
             is_viewport_event = False
             if self._cached_viewport:
@@ -258,7 +259,7 @@ class NWInputManager(QtCore.QObject):
                     try:
                         is_viewport_event = self._cached_viewport.isAncestorOf(obj)
                     except Exception as e:
-                        FreeCAD.Console.PrintLog(f"[NWInputManager] isAncestorOf check: {e}\n")
+                        nw_logger.log(f"[NWInputManager] isAncestorOf check: {e}")
 
             # Standardize coordinates relative to viewport
             if is_mouse_event and is_viewport_event:
@@ -278,7 +279,7 @@ class NWInputManager(QtCore.QObject):
                     elif isinstance(local_pos, (tuple, list)):
                         self._last_qt_pos = (int(local_pos[0]), int(local_pos[1]))
                 except Exception as e:
-                    FreeCAD.Console.PrintLog(f"[NWInputManager] Coordinate tracking: {e}\n")
+                    nw_logger.log(f"[NWInputManager] Coordinate tracking: {e}")
 
             # Middle mouse MUST always reach FreeCAD's navigation system.
             if is_mouse_event:
@@ -408,6 +409,6 @@ class NWInputManager(QtCore.QObject):
                         return False
 
         except Exception as e:
-            FreeCAD.Console.PrintError(f"[NWInputManager] Event filter error: {e}\n")
+            nw_logger.error(f"[NWInputManager] Event filter error: {e}")
 
         return False

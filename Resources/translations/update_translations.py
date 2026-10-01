@@ -38,6 +38,14 @@ class TranslationExtractor(ast.NodeVisitor):
         self.rel_filepath = rel_filepath
         # entries: list of (context, source_text, line_number)
         self.entries = []
+        self.constants = {}
+        self.unresolved = []
+
+    def visit_Assign(self, node):
+        if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                self.constants[node.targets[0].id] = node.value.value
+        self.generic_visit(node)
 
     def visit_Call(self, node):
         # Match QT_TRANSLATE_NOOP(context, text)
@@ -56,12 +64,16 @@ class TranslationExtractor(ast.NodeVisitor):
 
             if context is not None and text is not None:
                 self.entries.append((context, text, node.lineno))
+            else:
+                self.unresolved.append(node.lineno)
 
         self.generic_visit(node)
 
     def _extract_str(self, node):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             return node.value
+        if isinstance(node, ast.Name):
+            return self.constants.get(node.id)
         return None
 
 
@@ -84,6 +96,12 @@ def extract_strings_from_dir(source_dir, repo_root):
 
                 extractor = TranslationExtractor(rel_path)
                 extractor.visit(tree)
+
+                for lineno in extractor.unresolved:
+                    print(
+                        f"Warning: {rel_path}:{lineno}: QT_TRANSLATE_NOOP argument is not a string literal or module constant; not extracted",
+                        file=sys.stderr,
+                    )
 
                 for context, text, lineno in extractor.entries:
                     if context not in results:

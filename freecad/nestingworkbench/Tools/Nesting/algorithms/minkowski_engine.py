@@ -3,18 +3,20 @@
 import math
 import time
 import numpy as np
-try:
-    import FreeCAD
-except ImportError:
-    FreeCAD = None
 from threading import Lock
 import shapely
 from shapely.geometry import Polygon
 from shapely.affinity import translate, rotate
 from . import minkowski_utils
 from ....datatypes.shape import Shape
+from .... import nw_logger
 
 ANGLE_WRAP_EPS_DEG = 1e-5  # treat 359.99999→360 as 0 after the modulo
+
+# Arc-length spacing (mm) between candidate positions sampled along an NFP
+# boundary. The single source of the default: the UI, Nester, the GA worker
+# snapshot and the precompute all read it from here.
+DEFAULT_CANDIDATE_SPACING = 5.0
 
 _hole_fit_warned = set()
 _hole_fit_warned_lock = Lock()
@@ -30,19 +32,18 @@ def _warn_hole_fit_failed(cache_key, error, log):
         f"({error}). '{pair[1]}' will not be nested inside those holes; "
         f"outside placements are unaffected.", level="warning")
 
-def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, log=None, step_size=5.0):
+def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, log=None, candidate_spacing=DEFAULT_CANDIDATE_SPACING):
     """Computes the NFP for one (A, B, relative-angle) pair and stores it in
     Shape.nfp_cache under cache_key. Pure Shapely — safe on any thread.
     Returns the cache entry."""
     if log is None:
         def log_fallback(msg, level=None):
-            if FreeCAD and hasattr(FreeCAD, 'Console'):
-                if level == "warning":
-                    FreeCAD.Console.PrintWarning(f"MINKOWSKI_ENGINE: {msg}\n")
-                elif level == "error":
-                    FreeCAD.Console.PrintError(f"MINKOWSKI_ENGINE: {msg}\n")
-                else:
-                    FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {msg}\n")
+            if level == "warning":
+                nw_logger.warn(f"MINKOWSKI_ENGINE: {msg}")
+            elif level == "error":
+                nw_logger.error(f"MINKOWSKI_ENGINE: {msg}")
+            else:
+                nw_logger.info(f"MINKOWSKI_ENGINE: {msg}")
         log = log_fallback
 
     with Shape.nfp_cache_lock:
@@ -91,7 +92,7 @@ def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, l
         master_nfp = Polygon(nfp_exterior.exterior, nfp_interiors) if nfp_exterior and nfp_exterior.area > 0 else None
         if master_nfp:
             rings = [master_nfp.exterior] + list(master_nfp.interiors)
-            pts_parts = [MinkowskiEngine._discretize_ring_np(r, step_size) for r in rings]
+            pts_parts = [MinkowskiEngine._discretize_ring_np(r, candidate_spacing) for r in rings]
             local_pts = np.concatenate(pts_parts, axis=0) if pts_parts else np.empty((0, 2), dtype=np.float64)
             nfp_data = {"polygon": master_nfp, "local_points": local_pts}
         else:
@@ -108,10 +109,10 @@ class MinkowskiEngine:
     Handles geometric operations for Minkowski nesting, such as NFP generation,
     candidate point finding, and placement validation.
     """
-    def __init__(self, bin_width, bin_height, step_size, discretize_edges=True, log_callback=None, verbose=False, search_direction=(0, -1), rng=None):
+    def __init__(self, bin_width, bin_height, candidate_spacing, discretize_edges=True, log_callback=None, verbose=False, search_direction=(0, -1), rng=None):
         self.bin_width = bin_width
         self.bin_height = bin_height
-        self.step_size = step_size
+        self.candidate_spacing = candidate_spacing
         self.discretize_edges = discretize_edges
         self.log_callback = log_callback
         self.verbose = verbose
@@ -129,14 +130,15 @@ class MinkowskiEngine:
         if self.log_callback:
             with self._log_lock:
                 self.log_callback("MINKOWSKI_ENGINE: " + message)
-        elif FreeCAD and hasattr(FreeCAD, 'Console'):
-             FreeCAD.Console.PrintMessage(f"MINKOWSKI_ENGINE: {message}\n")
+        else:
+            nw_logger.info(f"MINKOWSKI_ENGINE: {message}")
 
     @staticmethod
-    def _nfp_cache_key(placed_shape, placed_angle, part_to_place, part_label, angle):
+    def _nfp_cache_key(placed_shape, placed_angle, part_to_place, part_label, angle, candidate_spacing):
         """Build the Shape.nfp_cache key for (placed_shape, part_to_place) at their relative angle.
 
-        Key layout must stay in sync with enumerate_nfp_jobs / _calculate_and_cache_nfp.
+        Key layout must stay in sync with enumerate_nfp_jobs / _calculate_and_cache_nfp:
+        (placed_label, part_label, relative_angle, spacing, deflection, simplification, candidate_spacing).
         """
         placed_label = getattr(placed_shape, 'type_label', None) or placed_shape.source_freecad_object.Label
         relative_angle = (angle - placed_angle) % 360.0
@@ -146,6 +148,7 @@ class MinkowskiEngine:
         return (
             placed_label, part_label, relative_angle,
             part_to_place.spacing, part_to_place.deflection, part_to_place.simplification,
+            float(candidate_spacing),
         ), relative_angle
 
     @staticmethod
@@ -217,7 +220,7 @@ class MinkowskiEngine:
         # 1:1 to threads within an attempt, and attempts are sequential.
 
         tol = 1e-7
-        grid = max(1.0, self.step_size)
+        grid = max(1.0, self.candidate_spacing)
         rminx, rminy, rmaxx, rmaxy = part_extents
 
         def _bounds_ok(pts):
@@ -259,7 +262,7 @@ class MinkowskiEngine:
 
         for p in sheet.parts[n_prev:m]:
             placed_angle = p.angle
-            nfp_cache_key, relative_angle = self._nfp_cache_key(p.shape, placed_angle, part_to_place, part_label, angle)
+            nfp_cache_key, relative_angle = self._nfp_cache_key(p.shape, placed_angle, part_to_place, part_label, angle, self.candidate_spacing)
             nfp_data = Shape.nfp_cache.get(nfp_cache_key)
             if not nfp_data:
                 n_misses += 1
@@ -304,7 +307,7 @@ class MinkowskiEngine:
                 new_pt_arrays.append(pts)
             else:
                 for ring in [tpoly.exterior] + list(tpoly.interiors):
-                    ring_pts = self._discretize_ring_np(ring, self.step_size)
+                    ring_pts = self._discretize_ring_np(ring, self.candidate_spacing)
                     if len(ring_pts):
                         new_pt_arrays.append(ring_pts)
 
@@ -378,7 +381,7 @@ class MinkowskiEngine:
         return best_idx, metric
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
-        return compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, self.log, self.step_size)
+        return compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, self.log, self.candidate_spacing)
 
     def get_perf_stats(self):
         with self._perf_lock:
@@ -389,11 +392,12 @@ class MinkowskiEngine:
             self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0, 'rotations_skipped': 0}
 
     @staticmethod
-    def _discretize_ring_np(ring, step_size):
+    def _discretize_ring_np(ring, candidate_spacing):
         """Vectorized ring discretisation. Returns (N, 2) float64 array.
 
         Replaces the Shapely interpolate() loop — samples at equal arc-length
         intervals using numpy cumulative distance + np.interp.
+        `candidate_spacing` is the target arc length between samples, in mm.
         """
         coords = np.array(ring.coords, dtype=np.float64)
         diffs = np.diff(coords, axis=0)
@@ -402,9 +406,9 @@ class MinkowskiEngine:
         cum_dist[0] = 0.0
         np.cumsum(seg_lens, out=cum_dist[1:])
         total = cum_dist[-1]
-        if total < step_size:
+        if total < candidate_spacing:
             return coords[:1]
-        n = max(2, int(total / step_size))
+        n = max(2, int(total / candidate_spacing))
         sample_dists = np.linspace(0.0, total, n, endpoint=False)
         xs = np.interp(sample_dists, cum_dist, coords[:, 0])
         ys = np.interp(sample_dists, cum_dist, coords[:, 1])

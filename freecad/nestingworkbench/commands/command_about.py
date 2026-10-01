@@ -11,7 +11,7 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtCore, QtWidgets
 
-from freecad.nestingworkbench import ADDON_DIR
+from freecad.nestingworkbench import ADDON_DIR, nw_logger
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
 
 PATREON_URL = "https://www.patreon.com/cw/AttackPotato"
@@ -30,7 +30,7 @@ def _get_version_string():
         if version_el is not None and version_el.text:
             return version_el.text.strip()
     except (OSError, ET.ParseError) as e:
-        FreeCAD.Console.PrintLog(f"[About] Could not read package.xml version: {e}\n")
+        nw_logger.log(f"[About] Could not read package.xml version: {e}")
     return "unknown"
 
 

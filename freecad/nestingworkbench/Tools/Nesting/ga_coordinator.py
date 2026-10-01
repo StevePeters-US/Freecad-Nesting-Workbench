@@ -3,7 +3,6 @@
 Coordinates the Genetic Algorithm nesting loop.
 Extracted from NestingController._execute_ga_nesting() to follow SRP.
 """
-import FreeCAD
 import FreeCADGui
 import math
 import random
@@ -11,9 +10,12 @@ import time
 import zlib
 from concurrent.futures import FIRST_COMPLETED, wait
 from ...datatypes.shape import Shape
+from freecad.nestingworkbench import nw_logger
 from .layout_manager import LayoutManager
 from .algorithms import genetic_utils
+from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
 from .ga_snapshot import UNPLACED_PENALTY_FACTOR
+from .worker_sizing import ga_worker_count, SOURCE_LOGICAL_FALLBACK, SOURCE_SETTING
 
 ELITE_FRACTION_DIVISOR = 5      # top 1/5 of the population survives unchanged
 MIN_ELITE_COUNT = 2             # always keep a breeding pair
@@ -22,14 +24,22 @@ DEFAULT_IMMIGRANT_RATIO = 0.15  # fraction of each new generation seeded at rand
 POOL_POLL_SECONDS = 0.25        # how often a wait on workers re-checks for cancel
 POOL_STARTUP_TIMEOUT = 60.0     # a worker that has not answered by now never will
 
-def enumerate_nfp_jobs(parts):
+# numpy's BLAS reads these at import and otherwise starts os.cpu_count() - 1
+# threads in every worker. Nesting never makes a BLAS call big enough to use them.
+BLAS_THREAD_VARS = ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS")
+
+# id(pool) -> the NFP cache file its workers load; removed by terminate_pool
+_pool_cache_files = {}
+
+def enumerate_nfp_jobs(parts, candidate_spacing=DEFAULT_CANDIDATE_SPACING):
     """Enumerates every NFP cache key the placement loop can request for
     these parts, as {cache_key: (rep_A, rep_B, relative_angle)}.
 
     Part type identity is source_freecad_object.Label — the same field the
     cache key uses (never parse part.id). The placed part A is always keyed
     at angle 0 with the rotation folded into relative_angle, matching
-    get_incremental_candidates / _calculate_and_cache_nfp.
+    get_incremental_candidates / _calculate_and_cache_nfp:
+    (placed_label, part_label, relative_angle, spacing, deflection, simplification, candidate_spacing).
     """
     reps = {}
     for p in parts:
@@ -52,20 +62,25 @@ def enumerate_nfp_jobs(parts):
             for rel in rel_angles:
                 key = (a.source_freecad_object.Label,
                        b.source_freecad_object.Label,
-                       rel, b.spacing, b.deflection, b.simplification)
+                       rel, b.spacing, b.deflection, b.simplification,
+                       float(candidate_spacing))
                 jobs.setdefault(key, (a, b, rel))
     return jobs
 
 def worker_mp_context():
     """Returns the multiprocessing context for the GA worker pool.
 
+    Always spawn, on every platform. A forked worker inherits FreeCAD's
+    sys.stdin, a PythonStdin with no close(), and multiprocessing's child
+    bootstrap calls sys.stdin.close() catching only OSError/ValueError, so
+    every forked worker dies with exit code 1 before running a task. Forking
+    a process running Qt and OCC threads is unsafe anyway.
+
     Spawned workers are started by re-running the parent's interpreter, which
     inside FreeCAD is freecad.exe, not Python. FreeCAD then parses Python's
     command-line flags as its own (-E is its --macro-path) and pops an
     "Initialization of FreeCAD failed" dialog for every worker. Point spawn at
     the Python interpreter FreeCAD ships beside its executable instead.
-
-    Fork contexts need no interpreter and are returned unchanged.
 
     Raises:
         RuntimeError: No Python interpreter found next to the executable.
@@ -75,11 +90,10 @@ def worker_mp_context():
     import os
     import sys
 
-    ctx = multiprocessing.get_context()
-    if ctx.get_start_method() == "fork":
-        return ctx
+    ctx = multiprocessing.get_context("spawn")
 
-    current = multiprocessing.spawn.get_executable()
+    # bytes on POSIX: set_executable() stores os.fsencode(path) there
+    current = os.fsdecode(multiprocessing.spawn.get_executable())
     if os.path.basename(current).lower().startswith("python"):
         return ctx
 
@@ -99,6 +113,7 @@ def terminate_pool(pool):
     shutdown(wait=False) only stops handing out work: a worker busy on a
     member, or one that never started, stays alive and so does the run
     waiting on it. Workers hold nothing the GA needs, so terminate them.
+    Also deletes the pool's NFP cache file.
     """
     if pool is None:
         return
@@ -107,14 +122,40 @@ def terminate_pool(pool):
     for process in processes:
         try:
             process.terminate()
-        except Exception:
-            pass  # Already exited
+        except Exception as e:
+            nw_logger.debug(f"[GACoordinator] Worker process terminate ignored (already exited): {e}")
+    _remove_cache_file(_pool_cache_files.pop(id(pool), None))
 
-def wait_for_any(pending, cancel_callback, deadline=None):
+def _write_cache_file(cache_payload):
+    """Pickles the NFP cache to a private temp file and returns its path."""
+    import os
+    import pickle
+    import tempfile
+    fd, path = tempfile.mkstemp(prefix="nw_nfp_cache_", suffix=".pkl")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            pickle.dump(cache_payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+    except BaseException:
+        _remove_cache_file(path)
+        raise
+    return path
+
+def _remove_cache_file(path):
+    import os
+    if path is None:
+        return
+    try:
+        os.remove(path)
+    except OSError as e:
+        nw_logger.debug(f"[GACoordinator] NFP cache file not removed: {e}")
+
+def wait_for_any(pending, cancel_callback, deadline=None, on_poll=None):
     """Blocks until at least one future in pending finishes.
 
     Polls instead of blocking outright, so Cancel is seen within
-    POOL_POLL_SECONDS even when no worker ever answers.
+    POOL_POLL_SECONDS even when no worker ever answers. on_poll, if given,
+    runs once per poll, before the done check, so a simulation drain keeps
+    pace with the workers.
 
     Returns:
         The set of finished futures, or None if cancel was requested.
@@ -124,6 +165,8 @@ def wait_for_any(pending, cancel_callback, deadline=None):
     """
     while True:
         done, _ = wait(pending, timeout=POOL_POLL_SECONDS, return_when=FIRST_COMPLETED)
+        if on_poll is not None:
+            on_poll()
         if done:
             return done
         if cancel_callback():
@@ -131,37 +174,94 @@ def wait_for_any(pending, cancel_callback, deadline=None):
         if deadline is not None and time.monotonic() > deadline:
             raise TimeoutError
 
-def start_worker_pool(max_workers, cache_payload, cancel_callback):
-    """Creates the GA worker pool and waits for a worker to answer.
 
-    Workers start lazily, so a pool that cannot run - a worker that dies on
-    start-up, or one stuck before it ever reads a task - only shows itself
-    once work is waiting on it. Probe it here, while falling back to serial
-    is still possible.
+SIM_ROW_GAP_FRACTION = 0.15  # gap between preview rows, as a fraction of sheet height
+
+
+def build_preview_row(placements, parts_by_id, row, sheet_w, sheet_h, spacing):
+    """World-space outlines for one simulation preview row.
+
+    placements: [(sheet_index, part_id, x, y, angle)] in placement order,
+    sheet-local centroids as PlacedPart records them. Row 0 sits on the real
+    sheet row; row r is lifted by r * sheet_h * (1 + SIM_ROW_GAP_FRACTION).
+    Sheets in a row step along x exactly as Sheet.get_origin() does.
+
+    Returns (sheet_rects, part_outlines): two lists of Shapely Polygons.
+    """
+    from shapely.geometry import box
+    from shapely.affinity import rotate, translate
+    y0 = row * sheet_h * (1.0 + SIM_ROW_GAP_FRACTION)
+    used = sorted({s for s, *_ in placements})
+    rects = [box(s * (sheet_w + spacing), y0, s * (sheet_w + spacing) + sheet_w, y0 + sheet_h)
+             for s in used]
+    outlines = []
+    for s, part_id, x, y, angle in placements:
+        part = parts_by_id.get(part_id)
+        if part is None or part.original_polygon is None:
+            continue
+        poly = rotate(part.original_polygon, angle, origin="centroid")
+        c = poly.centroid
+        outlines.append(translate(poly, x - c.x + s * (sheet_w + spacing), y - c.y + y0))
+    return rects, outlines
+
+
+def start_worker_pool(max_workers, cache_payload, cancel_callback, sim_queue=None):
+    """Creates the GA worker pool and waits for every worker to answer.
+
+    Starts all max_workers up front, one ping each. Spawned workers otherwise
+    start lazily inside submit(), and the pool only spawns while no worker is
+    idle, so a generation began on 3 of 8 workers and the pool grew by about
+    one per generation. A worker that cannot run - one that dies on start-up,
+    or is stuck before it ever reads a task - also shows itself here, while
+    falling back to serial is still possible. Pins each worker's BLAS thread
+    pool to one thread (see BLAS_THREAD_VARS).
+
+    The NFP cache goes to the workers as a file path, not as initargs. Spawn
+    writes initargs down a 64 KB pipe that the child drains only after
+    importing the initializer's module (FreeCAD, Part and PySide6 via the
+    freecad package, ~0.9 s), so a 1 MB cache blocked submit() for that long
+    per worker and serialized every worker's start-up.
 
     Returns:
         A working pool, or None if cancel was requested during start-up.
 
     Raises:
-        RuntimeError: No worker answered within POOL_STARTUP_TIMEOUT.
-        Exception: Whatever the worker raised while starting.
+        RuntimeError: Not every worker answered within POOL_STARTUP_TIMEOUT.
+        Exception: Whatever a worker raised while starting.
     """
+    import os
     from concurrent.futures import ProcessPoolExecutor
     from .ga_worker import init_worker, worker_ping
 
-    pool = ProcessPoolExecutor(
-        max_workers=max_workers,
-        mp_context=worker_mp_context(),
-        initializer=init_worker,
-        initargs=(cache_payload,)
-    )
+    # Not restored afterwards: workers spawn lazily, on submit, long after this
+    # returns. FreeCAD's own numpy is already loaded, so this process is unaffected;
+    # setdefault leaves a value the user set themselves alone.
+    for var in BLAS_THREAD_VARS:
+        os.environ.setdefault(var, "1")
+
+    cache_path = _write_cache_file(cache_payload)
     try:
-        probe = pool.submit(worker_ping)
+        pool = ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=worker_mp_context(),
+            initializer=init_worker,
+            initargs=(cache_path, sim_queue)
+        )
+    except BaseException:
+        _remove_cache_file(cache_path)
+        raise
+    _pool_cache_files[id(pool)] = cache_path
+    try:
+        pending = {pool.submit(worker_ping) for _ in range(max_workers)}
         deadline = time.monotonic() + POOL_STARTUP_TIMEOUT
-        if wait_for_any({probe}, cancel_callback, deadline) is None:
-            terminate_pool(pool)
-            return None
-        probe.result()
+        while pending:
+            done = wait_for_any(pending, cancel_callback, deadline)
+            if done is None:
+                terminate_pool(pool)
+                return None
+            for probe in done:
+                probe.result()
+            pending -= done
         return pool
     except TimeoutError:
         terminate_pool(pool)
@@ -196,6 +296,8 @@ class GACoordinator:
         self.seed = 0
         self.rng = random.Random(self.seed)
         self._in_parallel_generation = False
+        self._sim_queue = None
+        self._sim_rows_shown = set()
 
     def _set_status(self, msg):
         if self.worker:
@@ -205,8 +307,8 @@ class GACoordinator:
         if callback:
             try:
                 callback(msg)
-            except RuntimeError:
-                pass  # UI widget deleted (panel closed)
+            except RuntimeError as e:
+                nw_logger.debug(f"[GACoordinator] UI widget deleted (set_status): {e}")
 
     def _update_progress(self, current, total, msg=None):
         if self.worker:
@@ -216,16 +318,16 @@ class GACoordinator:
         if callback:
             try:
                 callback(current, total, msg)
-            except RuntimeError:
-                pass  # UI widget deleted (panel closed)
+            except RuntimeError as e:
+                nw_logger.debug(f"[GACoordinator] UI widget deleted (update_progress): {e}")
 
     def _play_sound(self):
         callback = self.ui_callbacks.get('play_sound')
         if callback:
             try:
                 callback()
-            except RuntimeError:
-                pass  # Sound callback failed or widget deleted
+            except RuntimeError as e:
+                nw_logger.debug(f"[GACoordinator] Sound callback failed or widget deleted: {e}")
 
     def run(self, target_layout, ui_params, quantities, master_map,
             rotation_params, algo_kwargs, is_simulating, viz_manager=None):
@@ -252,14 +354,14 @@ class GACoordinator:
         self.seed = seed
         self.rng = random.Random(seed)
         self.is_simulating = is_simulating
-        FreeCAD.Console.PrintMessage(f"GA random seed: {seed}\n")
+        nw_logger.info(f"GA random seed: {seed}")
         
         if algo_kwargs.pop('clear_nfp_cache', False):
             Shape.clear_nfp_cache()
-            FreeCAD.Console.PrintMessage("NFP cache cleared (user request).\n")
+            nw_logger.info("NFP cache cleared (user request).")
         
         if verbose:
-            FreeCAD.Console.PrintMessage(f"GA Mode: {generations} generations, {population_size} population\n")
+            nw_logger.info(f"GA Mode: {generations} generations, {population_size} population")
         
         self.layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache, rng=self.rng)
         
@@ -288,7 +390,9 @@ class GACoordinator:
             )
         
         if layouts and layouts[0].parts:
-            self._precompute_all_nfps(layouts[0].parts, cancel_callback)
+            self._precompute_all_nfps(
+                layouts[0].parts, cancel_callback,
+                algo_kwargs.get('candidate_spacing', DEFAULT_CANDIDATE_SPACING))
 
         best_layout = None
         best_efficiency = 0
@@ -296,44 +400,57 @@ class GACoordinator:
         generations_without_improvement = 0
         total_nesting_time = 0
 
-        # Pool lifecycle: single pool across the whole GA run.
-        # Measured 2026-09-03, 27 parts, P=20, G=10 on 24-core host (3-run median,
-        # 191 placements in every run): 1w 10.38s wall / 9.34s nest,
-        # 8w 3.96s wall / 2.72s nest (2.62x wall / 3.44x placement).
-        # Re-measured after the diversity fix, which roughly doubled both columns:
-        # a population that no longer collapses to clones keeps improving, so the
-        # run no longer early-stops and actually evaluates all 10 generations.
-        # Worker serialization and process overhead diminish returns past 8 workers.
-        # Sized to min(os.cpu_count() or 1, population_size, 8).
-        import os
-
+        # Pool lifecycle: single pool across the whole GA run. Sizing lives in
+        # worker_sizing.ga_worker_count (physical cores, capped, batch-balanced).
         pool = None
+        self._sim_queue = None
+        self._sim_rows_shown = set()
         self._serial_fallback = False
-        max_workers = min(os.cpu_count() or 1, population_size, 8)
-        if max_workers > 1 and not is_simulating:
+        max_workers, worker_source = ga_worker_count(
+            population_size, algo_kwargs.get('worker_processes', 0))
+        if worker_source == SOURCE_LOGICAL_FALLBACK:
+            nw_logger.warn(
+                f"[GACoordinator] Could not read the physical core count; sizing the "
+                f"worker pool from logical processors ({max_workers} workers).")
+        if max_workers > 1:
+            nw_logger.info(f"GA worker processes: {max_workers} ({worker_source})")
             self._set_status("Starting worker processes...")
+            if is_simulating:
+                self._sim_queue = worker_mp_context().Queue()
+            else:
+                self._sim_queue = None
             try:
                 with Shape.nfp_cache_lock:
                     cache_payload = dict(Shape.nfp_cache)
-                pool = start_worker_pool(max_workers, cache_payload, cancel_callback)
+                pool = start_worker_pool(max_workers, cache_payload, cancel_callback, sim_queue=self._sim_queue)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(
+                nw_logger.warn(
                     f"[GACoordinator] Worker processes failed to start ({e}); "
-                    f"evaluating the population one member at a time instead.\n"
+                    f"evaluating the population one member at a time instead."
                 )
                 self._set_status("Worker processes failed to start - running serially (see Report view)")
                 self._serial_fallback = True
+                if self._sim_queue is not None:
+                    self._sim_queue.close()
+                    self._sim_queue.cancel_join_thread()
+                    self._sim_queue = None
                 pool = None
+        else:
+            reason = ("population size is 1" if population_size <= 1
+                      else "GA worker processes set to 1 in Nesting Settings > Advanced"
+                      if worker_source == SOURCE_SETTING
+                      else "only one CPU core")
+            nw_logger.info(f"GA evaluating serially: {reason}.")
 
         try:
             for gen in range(generations):
                 if cancel_callback():
                     terminate_pool(pool)
-                    FreeCAD.Console.PrintMessage("Nesting cancelled by user.\n")
+                    nw_logger.info("Nesting cancelled by user.")
                     break
 
                 if verbose:
-                    FreeCAD.Console.PrintMessage(f"\n=== Generation {gen+1}/{generations} ===\n")
+                    nw_logger.info(f"\n=== Generation {gen+1}/{generations} ===")
                 self._set_status(f"Generation {gen+1}/{generations}...")
                 if self.draw_callback:
                     self.draw_callback({'updateGui_only': True})
@@ -362,7 +479,7 @@ class GACoordinator:
                     best_layout = current_best
                     best_efficiency = current_best.efficiency
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"\n>>> New Best: {best_efficiency:.1f}% efficiency <<<\n")
+                        nw_logger.info(f"\n>>> New Best: {best_efficiency:.1f}% efficiency <<<")
 
                 if best_fitness_at_last_reset is None or (
                         best_fitness_at_last_reset - current_best.fitness
@@ -372,7 +489,7 @@ class GACoordinator:
                 else:
                     generations_without_improvement += 1
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"\nNo improvement ({generations_without_improvement}/{early_stop_threshold})\n")
+                        nw_logger.info(f"\nNo improvement ({generations_without_improvement}/{early_stop_threshold})")
                 
                 # Early Stopping / Stagnation Check:
                 # An early stopping threshold of 5 generations is selected because nesting jobs typically
@@ -381,7 +498,7 @@ class GACoordinator:
                 # after 5 generations, the population has converged to a local optimum, and continuing
                 # to run more generations would waste CPU/GPU resources without realistic chance of improvement.
                 if generations_without_improvement >= early_stop_threshold:
-                    FreeCAD.Console.PrintMessage(f"Early stopping: no improvement for {early_stop_threshold} generations\n")
+                    nw_logger.info(f"Early stopping: no improvement for {early_stop_threshold} generations")
                     break
                 
                 # STEP 2 & 3: Build next generation
@@ -424,7 +541,10 @@ class GACoordinator:
                             if layout != best_layout:
                                 self.layout_manager.delete_layout(layout, verbose=verbose)
                     layouts = [best_layout]
-            
+
+            if is_simulating and self.draw_callback and pool is not None:
+                self.draw_callback({'clear_sim_member_rows': True})
+
             # Fill phase: generations nested regular parts only — fill the
             # winning layout exactly once (spawns still marshal to the main
             # thread via request_spawn).
@@ -441,7 +561,7 @@ class GACoordinator:
                     if self.draw_callback:
                         fill_kwargs.pop('progress_callback', None)
                         fill_kwargs['log_callback'] = (
-                            lambda msg, level=None: FreeCAD.Console.PrintMessage(f"{msg}\n"))
+                            lambda msg, level=None: nw_logger.info(msg))
                     if best_layout.sheets is None:
                         best_layout.sheets = []
                     pre_counts = [len(s.parts) for s in best_layout.sheets]
@@ -468,16 +588,22 @@ class GACoordinator:
             return job
 
         except Exception as e:
-            import traceback
-            FreeCAD.Console.PrintError(f"GA Nesting Error: {e}\n{traceback.format_exc()}\n")
+            nw_logger.exception(f"GA Nesting Error: {e}")
             self._set_status(f"Error: {e}")
             if 'layouts' in locals():
                 for layout in layouts:
                     self.layout_manager.delete_layout(layout)
+            self._dispatch_discard_template()
             self._dispatch_recompute()
             return None
         finally:
+            if is_simulating and self.draw_callback and pool is not None:
+                self.draw_callback({'clear_sim_member_rows': True})
             terminate_pool(pool)
+            if self._sim_queue is not None:
+                self._sim_queue.close()
+                self._sim_queue.cancel_join_thread()
+                self._sim_queue = None
 
     @staticmethod
     def _split_fill_parts(parts):
@@ -525,20 +651,30 @@ class GACoordinator:
         else:
             self.doc.recompute()
 
+    def _dispatch_discard_template(self):
+        """Deletes the run's shared document objects on the main thread."""
+        layout_manager = getattr(self, 'layout_manager', None)
+        if layout_manager is None:
+            return
+        if self.draw_callback:
+            self.draw_callback({'discard_template': True})
+        else:
+            layout_manager.discard_template()
+
     def request_spawn(self, spawn_fn):
         """Runs spawn_fn() on the main thread (it creates FreeCAD doc objects)
         and returns the new part. Used by the nester to mint fill-part
         instances on demand."""
         if getattr(self, '_in_parallel_generation', False):
-            FreeCAD.Console.PrintError(
-                "[GACoordinator] request_spawn called during parallel generation! Fill must be winner-only.\n"
+            nw_logger.error(
+                "[GACoordinator] request_spawn called during parallel generation! Fill must be winner-only."
             )
             raise AssertionError(
                 "request_spawn called during parallel generation! Fill must be deferred to the winner."
             )
         return self._dispatch_to_main_thread('spawn_fill_part', spawn_fn, spawn_fn=spawn_fn)
 
-    def _precompute_all_nfps(self, parts, cancel_callback):
+    def _precompute_all_nfps(self, parts, cancel_callback, candidate_spacing):
         """Fills Shape.nfp_cache with every NFP the run can request, before
         the generation loop starts. Runs on the GA worker thread; workers
         touch only Shapely geometry, so no main-thread marshaling is needed.
@@ -547,7 +683,7 @@ class GACoordinator:
         import os
         from .algorithms.minkowski_engine import compute_and_cache_nfp
 
-        jobs = enumerate_nfp_jobs(parts)
+        jobs = enumerate_nfp_jobs(parts, candidate_spacing)
         with Shape.nfp_cache_lock:
             missing = {k: v for k, v in jobs.items() if k not in Shape.nfp_cache}
         total = len(missing)
@@ -562,7 +698,7 @@ class GACoordinator:
         # scaling peaks at 2 and decays from there. Do not raise this without
         # re-running the thread-scaling benchmark.
         with ThreadPoolExecutor(max_workers=min(2, os.cpu_count() or 1)) as pool:
-            futures = [pool.submit(compute_and_cache_nfp, a, 0.0, b, rel, key)
+            futures = [pool.submit(compute_and_cache_nfp, a, 0.0, b, rel, key, None, candidate_spacing)
                        for key, (a, b, rel) in missing.items()]
             for future in as_completed(futures):
                 if cancel_callback():
@@ -576,46 +712,121 @@ class GACoordinator:
         """Nests each layout in the population and calculates fitness/efficiency."""
         total_time = 0
 
-        if pool is not None and not is_simulating:
+        if pool is not None:
             from .ga_snapshot import snapshot_member, apply_result
             from .ga_worker import worker_nest
 
             self._in_parallel_generation = True
             try:
                 tasks = []
+                carried = []
                 pending_layouts = []
 
                 for idx, layout in enumerate(layouts):
                     if cancel_callback(): return total_time, True
 
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
+                        nw_logger.info(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}")
 
-                    if layout.sheets: continue
+                    if layout.sheets:
+                        # The champion carries its layout; it is not nested again.
+                        carried.append((layout.member_idx, layout))
+                        continue
                     if not layout.parts:
                         layout.fitness, layout.efficiency = float('inf'), 0
                         continue
 
                     member_idx = layout.member_idx
                     task = snapshot_member(layout, ui_params, gen, member_idx, getattr(self, 'seed', 0),
-                                           search_direction=algo_kwargs.get('search_direction', (0, -1)))
+                                           search_direction=algo_kwargs.get('search_direction', (0, -1)),
+                                           candidate_spacing=algo_kwargs.get('candidate_spacing', DEFAULT_CANDIDATE_SPACING),
+                                           stream=self._sim_queue is not None)
                     tasks.append(task)
                     pending_layouts.append((member_idx, layout))
 
                 if tasks:
+                    rows_acc = {}
+                    show_all = algo_kwargs.get('sim_show_all_members', True)
+                    streamed = sorted(t.member_idx for t in tasks)
+                    # Every member gets a row, including carried ones, so member i
+                    # stays in row i from one generation to the next.
+                    row_members = sorted(streamed + [m for m, _ in carried])
+                    sheet_w = float(ui_params.get('sheet_width', 300.0))
+                    sheet_h = float(ui_params.get('sheet_height', 300.0))
+                    spacing = float(ui_params.get('spacing', 0.0))
+                    layout_map = {m_idx: l for m_idx, l in pending_layouts}
+                    parts_by_id_map = {m_idx: {p.id: p for p in l.parts} for m_idx, l in layout_map.items()}
+
+                    def on_poll():
+                        if self._sim_queue is None:
+                            return
+                        touched_members = set()
+                        import queue
+                        while True:
+                            try:
+                                msg = self._sim_queue.get_nowait()
+                            except (queue.Empty, AttributeError):
+                                break
+                            # msg: (generation, member_idx, sheet_index, part_id, x, y, angle)
+                            msg_gen, m_idx, s_idx, p_id, x, y, angle = msg
+                            if msg_gen != gen:
+                                continue
+                            if not show_all and m_idx != streamed[0]:
+                                continue
+                            if m_idx not in rows_acc:
+                                rows_acc[m_idx] = []
+                            rows_acc[m_idx].append((s_idx, p_id, x, y, angle))
+                            touched_members.add(m_idx)
+
+                        if touched_members and self.draw_callback:
+                            rows = {}
+                            for m in touched_members:
+                                row_idx = row_members.index(m) if show_all else 0
+                                parts_by_id = parts_by_id_map.get(m, {})
+                                rects, outlines = build_preview_row(
+                                    rows_acc[m], parts_by_id, row_idx, sheet_w, sheet_h, spacing
+                                )
+                                rows[row_idx] = (rects, outlines)
+                            self.draw_callback({'sim_member_rows': True, 'rows': rows})
+                            self._sim_rows_shown.update(rows)
+
+                    # Rows keep their last shape between draws. Empty every shown row,
+                    # so a row never shows a member from an earlier generation, and
+                    # draw carried members from their stored sheets: they are not
+                    # nested again, so they stream nothing.
+                    if self._sim_queue is not None and self.draw_callback:
+                        start_rows = {r: ([], []) for r in self._sim_rows_shown}
+                        if show_all:
+                            for m_idx, layout in carried:
+                                # PlacedPart x/y are sheet-local centroids, the same
+                                # frame the workers stream.
+                                placements = [(sheet.id, pp.shape.id, pp.x, pp.y, pp.angle)
+                                              for sheet in layout.sheets for pp in sheet.parts]
+                                row_idx = row_members.index(m_idx)
+                                start_rows[row_idx] = build_preview_row(
+                                    placements, {p.id: p for p in layout.parts},
+                                    row_idx, sheet_w, sheet_h, spacing)
+                        if start_rows:
+                            self.draw_callback({'sim_member_rows': True, 'rows': start_rows})
+                            self._sim_rows_shown.update(start_rows)
+
                     # Cancel is seen within POOL_POLL_SECONDS; the caller then
                     # terminates the workers, so a long member does not hold
                     # the run open until it finishes.
                     pending = {pool.submit(worker_nest, t) for t in tasks}
                     results = []
                     while pending:
-                        done = wait_for_any(pending, cancel_callback)
+                        done = wait_for_any(pending, cancel_callback, on_poll=on_poll if self._sim_queue is not None else None)
                         if done is None:
                             return total_time, True
                         pending -= done
                         results.extend(fut.result() for fut in done)
+                    if self._sim_queue is not None:
+                        on_poll()
+
                     results.sort(key=lambda r: r.member_idx)
-                    layout_map = {m_idx: l for m_idx, l in pending_layouts}
+                    nw_logger.replay_worker_messages(
+                        [m for res in results for m in res.diagnostics])
                     for res in results:
                         layout = layout_map[res.member_idx]
                         apply_result(layout, res, ui_params)
@@ -631,7 +842,7 @@ class GACoordinator:
             if cancel_callback(): return total_time, True
 
             if verbose:
-                FreeCAD.Console.PrintMessage(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}\n")
+                nw_logger.info(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}")
 
             if layout.sheets: continue
             if not layout.parts:
@@ -657,7 +868,7 @@ class GACoordinator:
                 # dropping logs entirely hides the per-part [TIMING] lines —
                 # route them to the FreeCAD console instead.
                 current_kwargs['log_callback'] = (
-                    lambda msg, level=None: FreeCAD.Console.PrintMessage(f"{msg}\n"))
+                    lambda msg, level=None: nw_logger.info(msg))
             if len(layouts) > 1 or generations > 1:
                  current_kwargs['quiet'] = True
                  if 'progress_callback' in current_kwargs: del current_kwargs['progress_callback']
@@ -870,7 +1081,13 @@ class GACoordinator:
     def _finalize(self, best_layout, best_efficiency, total_time, target_layout, ui_params):
         """Prepares the final NestingJob from the best layout."""
         from .nesting_job import NestingJob
-        if not best_layout: return None
+        layout_manager = getattr(self, 'layout_manager', None)
+        if not best_layout:
+            if layout_manager:
+                layout_manager.discard_template()
+            return None
+        if layout_manager:
+            layout_manager.adopt_template(best_layout)
             
         if best_layout.layout_group and hasattr(best_layout.layout_group, "ViewObject"):
             best_layout.layout_group.ViewObject.Visibility = True
@@ -899,9 +1116,9 @@ class GACoordinator:
             msg += " (workers failed to start - ran serially)"
         
         self._set_status(msg)
-        FreeCAD.Console.PrintMessage(f"{msg}\n")
+        nw_logger.info(msg)
         if unplaced_count:
-            FreeCAD.Console.PrintWarning(f"WARNING: {unplaced_count} part(s) could not be placed: {[p.id for p in best_layout.unplaced]}\n")
-        FreeCAD.Console.PrintMessage(f"--- NESTING DONE ---\n")
+            nw_logger.warn(f"WARNING: {unplaced_count} part(s) could not be placed: {[p.id for p in best_layout.unplaced]}")
+        nw_logger.info("--- NESTING DONE ---")
         self._play_sound()
         return job

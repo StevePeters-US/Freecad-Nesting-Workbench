@@ -8,8 +8,9 @@ finding, stacking, and unstacking the generated sheet layouts.
 
 import FreeCAD
 import ast
+from freecad.nestingworkbench import nw_logger
 from ...freecad_helpers import get_layout_group, get_sheet_groups, get_all_objects_recursive
-from ...constants import *
+from ...constants import PROP_PART_SPACING, PROP_SHEET_WIDTH
 
 class SheetStacker:
     """Handles the logic for finding, stacking, and unstacking sheet layouts."""
@@ -30,16 +31,16 @@ class SheetStacker:
             if hasattr(self.layout_group, PROP_SHEET_WIDTH) and hasattr(self.layout_group, PROP_PART_SPACING):
                 return {"width": self.layout_group.SheetWidth, "spacing": self.layout_group.PartSpacing}
             else:
-                FreeCAD.Console.PrintWarning("Could not find parameter properties on the layout group. Stacking may be inaccurate.\n")
+                nw_logger.warn("Could not find parameter properties on the layout group. Stacking may be inaccurate.")
                 return None
         except Exception as e:
-            FreeCAD.Console.PrintError(f"Error reading from spreadsheet: {e}\n")
+            nw_logger.error(f"Error reading from spreadsheet: {e}")
             return None
 
     def toggle_stack(self):
         """Public method to stack or unstack the sheets."""
         if not self.layout_group:
-            FreeCAD.Console.PrintMessage("No valid packed layout found to stack/unstack.\n")
+            nw_logger.info("No valid packed layout found to stack/unstack.")
             return
         
         if not hasattr(self.layout_group, "IsStacked"):
@@ -57,7 +58,7 @@ class SheetStacker:
         """Moves all objects in sheets 2 and higher to overlay sheet 1."""
         params = self._get_params_from_layout_group()
         if not params:
-            FreeCAD.Console.PrintError("Could not retrieve sheet parameters. Stacking aborted.\n")
+            nw_logger.error("Could not retrieve sheet parameters. Stacking aborted.")
             return
 
         # Before any movement, store the current state of all objects in the layout.
@@ -81,7 +82,7 @@ class SheetStacker:
         sheet_groups = get_sheet_groups(self.layout_group)
 
         if len(sheet_groups) < 2:
-            FreeCAD.Console.PrintMessage("Stacking requires two or more sheets.\n")
+            nw_logger.info("Stacking requires two or more sheets.")
             return
 
         # The target position is the origin (0,0,0)
@@ -102,12 +103,12 @@ class SheetStacker:
                 obj.Placement = new_placement
 
         self.layout_group.IsStacked = True
-        FreeCAD.Console.PrintMessage("Sheets are now stacked.\n")
+        nw_logger.info("Sheets are now stacked.")
         
     def _unstack(self):
         """Restores all objects in the layout to their original positions."""
         if not hasattr(self.layout_group, "OriginalPlacements"):
-            FreeCAD.Console.PrintError("Original placement data not found. Cannot unstack.\n")
+            nw_logger.error("Original placement data not found. Cannot unstack.")
             return
             
         placements_dict = self.layout_group.OriginalPlacements
@@ -121,11 +122,11 @@ class SheetStacker:
                     # Use ast.literal_eval for safely evaluating the string representation of the tuple
                     data = ast.literal_eval(placement_str)
                 except (ValueError, SyntaxError):
-                    FreeCAD.Console.PrintWarning(f"Could not parse placement data for '{obj.Name}'. Skipping.\n")
+                    nw_logger.warn(f"Could not parse placement data for '{obj.Name}'. Skipping.")
                     continue
                 base = FreeCAD.Vector(data[0], data[1], data[2])
                 rot = FreeCAD.Rotation(data[3], data[4], data[5], data[6])
                 obj.Placement = FreeCAD.Placement(base, rot)
         
         self.layout_group.IsStacked = False
-        FreeCAD.Console.PrintMessage("Sheets are now unstacked.\n")
+        nw_logger.info("Sheets are now unstacked.")

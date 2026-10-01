@@ -3,17 +3,29 @@
 Worker process entry points for GA population member nesting.
 Executes in worker processes without FreeCAD dependencies.
 """
+import dataclasses
+
+from freecad.nestingworkbench import nw_logger
 from ...datatypes.shape import Shape
 from .ga_snapshot import MemberTask, MemberResult, nest_from_snapshot
 
 
-def init_worker(cache_payload):
+_sim_queue = None  # set by init_worker when Simulate Nesting runs on the pool
+
+
+def init_worker(cache_path, sim_queue=None):
     """
     Initializer for ProcessPoolExecutor workers.
-    Assigns the precomputed NFP cache payload to Shape.nfp_cache.
-    Guarantees cross-platform (fork and spawn) cache availability.
+    Loads the precomputed NFP cache that start_worker_pool pickled to
+    cache_path into Shape.nfp_cache, and keeps the simulation queue that
+    worker_nest publishes placements to.
     """
-    if cache_payload is not None:
+    global _sim_queue
+    _sim_queue = sim_queue
+    if cache_path is not None:
+        import pickle
+        with open(cache_path, "rb") as f:
+            cache_payload = pickle.load(f)
         with Shape.nfp_cache_lock:
             Shape.nfp_cache.clear()
             Shape.nfp_cache.update(cache_payload)
@@ -26,6 +38,10 @@ def worker_ping():
 
 def worker_nest(task: MemberTask) -> MemberResult:
     """
-    Nests a single population member task in pure geometry.
+    Nests a single population member task in pure geometry, carrying back any
+    warnings the worker logged. If nesting raises, the buffer survives and rides
+    on this worker's next result. Streams placements when task.stream is set.
     """
-    return nest_from_snapshot(task)
+    sink = _sim_queue.put_nowait if (task.stream and _sim_queue is not None) else None
+    result = nest_from_snapshot(task, placement_sink=sink)
+    return dataclasses.replace(result, diagnostics=nw_logger.drain_worker_messages())

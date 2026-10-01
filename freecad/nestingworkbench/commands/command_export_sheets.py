@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 import FreeCAD
 import FreeCADGui
+from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.Tools.Exporter import exporter
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
 from freecad.nestingworkbench.freecad_helpers import is_layout_group
@@ -30,7 +31,7 @@ class ExportSheetsCommand:
                 layout_group = selected
 
         if not layout_group:
-            FreeCAD.Console.PrintMessage("Please select a layout group to export.\n")
+            nw_logger.info("Please select a layout group to export.")
             return
 
         tr = QtWidgets.QApplication.translate
@@ -47,9 +48,9 @@ class ExportSheetsCommand:
             if created_default:
                 try:
                     os.rmdir(default_export_dir)  # only succeeds while still empty
-                except OSError:
+                except OSError as e:
                     # Directory not empty (files were exported) — keep it.
-                    pass
+                    nw_logger.debug(f"[ExportSheetsCommand] rmdir failed: {e}")
 
         export_dir = QtWidgets.QFileDialog.getExistingDirectory(
             None, tr("ExportSheetsCommand", _SELECT_DIR_TITLE), default_export_dir

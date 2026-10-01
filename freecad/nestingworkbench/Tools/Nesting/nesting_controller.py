@@ -10,12 +10,21 @@ import threading
 from PySide import QtWidgets, QtCore
 from PySide.QtCore import QThread, Signal
 from ...datatypes.shape import Shape
+from ... import nw_logger
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
 from .ga_coordinator import GACoordinator
+from .worker_sizing import set_worker_override
 from ...freecad_helpers import (recursive_delete, set_master_shapes_visible,
                                hide_all_master_shapes)
-from ...constants import *
+from ...constants import (
+    PHYSICS_ROTATION_PRESETS, PREFS_PATH, PROP_ADD_LABELS, PROP_ALGORITHM, PROP_CANDIDATE_SPACING, PROP_DEFLECTION_ANGLE,
+    PROP_FILL_SHEET, PROP_FONT_FILE, PROP_GENERATIONS, PROP_GLOBAL_ROTATION_STEPS, PROP_LABEL_HEIGHT, PROP_LABEL_SIZE,
+    PROP_NESTING_DIRECTION, PROP_PART_ROTATION_OVERRIDE, PROP_PART_ROTATION_STEPS, PROP_PART_SPACING,
+    PROP_POPULATION_SIZE, PROP_QUANTITY, PROP_SHEET_HEIGHT, PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH,
+    PROP_SHOW_BOUNDS, PROP_SIMPLIFICATION, PROP_UP_DIRECTION,
+    SIM_ALL, SIM_OFF,
+)
 from ...ui_helpers import closest_angle_index
 from .nesting_job import NestingJob
 from ... import DEFAULT_FONT
@@ -125,6 +134,7 @@ _LAYOUT_SETTING_LABELS = {
     PROP_GENERATIONS: "generations",
     PROP_POPULATION_SIZE: "population size",
     PROP_NESTING_DIRECTION: "nesting direction",
+    PROP_CANDIDATE_SPACING: "candidate spacing",
 }
 
 
@@ -150,7 +160,7 @@ class NestingController:
             self.ui.font_label.setText(os.path.basename(default_font))
 
     def execute_nesting(self):
-        FreeCAD.Console.PrintMessage("\n--- NESTING START ---\n")
+        nw_logger.info("\n--- NESTING START ---")
         
         if self.current_job:
             self.current_job.cleanup()
@@ -162,7 +172,7 @@ class NestingController:
         if not target_layout:
              return # Standard error handled in helper
              
-        is_simulating = self.ui.simulate_nesting_checkbox.isChecked()
+        is_simulating = self.ui.simulate_combo.currentIndex() != SIM_OFF
         if hasattr(target_layout, "ViewObject"):
             target_layout.ViewObject.Visibility = False
 
@@ -180,9 +190,9 @@ class NestingController:
         
         rot_steps = ui_params.get('rotation_steps', 1)
         ann_steps = algo_kwargs.get('anneal_steps', 25) if ui_params.get('algorithm') == 'Physics' else 0
-        FreeCAD.Console.PrintMessage(f"Algorithm Selected: {ui_params.get('algorithm', 'Unknown')}\n")
-        FreeCAD.Console.PrintMessage(f"  -> UI Rotation Steps Slider: {rot_steps}\n")
-        FreeCAD.Console.PrintMessage(f"  -> UI Anneal Steps Input: {ann_steps}\n")
+        nw_logger.info(f"Algorithm Selected: {ui_params.get('algorithm', 'Unknown')}")
+        nw_logger.info(f"  -> UI Rotation Steps Slider: {rot_steps}")
+        nw_logger.info(f"  -> UI Anneal Steps Input: {ann_steps}")
         
         algo_kwargs['cancel_callback'] = self._check_cancel
         
@@ -193,7 +203,8 @@ class NestingController:
         def progress_cb(current, total, message=None):
             try:
                 self.ui.update_progress(current, total, message)
-            except RuntimeError: pass  # Widget deleted (panel closed)
+            except RuntimeError as e:
+                nw_logger.debug(f"[NestingController] progress update skipped (panel closed): {e}")
             
         self.ui.reset_progress()
         algo_kwargs['progress_callback'] = progress_cb
@@ -206,22 +217,22 @@ class NestingController:
                                  rotation_params, algo_kwargs, is_simulating, self.viz_manager)
     
     def load_selection(self):
-        FreeCAD.Console.PrintMessage("Loading selection via Controller...\n")
+        nw_logger.info("Loading selection via Controller...")
         selection = FreeCADGui.Selection.getSelection()
         self.ui.shape_table.setRowCount(0)
 
         if not selection:
-            FreeCAD.Console.PrintMessage("  -> No selection found.\n")
+            nw_logger.info("  -> No selection found.")
             self.ui.status_label.setText("Warning: No shapes selected.")
             self.ui.nest_button.setEnabled(False)
             return
 
         first_selected = selection[0]
         if first_selected.isDerivedFrom("App::DocumentObjectGroup") and first_selected.Label.startswith("Layout_"):
-            FreeCAD.Console.PrintMessage(f"  -> Detected layout selection: {first_selected.Label}\n")
+            nw_logger.info(f"  -> Detected layout selection: {first_selected.Label}")
             self.load_layout(first_selected)
         else:
-            FreeCAD.Console.PrintMessage(f"  -> Detected {len(selection)} shapes.\n")
+            nw_logger.info(f"  -> Detected {len(selection)} shapes.")
             self.load_shapes(selection)
 
     def load_layout(self, layout_group):
@@ -278,6 +289,7 @@ class NestingController:
             PROP_GENERATIONS: self.ui.minkowski_generations_input,
             PROP_POPULATION_SIZE: self.ui.minkowski_population_size_input,
             PROP_NESTING_DIRECTION: self.ui.minkowski_direction_dial,
+            PROP_CANDIDATE_SPACING: self.ui.minkowski_candidate_spacing_input,
         }
         
         verbose = self._verbose_logging()
@@ -300,9 +312,9 @@ class NestingController:
             # see, so it goes out under verbose.
             self.ui.deflection_input.setValue(layout_group.Deflection * DEFLECTION_ANGLE_PER_MM)
             if verbose:
-                FreeCAD.Console.PrintMessage(
+                nw_logger.info(
                     f"[NestingController] Layout '{layout_group.Label}': converted legacy "
-                    f"Deflection ({layout_group.Deflection} mm) to a deflection angle\n")
+                    f"Deflection ({layout_group.Deflection} mm) to a deflection angle")
         else:
             missing.append("deflection angle (kept the panel's current value)")
 
@@ -351,7 +363,7 @@ class NestingController:
         master_shapes_group = next((c for c in layout_group.Group if c.Label.startswith("MasterShapes")), None)
         
         if not master_shapes_group:
-            FreeCAD.Console.PrintWarning(f"  WARNING: No MasterShapes group found in '{layout_group.Label}'\n")
+            nw_logger.warn(f"  WARNING: No MasterShapes group found in '{layout_group.Label}'")
             self.ui.status_label.setText("Warning: Could not find 'MasterShapes' group.")
             return [], []
 
@@ -382,27 +394,27 @@ class NestingController:
                 if not hasattr(master, PROP_QUANTITY):
                     missing_counts[PROP_QUANTITY] += 1
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_QUANTITY}, defaulted to 1\n")
+                        nw_logger.info(f"[NestingController] Part '{label}': missing {PROP_QUANTITY}, defaulted to 1")
 
                 if not hasattr(master, PROP_PART_ROTATION_OVERRIDE):
                     missing_counts[PROP_PART_ROTATION_OVERRIDE] += 1
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_PART_ROTATION_OVERRIDE}, defaulted to False\n")
+                        nw_logger.info(f"[NestingController] Part '{label}': missing {PROP_PART_ROTATION_OVERRIDE}, defaulted to False")
 
                 if not hasattr(master, PROP_PART_ROTATION_STEPS):
                     missing_counts[PROP_PART_ROTATION_STEPS] += 1
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_PART_ROTATION_STEPS}, defaulted to global\n")
+                        nw_logger.info(f"[NestingController] Part '{label}': missing {PROP_PART_ROTATION_STEPS}, defaulted to global")
 
                 if not hasattr(master, PROP_UP_DIRECTION):
                     missing_counts[PROP_UP_DIRECTION] += 1
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_UP_DIRECTION}, defaulted to Z+\n")
+                        nw_logger.info(f"[NestingController] Part '{label}': missing {PROP_UP_DIRECTION}, defaulted to Z+")
 
                 if not hasattr(master, PROP_FILL_SHEET):
                     missing_counts[PROP_FILL_SHEET] += 1
                     if verbose:
-                        FreeCAD.Console.PrintMessage(f"[NestingController] Part '{label}': missing {PROP_FILL_SHEET}, defaulted to False\n")
+                        nw_logger.info(f"[NestingController] Part '{label}': missing {PROP_FILL_SHEET}, defaulted to False")
 
                 quantities[label] = _as_int(getattr(master, PROP_QUANTITY, 1), 1)
 
@@ -510,7 +522,7 @@ class NestingController:
                         selection_counts[obj] = 1
                 
                 selection = extracted
-                FreeCAD.Console.PrintMessage(f"  -> Extracted {len(selection)} parts from selection.\n")
+                nw_logger.info(f"  -> Extracted {len(selection)} parts from selection.")
         
         self.ui.selected_shapes_to_process = list(dict.fromkeys(selection)) 
         
@@ -746,6 +758,13 @@ class NestingController:
                 )
                 payload['result_holder'][0] = job
                 coordinator.doc.recompute()
+            elif payload.get('discard_template'):
+                self._worker.coordinator.layout_manager.discard_template()
+            elif payload.get('sim_member_rows'):
+                self.viz_manager.draw_member_rows(self.doc, payload['rows'])
+                FreeCADGui.updateGui()
+            elif payload.get('clear_sim_member_rows'):
+                self.viz_manager.clear_member_rows(self.doc)
             elif payload.get('doc_recompute_only'):
                 self._worker.coordinator.doc.recompute()
         finally:
@@ -769,7 +788,7 @@ class NestingController:
 
     def _on_nesting_error(self, error_msg):
         """Main-thread handler for nesting errors."""
-        FreeCAD.Console.PrintError(f"Nesting Error: {error_msg}\n")
+        nw_logger.error(f"Nesting Error: {error_msg}")
         self.ui.status_label.setText(f"Error: {error_msg.split(chr(10))[0]}")
         self.is_running = False
         self.cancel_requested = False
@@ -820,7 +839,7 @@ class NestingController:
                         child.ViewObject.Visibility = True
             
             self.current_job = None
-            FreeCAD.Console.PrintMessage("Job Finalized & Committed.\n")
+            nw_logger.info("Job Finalized & Committed.")
             self.doc.recompute()
 
     def request_cancel(self):
@@ -830,8 +849,8 @@ class NestingController:
             try:
                 self.ui.status_label.setText("Cancelling... Please wait.")
                 self.ui.cancel_button.setEnabled(False) # Prevent double-click
-            except Exception:
-                pass  # UI widget may be destroyed if user closed panel while cancelling
+            except Exception as e:
+                nw_logger.debug(f"[NestingController] UI update on cancel skipped: {e}")
             
             # If worker is running, also unblock it from any draw wait
             if hasattr(self, '_worker') and self._worker:
@@ -862,7 +881,7 @@ class NestingController:
                         recursive_delete(self.doc, target)
                         if hasattr(self.ui, 'current_layout') and self.ui.current_layout == target:
                             self.ui.current_layout = None
-                        FreeCAD.Console.PrintMessage("Removed empty target layout.\n")
+                        nw_logger.info("Removed empty target layout.")
                     else:
                         if hasattr(target, "ViewObject"):
                             target.ViewObject.Visibility = True
@@ -876,10 +895,10 @@ class NestingController:
                         # master row belongs to the panel: leave it on screen.
                         set_master_shapes_visible(target, True)
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[NestingController] Cancel cleanup failed for child: {e}\n")
+                    nw_logger.warn(f"[NestingController] Cancel cleanup failed for child: {e}")
             
             self.current_job = None
-            FreeCAD.Console.PrintMessage("Job Cancelled.\n")
+            nw_logger.info("Job Cancelled.")
             self.doc.recompute()
     
     def on_panel_closed(self):
@@ -896,7 +915,7 @@ class NestingController:
                 self.doc.recompute()
         except Exception as e:
             # The document may already be gone when the panel is torn down
-            FreeCAD.Console.PrintWarning(f"[NestingController] Panel teardown failed: {e}\n")
+            nw_logger.warn(f"[NestingController] Panel teardown failed: {e}")
 
     def toggle_bounds_visibility(self):
         is_visible = self.ui.show_bounds_checkbox.isChecked()
@@ -943,7 +962,7 @@ class NestingController:
             try:
                 if target not in self.doc.Objects: target = None
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[NestingController] Target validation failed: {e}\n")
+                nw_logger.warn(f"[NestingController] Target validation failed: {e}")
                 target = None
             
         if not target and hasattr(self.ui, 'selected_shapes_to_process') and self.ui.selected_shapes_to_process:
@@ -982,6 +1001,7 @@ class NestingController:
             'label_size': self.ui.label_size_input.value(),
             'generations': self.ui.minkowski_generations_input.value(),
             'population_size': self.ui.minkowski_population_size_input.value(),
+            'candidate_spacing': self.ui.minkowski_candidate_spacing_input.value(),
             'compactness_weight': self.ui.minkowski_compactness_input.value(),
             'verbose': self.ui.verbose_logging_checkbox.isChecked(),
             'nesting_direction': self.ui.minkowski_direction_dial.value(),
@@ -994,7 +1014,8 @@ class NestingController:
             'anneal_rot_steps': self.ui.physics_anneal_rot_steps.value(),
             'anneal_rot_curve': self.ui.physics_anneal_rot_curve_type.currentText(),
             'anneal_rot_min': self.ui.physics_anneal_rot_min.value(),
-            'anneal_rot_max': self.ui.physics_anneal_rot_max.value()
+            'anneal_rot_max': self.ui.physics_anneal_rot_max.value(),
+            'worker_processes': self.ui.worker_processes_input.value(),
         }
         
         self.save_settings(settings_dict)
@@ -1034,6 +1055,7 @@ class NestingController:
         prefs.SetFloat("PhysicsAnnealRotMax", float(settings.get('anneal_rot_max', 90.0)))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
+        set_worker_override(settings.get('worker_processes', 0))
 
     def _collect_job_parameters(self, ui_settings):
         quantities = {}
@@ -1073,7 +1095,7 @@ class NestingController:
                 
                 rotation_params[label] = (rot_val, override)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[NestingController] Skipping row {row} in shape table: {e}\n")
+                nw_logger.warn(f"[NestingController] Skipping row {row} in shape table: {e}")
                 continue
             
         for obj in self.ui.selected_shapes_to_process:
@@ -1082,7 +1104,7 @@ class NestingController:
                  if lbl in quantities:
                      master_map[obj.Label] = obj
              except Exception as e:
-                 FreeCAD.Console.PrintWarning(f"[NestingController] Failed to map object {obj.Label if hasattr(obj, 'Label') else 'unknown'}: {e}\n")
+                 nw_logger.warn(f"[NestingController] Failed to map object {obj.Label if hasattr(obj, 'Label') else 'unknown'}: {e}")
              
         return ui_settings, quantities, master_map, rotation_params
 
@@ -1125,6 +1147,9 @@ class NestingController:
             
             algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
             algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
+            algo_kwargs['candidate_spacing'] = self.ui.minkowski_candidate_spacing_input.value()
+            algo_kwargs['worker_processes'] = ui_params.get('worker_processes', 0)
+            algo_kwargs['sim_show_all_members'] = self.ui.simulate_combo.currentIndex() == SIM_ALL
 
         algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
         algo_kwargs['spacing'] = ui_params['spacing']

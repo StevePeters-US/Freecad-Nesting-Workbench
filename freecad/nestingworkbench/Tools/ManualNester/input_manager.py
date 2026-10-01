@@ -9,7 +9,7 @@ dispatches semantic high-level actions to registered handlers. Owns all
 transient input state: mode, constraints, drag detection, free-grab flag.
 """
 
-import FreeCAD
+from freecad.nestingworkbench import nw_logger
 from PySide import QtCore
 import math
 import time
@@ -86,8 +86,8 @@ class InputManager:
         self.constraint = None
         self.constraint_lock_pos = None
         if mode in ("TRANSLATE", "ROTATE"):
-            FreeCAD.Console.PrintMessage(
-                f"Manual Nester: {mode} Mode (Release to Drop)\n"
+            nw_logger.info(
+                f"Manual Nester: {mode} Mode (Release to Drop)"
             )
 
     def set_constraint(self, axis, lock_pos=None):
@@ -95,11 +95,11 @@ class InputManager:
         if self.constraint == axis:
             self.constraint = None
             self.constraint_lock_pos = None
-            FreeCAD.Console.PrintMessage("Constraint Cleared.\n")
+            nw_logger.info("Constraint Cleared.")
         else:
             self.constraint = axis
             self.constraint_lock_pos = lock_pos
-            FreeCAD.Console.PrintMessage(f"Constraint: {axis}-Axis Locked.\n")
+            nw_logger.info(f"Constraint: {axis}-Axis Locked.")
 
     def set_free_grab(self, enabled):
         """Enable / disable free-grab (click-to-place) mode."""
@@ -171,7 +171,7 @@ class InputManager:
 
         if btn == QtCore.Qt.LeftButton:
             if self.is_mouse_down:
-                FreeCAD.Console.PrintMessage("Manual Nester: Mouse UP received.\n")
+                nw_logger.info("Manual Nester: Mouse UP received.")
                 self.is_mouse_down = False
                 self._emit("release")
             return True
@@ -212,8 +212,8 @@ class InputManager:
         # Dynamic mode switch during an active drag (Shift → ROTATE)
         target_mode = "ROTATE" if shift else "TRANSLATE"
         if self.mode != target_mode and active_drag:
-            FreeCAD.Console.PrintMessage(
-                f"Manual Nester: Mode switched to {target_mode} while dragging.\n"
+            nw_logger.info(
+                f"Manual Nester: Mode switched to {target_mode} while dragging."
             )
             self.set_mode(target_mode)
             self.drag_start_screen_pos = pos
@@ -225,8 +225,8 @@ class InputManager:
             dy = pos[1] - self.drag_start_screen_pos[1]
             if math.sqrt(dx * dx + dy * dy) > self.DRAG_THRESHOLD:
                 self.is_implicit_drag = True
-                FreeCAD.Console.PrintMessage(
-                    f"Manual Nester: Drag threshold met in {self.mode}\n"
+                nw_logger.info(
+                    f"Manual Nester: Drag threshold met in {self.mode}"
                 )
 
         if not self.is_implicit_drag and not self.is_free_grab:

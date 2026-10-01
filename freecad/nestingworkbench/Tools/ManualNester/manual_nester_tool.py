@@ -10,6 +10,7 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtCore
 import math
+from freecad.nestingworkbench import nw_logger
 from .ui_manual_nester import ManualNesterToolUI
 from .physics_engine import PhysicsEngine, RADIUS_MIN_MM, RADIUS_MAX_MM
 from .collision_resolver import CollisionResolver
@@ -274,7 +275,7 @@ class ManualNesterToolObserver:
             self.layout_group = self._discover_or_create_layout()
 
         if not self.layout_group:
-            FreeCAD.Console.PrintWarning("Manual Nester: Could not find or create a Layout group.\n")
+            nw_logger.warn("Manual Nester: Could not find or create a Layout group.")
             return
 
         self.master_group = self._get_or_create_master_group()
@@ -293,7 +294,7 @@ class ManualNesterToolObserver:
         # Activate input handling
         if self.layout_group:
             self.input.activate()
-            FreeCAD.Console.PrintMessage(f"Manual Nester Activated on {self.layout_group.Label}. Drag parts to move/nest.\n")
+            nw_logger.info(f"Manual Nester Activated on {self.layout_group.Label}. Drag parts to move/nest.")
 
     def _sync_mode_from_ui(self, ui):
         """Read the active radio button and set physics_enabled / auto_rotate_enabled."""
@@ -394,7 +395,7 @@ class ManualNesterToolObserver:
         """On mouse down: Select object and start interaction."""
 
         clicked_obj = self.pick_object(pos)
-        FreeCAD.Console.PrintMessage(f"Manual Nester: Picked {clicked_obj.Label if clicked_obj else 'None'}\n")
+        nw_logger.info(f"Manual Nester: Picked {clicked_obj.Label if clicked_obj else 'None'}")
 
         # Check if we clicked on a Master Shape
         is_master = False
@@ -420,12 +421,12 @@ class ManualNesterToolObserver:
                 self._drag_origin_placement = self.selected_obj.Placement.copy()
                 self.input.set_mode("TRANSLATE")
                 self.input.is_implicit_drag = True
-                FreeCAD.Console.PrintMessage(f"Manual Nester: Created clone {clicked_obj.Label}. Release to place.\n")
+                nw_logger.info(f"Manual Nester: Created clone {clicked_obj.Label}. Release to place.")
             return
 
         if clicked_obj:
             self.selected_obj = clicked_obj
-            FreeCAD.Console.PrintMessage(f"Manual Nester: Starting interaction with {clicked_obj.Label}\n")
+            nw_logger.info(f"Manual Nester: Starting interaction with {clicked_obj.Label}")
 
             # Prepare for potential drag
             self.start_pos = self.view.getPoint(pos[0], pos[1]) # 3D point
@@ -539,7 +540,7 @@ class ManualNesterToolObserver:
         # Hold-and-drag release: place the part
         if self.input.is_implicit_drag:
             if self.selected_obj:
-                FreeCAD.Console.PrintMessage(f"Manual Nester: Ending drag, attempting to place {self.selected_obj.Label}...\n")
+                nw_logger.info(f"Manual Nester: Ending drag, attempting to place {self.selected_obj.Label}...")
                 target_sheet_group = self._find_sheet_at_pos(self.selected_obj.Placement.Base)
                 if target_sheet_group:
                     shapes_group = next((c for c in target_sheet_group.Group if c.Label.startswith("Shapes_")), None)
@@ -555,16 +556,16 @@ class ManualNesterToolObserver:
                         # Update obj_to_sheet mapping immediately
                         self.obj_to_sheet[self.selected_obj] = target_sheet_group
                         if old_sheet and old_sheet != target_sheet_group:
-                            FreeCAD.Console.PrintMessage(
+                            nw_logger.info(
                                 f"Manual Nester: Moved {self.selected_obj.Label} "
-                                f"from {old_sheet.Label} to {target_sheet_group.Label}.\n"
+                                f"from {old_sheet.Label} to {target_sheet_group.Label}."
                             )
                         else:
-                            FreeCAD.Console.PrintMessage("Manual Nester: Deferred drop onto sheet.\n")
+                            nw_logger.info("Manual Nester: Deferred drop onto sheet.")
                 else:
                     if self.selected_obj in self.new_objects:
                         QtCore.QTimer.singleShot(0, lambda o=self.selected_obj.Name: self._deferred_revert_single_object(o))
-                        FreeCAD.Console.PrintMessage("Dropped outside sheet: clone implicitly scheduled for removal.\n")
+                        nw_logger.info("Dropped outside sheet: clone implicitly scheduled for removal.")
 
         # Defer finish_operation to avoid modifying Coin3D scene graph
         # (radius indicator removal) inside its own event callback.
@@ -632,7 +633,7 @@ class ManualNesterToolObserver:
                             old_grp.removeObject(obj)
                     target_grp.addObject(obj)
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred sheet move failed: {e}\n")
+            nw_logger.warn(f"[ManualNesterTool] Deferred sheet move failed: {e}")
 
     def _deferred_revert_single_object(self, obj_name):
         try:
@@ -646,7 +647,7 @@ class ManualNesterToolObserver:
                         self.new_objects.remove(obj)
                     doc.removeObject(obj_name)
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Deferred revert failed: {e}\n")
+            nw_logger.warn(f"[ManualNesterTool] Deferred revert failed: {e}")
 
     # Physics
 
@@ -662,17 +663,19 @@ class ManualNesterToolObserver:
         prev_sheet = self._drag_active_sheet
         if clamp_sheet:
             if clamp_sheet != prev_sheet:
-                FreeCAD.Console.PrintMessage(
+                nw_logger.debug_throttled(
+                    "clamp_cursor",
                     f"[Clamp] Cursor over {clamp_sheet.Label} "
-                    f"(cursor=({cursor_world_pos.x:.0f},{cursor_world_pos.y:.0f}))\n"
+                    f"(cursor=({cursor_world_pos.x:.0f},{cursor_world_pos.y:.0f}))"
                 )
             self._drag_active_sheet = clamp_sheet
         else:
             clamp_sheet = self._drag_active_sheet or self.obj_to_sheet.get(self.selected_obj)
             if not prev_sheet:
-                FreeCAD.Console.PrintMessage(
+                nw_logger.debug_throttled(
+                    "clamp_gap",
                     f"[Clamp] Cursor in gap, fallback={clamp_sheet.Label if clamp_sheet else 'None'} "
-                    f"(cursor=({cursor_world_pos.x:.0f},{cursor_world_pos.y:.0f}))\n"
+                    f"(cursor=({cursor_world_pos.x:.0f},{cursor_world_pos.y:.0f}))"
                 )
         if not clamp_sheet:
             return
@@ -846,7 +849,7 @@ class ManualNesterToolObserver:
                 result = self._pending_physics_future.result()
                 self._apply_physics_result(result)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[Physics] Worker error: {e}\n")
+                nw_logger.warn(f"[Physics] Worker error: {e}")
             self._pending_physics_future = None
 
         # Measure drag delta (FreeCAD API — main thread only).
@@ -873,14 +876,16 @@ class ManualNesterToolObserver:
         if not sheet_parts:
             if getattr(self, '_physics_logged_empty_sheet', None) != dragged_sheet:
                 self._physics_logged_empty_sheet = dragged_sheet
-                FreeCAD.Console.PrintMessage(
-                    f"[Physics] No peers on sheet '{sheet_label}' — nothing to push.\n"
+                nw_logger.debug_throttled(
+                    "physics_tick_empty",
+                    f"[Physics] No peers on sheet '{sheet_label}' — nothing to push."
                 )
         elif getattr(self, '_physics_logged_active_sheet', None) != dragged_sheet:
             self._physics_logged_active_sheet = dragged_sheet
-            FreeCAD.Console.PrintMessage(
+            nw_logger.debug_throttled(
+                "physics_tick_active",
                 f"[Physics] Active sheet '{sheet_label}' — {len(sheet_parts)} peers, "
-                f"drag_len={drag_delta.Length:.1f}mm, radius={self.physics_engine.radius:.0f}mm.\n"
+                f"drag_len={drag_delta.Length:.1f}mm, radius={self.physics_engine.radius:.0f}mm."
             )
         self.collision_resolver.prime_cache(sheet_parts)
 
@@ -962,16 +967,18 @@ class ManualNesterToolObserver:
         if result['displaced_keys']:
             if getattr(self, '_physics_logged_result_sheet', None) != active_sheet:
                 self._physics_logged_result_sheet = active_sheet
-                FreeCAD.Console.PrintMessage(
+                nw_logger.debug_throttled(
+                    "physics_result_displace",
                     f"[Physics] Displacing part(s) on sheet "
-                    f"'{active_sheet.Label if active_sheet else 'None'}'. valid={valid}\n"
+                    f"'{active_sheet.Label if active_sheet else 'None'}'. valid={valid}"
                 )
         elif result.get('peers_in_range', 0) == 0 and result.get('total_peers', 0) > 0:
             if getattr(self, '_physics_logged_norange_sheet', None) != active_sheet:
                 self._physics_logged_norange_sheet = active_sheet
-                FreeCAD.Console.PrintMessage(
+                nw_logger.debug_throttled(
+                    "physics_result_norange",
                     f"[Physics] {result['total_peers']} peer(s) on sheet "
-                    f"'{active_sheet.Label if active_sheet else 'None'}' but all outside radius.\n"
+                    f"'{active_sheet.Label if active_sheet else 'None'}' but all outside radius."
                 )
 
         self._set_part_highlight(self.selected_obj, not valid)
@@ -1003,7 +1010,7 @@ class ManualNesterToolObserver:
                 self._coin_disp_starts[key] = (b.x, b.y)
             self._coin_disp_nodes[key] = (trans, obj)
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[Coin3D] inject failed for {obj.Label}: {e}\n")
+            nw_logger.warn(f"[Coin3D] inject failed for {obj.Label}: {e}")
 
     def _sync_coin_disp(self, obj):
         """Update obj's SoTranslation from its current cache position."""
@@ -1022,8 +1029,8 @@ class ManualNesterToolObserver:
         for key, (trans, obj) in list(self._coin_disp_nodes.items()):
             try:
                 obj.ViewObject.RootNode.removeChild(trans)
-            except Exception:
-                pass  # Coin3D RootNode or trans node already removed or torn down
+            except Exception as e:
+                nw_logger.debug(f"[Coin3D] removeChild failed during detach for {getattr(obj, 'Label', 'unknown')}: {e}")
         self._coin_disp_nodes.clear()
         self._coin_disp_starts.clear()
 
@@ -1038,7 +1045,7 @@ class ManualNesterToolObserver:
                     pl.Base = FreeCAD.Vector(cached[0], cached[1], pl.Base.z)
                     obj.Placement = pl
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[Coin3D] commit failed for {obj.Label}: {e}\n")
+                    nw_logger.warn(f"[Coin3D] commit failed for {obj.Label}: {e}")
         self._detach_all_coin_disp_nodes()
 
     def _set_part_highlight(self, obj, invalid):
@@ -1049,18 +1056,18 @@ class ManualNesterToolObserver:
             if self._dragged_original_color is None:
                 try:
                     self._dragged_original_color = obj.ViewObject.ShapeColor
-                except Exception:
-                    pass  # ViewObject deleted or ShapeColor unavailable
+                except Exception as e:
+                    nw_logger.debug(f"[ManualNesterTool] ShapeColor read skipped: {e}")
             try:
                 obj.ViewObject.ShapeColor = (1.0, 0.0, 0.0)
-            except Exception:
-                pass  # ViewObject deleted during drag
+            except Exception as e:
+                nw_logger.debug(f"[ManualNesterTool] ShapeColor set highlight skipped: {e}")
         else:
             if self._dragged_original_color is not None:
                 try:
                     obj.ViewObject.ShapeColor = self._dragged_original_color
-                except Exception:
-                    pass  # ViewObject deleted during drag
+                except Exception as e:
+                    nw_logger.debug(f"[ManualNesterTool] ShapeColor restore skipped: {e}")
                 self._dragged_original_color = None
 
     def _get_shape_bbox(self, obj, parent_placement=None):
@@ -1099,7 +1106,7 @@ class ManualNesterToolObserver:
             return self._transform_bbox(bb, current_placement)
 
         if obj.Name not in self.warned_missing_bounds:
-            FreeCAD.Console.PrintWarning(f"Manual Nester: Part '{obj.Label}' has no bounds (BoundaryObject or Shape) and will not participate in collisions.\n")
+            nw_logger.warn(f"Manual Nester: Part '{obj.Label}' has no bounds (BoundaryObject or Shape) and will not participate in collisions.")
             self.warned_missing_bounds.add(obj.Name)
 
         return None
@@ -1170,11 +1177,11 @@ class ManualNesterToolObserver:
                  try:
                      self.selected_obj.Placement = self.start_placement
                  except Exception as e:
-                     FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to revert selection: {e}\n")
+                     nw_logger.warn(f"[ManualNesterTool] Failed to revert selection: {e}")
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Cancel selection revert failed: {e}\n")
+            nw_logger.warn(f"[ManualNesterTool] Cancel selection revert failed: {e}")
 
-        FreeCAD.Console.PrintMessage("Operation Cancelled.\n")
+        nw_logger.info("Operation Cancelled.")
 
         # Revert physics-displaced parts.
         # obj.Placement was never written during Coin3D drag, so visual revert is
@@ -1228,12 +1235,12 @@ class ManualNesterToolObserver:
         self.collision_resolver.clear_cache()
         try:
             self._hide_radius_indicator()
-        except Exception:
-            pass  # Radius indicator scene graph node already detached or view closed
+        except Exception as e:
+            nw_logger.debug(f"[ManualNesterTool] hide radius indicator skipped: {e}")
         try:
             FreeCADGui.Selection.clearSelection() # Clear visual highlight
         except Exception as e:
-            FreeCAD.Console.PrintLog(f"[ManualNesterTool] Selection clear failed: {e}\n")
+            nw_logger.log(f"[ManualNesterTool] Selection clear failed: {e}")
 
     # Object picking
 
@@ -1264,7 +1271,7 @@ class ManualNesterToolObserver:
 
              draggable = self.get_draggable_parent(clicked_obj, parent_obj_from_click)
              if draggable:
-                 FreeCAD.Console.PrintMessage(f"Manual Nester: Resolved draggable -> {draggable.Label}\n")
+                 nw_logger.info(f"Manual Nester: Resolved draggable -> {draggable.Label}")
              return draggable
         return None
 
@@ -1330,11 +1337,11 @@ class ManualNesterToolObserver:
             return
 
         self._remove_empty_sheets()
-        FreeCAD.Console.PrintMessage(f"Manual Nester: Saved new placements for objects.\n")
+        nw_logger.info("Manual Nester: Saved new placements for objects.")
         # If sheets were stacked, this move breaks the "stacked" state
         if hasattr(self.layout_group, 'IsStacked') and self.layout_group.IsStacked:
             self.layout_group.IsStacked = False
-            FreeCAD.Console.PrintWarning("Layout is no longer considered stacked due to manual adjustment.\n")
+            nw_logger.warn("Layout is no longer considered stacked due to manual adjustment.")
 
     def cancel(self):
         """Reverts any changes made to the object placements and removes new objects."""
@@ -1347,7 +1354,7 @@ class ManualNesterToolObserver:
                     if obj and obj.Name and obj in self.layout_group.Document.Objects:
                         obj.Placement = placement
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Placement revert failed (object might be deleted): {e}\n")
+                    nw_logger.warn(f"[ManualNesterTool] Placement revert failed (object might be deleted): {e}")
 
         # Remove new objects and track deleted names to purge from tracking dicts
         deleted_names = set()
@@ -1361,11 +1368,11 @@ class ManualNesterToolObserver:
 
                 self.layout_group.Document.removeObject(obj.Name)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"[ManualNesterTool] Failed to remove new object: {e}\n")
+                nw_logger.warn(f"[ManualNesterTool] Failed to remove new object: {e}")
 
         self.new_objects = []
 
-        FreeCAD.Console.PrintMessage("Manual Nester: Transformations cancelled and new items removed.\n")
+        nw_logger.info("Manual Nester: Transformations cancelled and new items removed.")
 
     def cleanup(self):
         """Removes the event callbacks from the view and restores original visibilities."""
@@ -1389,8 +1396,8 @@ class ManualNesterToolObserver:
                         if boundary and hasattr(boundary, "ViewObject"):
                             if hasattr(boundary.ViewObject, "Selectable"):
                                 boundary.ViewObject.Selectable = True
-                except Exception:
-                    pass  # Sheet group or boundary object deleted during cleanup
+                except Exception as e:
+                    nw_logger.debug(f"[ManualNesterTool] sheet group cleanup error: {e}")
 
         # Restore original visibilities — wrapped in try/except per object
         # because cancel() may have already deleted some objects
@@ -1399,8 +1406,8 @@ class ManualNesterToolObserver:
                 if not isinstance(obj, str) and hasattr(obj, "Name") and obj.Name:
                     if hasattr(obj, "ViewObject") and obj.ViewObject:
                         obj.ViewObject.Visibility = is_visible
-            except Exception:
-                pass  # Object was already deleted at C++ level
+            except Exception as e:
+                nw_logger.debug(f"[ManualNesterTool] restore visibility skipped: {e}")
         self.original_visibilities = {}
 
         FreeCADGui.updateGui()
@@ -1438,7 +1445,7 @@ class ManualNesterToolObserver:
             for sub in reversed(sheet_group.Group):
                 doc.removeObject(sub.Name)
             doc.removeObject(sheet_group.Name)
-            FreeCAD.Console.PrintMessage(f"Manual Nester: Removed empty sheet '{label}'.\n")
+            nw_logger.info(f"Manual Nester: Removed empty sheet '{label}'.")
 
     def _add_drop_zone_sheet(self):
         """Adds a fresh drop-zone sheet to the layout."""
@@ -1554,8 +1561,8 @@ class ManualNesterToolObserver:
                 if scene.findChild(self.radius_indicator) < 0:
                     # Node exists but was orphaned (e.g., scene graph rebuilt by FreeCAD).
                     scene.addChild(self.radius_indicator)
-            except Exception:
-                pass  # Scene graph node query/addition error on torn down scene
+            except Exception as e:
+                nw_logger.debug(f"[ManualNesterTool] radius indicator addition skipped: {e}")
 
         # Update position
         self.indicator_trans.translation.setValue(center.x, center.y, center.z + 0.1) # Slightly above XY
@@ -1575,8 +1582,8 @@ class ManualNesterToolObserver:
         if self.radius_indicator and self.view:
             try:
                 self.view.getSceneGraph().removeChild(self.radius_indicator)
-            except Exception:
-                pass  # Scene graph may already be torn down
+            except Exception as e:
+                nw_logger.debug(f"[ManualNesterTool] radius indicator removal skipped: {e}")
             self.radius_indicator = None
 
     # Master shape cloning

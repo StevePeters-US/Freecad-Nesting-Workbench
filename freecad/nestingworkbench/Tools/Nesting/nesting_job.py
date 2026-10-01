@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 import FreeCAD
 from ...freecad_helpers import recursive_delete
-from ...constants import *
+from ...constants import (
+    PROP_ADD_LABELS, PROP_ALGORITHM, PROP_BOOL, PROP_CANDIDATE_SPACING, PROP_DEFLECTION_ANGLE, PROP_FILE, PROP_FLOAT,
+    PROP_FONT_FILE, PROP_GENERATIONS, PROP_GLOBAL_ROTATION_STEPS, PROP_INTEGER, PROP_LABEL_HEIGHT, PROP_LABEL_SIZE,
+    PROP_LENGTH, PROP_NESTING_DIRECTION, PROP_PART_SPACING, PROP_POPULATION_SIZE, PROP_SHEET_HEIGHT,
+    PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH, PROP_SHOW_BOUNDS, PROP_SIMPLIFICATION, PROP_STRING,
+)
+from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
 
 class NestingJob:
     """
@@ -106,6 +112,8 @@ class NestingJob:
         self._set_prop(target_layout, PROP_INTEGER, PROP_GLOBAL_ROTATION_STEPS, p['rotation_steps'])
         self._set_prop(target_layout, PROP_INTEGER, PROP_GENERATIONS, p.get('generations', 1))
         self._set_prop(target_layout, PROP_INTEGER, PROP_POPULATION_SIZE, p.get('population_size', 1))
+        self._set_prop(target_layout, PROP_FLOAT, PROP_CANDIDATE_SPACING,
+                       p.get('candidate_spacing', DEFAULT_CANDIDATE_SPACING))
         self._set_prop(target_layout, PROP_STRING, PROP_ALGORITHM,
                        str(p.get('algorithm', 'Minkowski')))
 

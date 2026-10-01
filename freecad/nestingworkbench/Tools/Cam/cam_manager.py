@@ -7,7 +7,8 @@ and managing CAM jobs from the nested layouts.
 """
 
 import FreeCAD
-from ...constants import *
+from freecad.nestingworkbench import nw_logger
+from ...constants import PROP_SHEET_HEIGHT, PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH
 from ...freecad_helpers import get_nested_containers
 
 FALLBACK_SHEET_WIDTH_MM = 600.0   # used only when the layout group has no SheetWidth property
@@ -32,7 +33,7 @@ class CAMManager:
             post_processor: Optional post processor to use (default: "grbl")
         """
         if not self.layout_group:
-             FreeCAD.Console.PrintError("No layout group provided.\n")
+             nw_logger.error("No layout group provided.")
              return
 
         # Iterate over the layout group to find sheet groups directly
@@ -56,8 +57,8 @@ class CAMManager:
         try:
             from Path.Main import Stock as PathStock
         except ImportError as e:
-            FreeCAD.Console.PrintError(f"Failed to import CAM modules. Error: {e}\n")
-            FreeCAD.Console.PrintError("Please ensure the CAM workbench is installed and enabled in FreeCAD 1.1+.\n")
+            nw_logger.error(f"Failed to import CAM modules. Error: {e}")
+            nw_logger.error("Please ensure the CAM workbench is installed and enabled in FreeCAD 1.1+.")
             return
         
         # Layout dimensions live on the layout group's properties.
@@ -127,14 +128,14 @@ class CAMManager:
                         outlines_shapes.append(transformed_shape)
         
         if thickness_mismatches:
-            FreeCAD.Console.PrintWarning(
+            nw_logger.warn(
                 f"{sheet_group.Label}: {len(thickness_mismatches)} part(s) do not match the "
                 f"{sheet_thickness}mm sheet thickness (e.g. {thickness_mismatches[0]}); "
-                f"the CAM model will not line up with the stock height.\n"
+                f"the CAM model will not line up with the stock height."
             )
 
         if not (parts_shapes or labels_shapes or outlines_shapes):
-            FreeCAD.Console.PrintWarning(f"No objects selected for CAM in {sheet_group.Label}. Skipping.\n")
+            nw_logger.warn(f"No objects selected for CAM in {sheet_group.Label}. Skipping.")
             return
         
         # Build status message
@@ -145,7 +146,7 @@ class CAMManager:
             counts.append(f"{len(labels_shapes)} labels")
         if outlines_shapes:
             counts.append(f"{len(outlines_shapes)} outlines")
-        FreeCAD.Console.PrintMessage(f"Creating CAM job with {', '.join(counts)}...\n")
+        nw_logger.info(f"Creating CAM job with {', '.join(counts)}...")
         
         # Create compound objects for CAM (one per type)
         # This minimizes the number of base objects
@@ -214,7 +215,7 @@ class CAMManager:
                         job.PostProcessor = post_processor
                         job.PostProcessorOutputFile = ""  # Will use default naming
                     except Exception as e:
-                        FreeCAD.Console.PrintWarning(f"Could not set post processor '{post_processor}': {e}\n")
+                        nw_logger.warn(f"Could not set post processor '{post_processor}': {e}")
                 
                 # Organize the base objects into a group to clean up the tree
                 try:
@@ -247,17 +248,17 @@ class CAMManager:
                         cam_group.ViewObject.Visibility = True
                         
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"Could not group CAM geometry: {e}\n")
+                    nw_logger.warn(f"Could not group CAM geometry: {e}")
 
                 # Recompute to finalize the job
                 self.doc.recompute()
                 
-                FreeCAD.Console.PrintMessage(f"Created CAM job '{job.Label}' for {sheet_group.Label} (stock: {sheet_width}x{sheet_height}x{sheet_thickness}mm)\n")
+                nw_logger.info(f"Created CAM job '{job.Label}' for {sheet_group.Label} (stock: {sheet_width}x{sheet_height}x{sheet_thickness}mm)")
             else:
-                FreeCAD.Console.PrintError("Failed to create CAM job.\n")
+                nw_logger.error("Failed to create CAM job.")
                 
         except Exception as e:
-            FreeCAD.Console.PrintError(f"Error creating CAM job: {e}\n")
+            nw_logger.error(f"Error creating CAM job: {e}")
             import traceback
             traceback.print_exc()
 

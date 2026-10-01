@@ -13,6 +13,7 @@ Supports:
 import FreeCAD
 import FreeCADGui
 import os
+from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
 
 
@@ -31,13 +32,13 @@ class CreateSilhouetteCommand:
         """Executed when the command is activated."""
         doc = FreeCAD.ActiveDocument
         if not doc:
-            FreeCAD.Console.PrintError("No active document\n")
+            nw_logger.error("No active document")
             return
         
         # Get selected objects
         sel = FreeCADGui.Selection.getSelection()
         if not sel:
-            FreeCAD.Console.PrintWarning("Please select objects, nested containers, or a Layout group.\n")
+            nw_logger.warn("Please select objects, nested containers, or a Layout group.")
             return
         
         # Import the silhouette creator functions
@@ -55,31 +56,31 @@ class CreateSilhouetteCommand:
         for obj in sel:
             # Check if this is a Layout group
             if is_layout_group(obj):
-                FreeCAD.Console.PrintMessage(f"Processing Layout: {obj.Label}\n")
+                nw_logger.info(f"Processing Layout: {obj.Label}")
                 silhouettes = create_silhouettes_for_layout(doc, obj)
                 created_count += len(silhouettes) if silhouettes else 0
                 
             # Check if this is a nested container (App::Part like nested_Side_1)
             elif is_nested_container(obj):
-                FreeCAD.Console.PrintMessage(f"Processing container: {obj.Label}\n")
+                nw_logger.info(f"Processing container: {obj.Label}")
                 silhouette = create_silhouette_for_container(doc, obj)
                 if silhouette:
                     created_count += 1
                     
             # Try as a direct part
             elif hasattr(obj, "Shape") and not obj.Shape.isNull():
-                FreeCAD.Console.PrintMessage(f"Processing part: {obj.Label}\n")
+                nw_logger.info(f"Processing part: {obj.Label}")
                 silhouette = create_silhouette_for_part(doc, obj)
                 if silhouette:
                     created_count += 1
             else:
-                FreeCAD.Console.PrintWarning(f"Skipping '{obj.Label}': Not a valid shape\n")
+                nw_logger.warn(f"Skipping '{obj.Label}': Not a valid shape")
         
         if created_count > 0:
             doc.recompute()
-            FreeCAD.Console.PrintMessage(f"Created {created_count} silhouette(s)\n")
+            nw_logger.info(f"Created {created_count} silhouette(s)")
         else:
-            FreeCAD.Console.PrintWarning("No silhouettes created. Check selection.\n")
+            nw_logger.warn("No silhouettes created. Check selection.")
     
     def IsActive(self):
         """Command is active when a document is open and objects are selected."""

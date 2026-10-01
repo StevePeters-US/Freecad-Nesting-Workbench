@@ -23,13 +23,9 @@ try:
 except ImportError:
     SHAPELY_AVAILABLE = False
 
-try:
-    import Draft
-except ImportError:
-    Draft = None
-
-from .label_object import create_label_object
+from .label_object import build_label_shape, create_label_object
 from ..freecad_helpers import calculate_label_placement, create_part_feature, recursive_delete
+from freecad.nestingworkbench import nw_logger
 
 class Sheet:
     """
@@ -141,8 +137,8 @@ class Sheet:
                 for child in list(sheet_group.Group):
                     try:
                         recursive_delete(doc, child)
-                    except Exception:
-                        pass  # Child object may already be deleted during recursive cleanup
+                    except Exception as e:
+                        nw_logger.debug(f"[Sheet] recursive_delete skipped during child cleanup: {e}")
 
             shapes_group_name = f"Shapes_{self.id+1}"
             
@@ -245,41 +241,39 @@ class Sheet:
                 if boundary_obj:
                     parts_to_place_group.removeObject(boundary_obj)
                 parts_to_place_group.removeObject(shape_obj)
-            except Exception:
-                pass  # Objects may not be members of parts_to_place_group
+            except Exception as e:
+                nw_logger.debug(f"[Sheet] parts_to_place_group removeObject skipped: {e}")
 
         # Apply the final nesting placement to the CONTAINER.
         container.Placement = final_placement
 
-        # Debug: Log positions to diagnose bounds-to-shape offset
-        shape_bb = shape_obj.Shape.BoundBox
-        shape_visual_center = FreeCAD.Vector(
-            shape_obj.Placement.Base.x + (shape_bb.XMin + shape_bb.XMax) / 2,
-            shape_obj.Placement.Base.y + (shape_bb.YMin + shape_bb.YMax) / 2,
-            0
-        )
-        bound_center_str = "N/A"
-        if boundary_obj:
-            bbb = boundary_obj.Shape.BoundBox
-            bound_center_str = f"({(bbb.XMin + bbb.XMax)/2:.2f}, {(bbb.YMin + bbb.YMax)/2:.2f})"
-
         if verbose:
-            FreeCAD.Console.PrintMessage(
+            # Positions, to diagnose a bounds-to-shape offset
+            shape_bb = shape_obj.Shape.BoundBox
+            shape_visual_center = FreeCAD.Vector(
+                shape_obj.Placement.Base.x + (shape_bb.XMin + shape_bb.XMax) / 2,
+                shape_obj.Placement.Base.y + (shape_bb.YMin + shape_bb.YMax) / 2,
+                0
+            )
+            bound_center_str = "N/A"
+            if boundary_obj:
+                bbb = boundary_obj.Shape.BoundBox
+                bound_center_str = f"({(bbb.XMin + bbb.XMax)/2:.2f}, {(bbb.YMin + bbb.YMax)/2:.2f})"
+            nw_logger.info(
                 f"  DRAW {shape.id}: shape_visual=({shape_visual_center.x:.2f}, {shape_visual_center.y:.2f})"
                 f" bounds_center={bound_center_str}"
                 f" shape_plc=({shape_obj.Placement.Base.x:.2f}, {shape_obj.Placement.Base.y:.2f})"
-                f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})\n"
+                f" container_plc=({final_placement.Base.x:.2f}, {final_placement.Base.y:.2f})"
             )
 
-        if ui_params.get('add_labels', False) and Draft and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
+        if ui_params.get('add_labels', False) and ui_params.get('font_path') and hasattr(shape, 'label_text') and shape.label_text:
             label_name = f"label_{shape.id}"
             # Allow FreeCAD to auto-rename if collision exists (e.g. label_Part001)
             # Do NOT delete existing objects by name as they might belong to other layouts.
             label_obj = create_label_object(label_name)
 
-            shapestring_geom = Draft.make_shapestring(String=shape.label_text, FontFile=ui_params['font_path'], Size=ui_params.get('label_size', 10.0))
-            label_obj.Shape = shapestring_geom.Shape
-            doc.removeObject(shapestring_geom.Name)
+            label_obj.Shape = build_label_shape(
+                shape.label_text, ui_params['font_path'], ui_params.get('label_size', 10.0))
 
             # Add label to the CONTAINER (same scope as part)
             container.addObject(label_obj)

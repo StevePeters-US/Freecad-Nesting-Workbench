@@ -1,3 +1,5 @@
+# Ships with the public addon, so it names generic build cruft only.
+
 # Python bytecode
 *.py[cod]
 __pycache__/
@@ -6,28 +8,15 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
-.tox/
-.coverage
-htmlcov/
 
-# Virtual environments
+# Virtual environments (there is no project venv; never commit one)
 .venv/
 venv/
-env/
 
-# FreeCAD backups and scratch files
+# FreeCAD backups
 *.FCStd1
 *.FCBak
-*.blend1
 
 # Editor / OS cruft
 .DS_Store
-Thumbs.db
 *.swp
-*~
-.vscode/
-.idea/
-
-# Merge / patch leftovers
-*.orig
-*.rej

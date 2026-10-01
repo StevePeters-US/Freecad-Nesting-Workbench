@@ -40,6 +40,7 @@ class NestingWorkbench(FreeCADGui.Workbench):
         from freecad.nestingworkbench.commands import command_create_cam_job
         from freecad.nestingworkbench.commands import command_create_silhouette
         from freecad.nestingworkbench.commands import command_about
+        from freecad.nestingworkbench.commands import command_settings
         # Create Menu (Dropdown)
         self.appendMenu(["Nesting"], [
             'Nesting_Run',
@@ -49,6 +50,7 @@ class NestingWorkbench(FreeCADGui.Workbench):
             'Nesting_CreateCAMJob',
             'Nesting_CreateSilhouette',
             'Separator',
+            'Nesting_Settings',
             'Nesting_About'
         ])
         self.appendToolbar("Nesting", [

@@ -6,9 +6,9 @@ import random
 from shapely.geometry import Polygon
 from shapely.affinity import translate, rotate
 from shapely.ops import unary_union
-import FreeCAD
 from ....datatypes.sheet import Sheet
 from ....datatypes.placed_part import PlacedPart
+from .... import nw_logger
 
 class BaseNester(object):
     """
@@ -46,7 +46,7 @@ class BaseNester(object):
         self._bin_boundary = self._bin_polygon.exterior
 
     def log(self, message):
-        FreeCAD.Console.PrintMessage(f"NESTING: {message}\n")
+        nw_logger.info(f"NESTING: {message}")
 
     def nest(self, parts, sort=True):
         """

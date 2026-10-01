@@ -1,2 +1,16 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Normalize text to LF on commit and check out LF everywhere, Windows included:
+# Python, FreeCAD and the editors used are all LF-safe, and a CRLF .sh breaks bash.
+* text=auto eol=lf
+
+# Batch files are the exception: cmd.exe can misparse labels (call :probe) in LF files.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Never normalize these.
+*.png binary
+*.jpg binary
+*.ttf binary
+*.otf binary
+*.npy binary
+*.npz binary
+*.FCStd binary

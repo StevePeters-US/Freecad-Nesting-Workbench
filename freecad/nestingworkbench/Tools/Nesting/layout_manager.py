@@ -11,13 +11,13 @@ This class is responsible for:
 Separates layout management from the nesting algorithm for cleaner architecture.
 """
 
-import FreeCAD
 import copy
 import random
 import math
 from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
 from ...freecad_helpers import recursive_delete
+from freecad.nestingworkbench import nw_logger
 from .algorithms.genetic_utils import (
     largest_open_area,
     compute_layout_fitness,
@@ -25,7 +25,7 @@ from .algorithms.genetic_utils import (
     SHAPELY_AVAILABLE,
 )
 
-set_warning_logger(lambda m: FreeCAD.Console.PrintWarning(m + "\n"))
+set_warning_logger(nw_logger.warn)
 
 
 class Layout:
@@ -37,7 +37,7 @@ class Layout:
         genes: List of (part_id, angle) tuples representing the ordering and rotation
                of parts. Can be used to recreate the exact same layout.
     """
-    def __init__(self, layout_group, parts_group, parts, master_shapes_group=None):
+    def __init__(self, layout_group, parts_group, parts, master_shapes_group=None, label=None):
         self.layout_group = layout_group  # The Layout_xxx group object
         self.parts_group = parts_group    # The PartsToPlace group
         self.parts = parts                # List of Shape objects for nesting
@@ -47,10 +47,13 @@ class Layout:
         self.efficiency = 0.0
         self.genes = []                   # (part_id, angle) tuples - the "DNA" of this layout
         self.direction = None             # (dx, dy) unit vector; None = use global search_direction
+        self.label = label                # name when the layout owns no document group
     
     @property
     def name(self):
-        return self.layout_group.Label if self.layout_group else "unknown"
+        if self.layout_group:
+            return self.layout_group.Label
+        return self.label or "unknown"
 
 class LayoutManager:
     """
@@ -63,11 +66,46 @@ class LayoutManager:
         self.processed_shape_cache = processed_shape_cache or {}
         self._layout_counter = 0
         self.rng = rng or random
-    
+        self._template = None
+
+    def _ensure_template(self, master_shapes_map, quantities, ui_params):
+        """Builds the run's one set of document objects on first call, and returns it.
+
+        Every population member nests the same parts; only order, rotation and
+        search direction differ, and those live on the Shape objects. So the
+        master shapes, part instances and boundaries are created once, here, and
+        every member shares them (create_layout). Before this, each member built
+        and deleted its own ~190 objects, which took about 95% of a GA run's
+        main-thread time.
+
+        The winner takes over the groups (adopt_template); a run without a
+        winner deletes them (discard_template). Main thread only: it creates
+        document objects. One LayoutManager serves one run, so later calls pass
+        the same inputs and get the cached template back.
+        """
+        if self._template is not None:
+            return self._template
+        layout_group = self.doc.addObject("App::DocumentObjectGroup", "Layout_GA")
+        layout_group.Label = "Layout_GA"
+        if getattr(layout_group, "ViewObject", None) is not None:
+            layout_group.ViewObject.Visibility = True
+        parts_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
+        layout_group.addObject(parts_group)
+        preparer = ShapePreparer(self.doc, self.processed_shape_cache)
+        parts = preparer.prepare_parts(
+            ui_params, quantities, master_shapes_map, layout_group, parts_group)
+        master_shapes_group = None
+        for child in layout_group.Group:
+            if child.Label == "MasterShapes":
+                master_shapes_group = child
+                break
+        self._template = Layout(layout_group, parts_group, parts, master_shapes_group,
+                                label="Layout_GA")
+        return self._template
+
     def create_layout(self, name, master_shapes_map, quantities, ui_params, 
                       chromosome_ordering=None, member_idx: int = 0) -> Layout:
-        """
-        Creates a new layout with master shapes and part instances.
+        """Creates a population member: its own Shape objects, sharing the run's document objects.
         
         Args:
             name: Name for the layout (e.g., "Layout_GA_1")
@@ -80,39 +118,22 @@ class LayoutManager:
         Returns:
             Layout object containing the layout group and prepared parts
         """
-        # Create layout group
-        layout_group = self.doc.addObject("App::DocumentObjectGroup", name)
-        layout_group.Label = name
-        if getattr(layout_group, "ViewObject", None) is not None:
-            layout_group.ViewObject.Visibility = True
-        
-        # Create parts bin
-        parts_group = self.doc.addObject("App::DocumentObjectGroup", "PartsToPlace")
-        layout_group.addObject(parts_group)
-        
-        # Create shape preparer for this layout
-        preparer = ShapePreparer(self.doc, self.processed_shape_cache)
-        
-        # Prepare parts (creates masters and instances)
-        parts = preparer.prepare_parts(
-            ui_params, quantities, master_shapes_map, 
-            layout_group, parts_group
-        )
-        
-        # Get master shapes group
-        master_shapes_group = None
-        for child in layout_group.Group:
-            if child.Label == "MasterShapes":
-                master_shapes_group = child
-                break
-        
-        # Apply chromosome ordering if provided
+        template = self._ensure_template(master_shapes_map, quantities, ui_params)
+        # Copies own their geometry, rotation and placement; the document
+        # objects stay shared. __deepcopy__ drops fc_object, so re-bind it by id.
+        # spawn_next (fill seeds) is a function, which deepcopy returns as is,
+        # so every member's fill seed spawns through the template.
+        parts = copy.deepcopy(template.parts)
+        doc_objects = {p.id: p.fc_object for p in template.parts}
+        for part in parts:
+            part.fc_object = doc_objects.get(part.id)
+
         if chromosome_ordering and parts:
             parts = self._apply_ordering(parts, chromosome_ordering)
-        
+
         self._layout_counter += 1
-        
-        layout = Layout(layout_group, parts_group, parts, master_shapes_group)
+
+        layout = Layout(None, None, parts, None, label=name)
         layout.member_idx = member_idx
         if chromosome_ordering and parts:
             # Genotype drives nesting: only genes for parts that actually exist,
@@ -175,8 +196,8 @@ class LayoutManager:
         try:
             if layout.layout_group:
                 group_obj = layout.layout_group
-        except Exception:
-            pass  # Stale layout_group reference during cleanup
+        except Exception as e:
+            nw_logger.debug(f"[LayoutManager] Stale layout_group reference during cleanup: {e}")
         
         layout_label = layout.name if hasattr(layout, 'name') else "unknown"
         
@@ -190,11 +211,34 @@ class LayoutManager:
         if group_obj:
             recursive_delete(self.doc, group_obj)
             if verbose:
-                FreeCAD.Console.PrintMessage(f"  Deleted: {layout_label}\n")
+                nw_logger.info(f"  Deleted: {layout_label}")
 
-    
+    def adopt_template(self, layout):
+        """Gives the run's document groups to the winning layout.
 
-    
+        layout's parts already point at the template's objects (create_layout),
+        so after this the winner can be drawn and handed to NestingJob like a
+        layout that built its own objects. Does nothing when no template exists,
+        and leaves the layout's own groups alone in that case.
+        """
+        template = self._template
+        if template is None:
+            return
+        self._template = None
+        layout.layout_group = template.layout_group
+        layout.parts_group = template.parts_group
+        layout.master_shapes_group = template.master_shapes_group
+
+    def discard_template(self):
+        """Deletes the run's document objects when no layout adopted them.
+
+        Main thread only. Safe to call when there is no template.
+        """
+        template = self._template
+        self._template = None
+        if template is not None and template.layout_group is not None:
+            recursive_delete(self.doc, template.layout_group)
+
     def calculate_efficiency(self, layout, sheet_width, sheet_height,
                              compactness_weight=0.0) -> tuple:
         """
@@ -272,7 +316,7 @@ class LayoutManager:
             
             population.append(layout)
             if verbose:
-                FreeCAD.Console.PrintMessage(f"Created layout {name} with {len(layout.parts)} parts\n")
+                nw_logger.info(f"Created layout {name} with {len(layout.parts)} parts")
         
         return population
     

@@ -10,12 +10,18 @@ from PySide import QtCore, QtWidgets
 import FreeCAD
 import FreeCADGui
 import os
-from ...constants import *
+from ...constants import (
+    MINKOWSKI_ROTATION_PRESETS, PHYSICS_ROTATION_PRESETS, PREFS_PATH, PROP_DEFLECTION_ANGLE, PROP_LABEL_SIZE,
+    PROP_PART_SPACING, PROP_SHEET_HEIGHT, PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH, PROP_SIMPLIFICATION,
+    SIM_SINGLE,
+)
 from ... import FONTS_DIR, DEFAULT_FONT
+from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.ui_helpers import (
     show_info_dialog,
     MARGINS_NONE,
     QT_TRANSLATE_NOOP,
+    rich_tooltip,
     make_double_spinbox,
     make_int_spinbox,
     make_checkbox,
@@ -23,6 +29,9 @@ from freecad.nestingworkbench.ui_helpers import (
     CollapsibleSection,
     closest_angle_index,
 )
+from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
+from .worker_sizing import auto_core_count, balanced_worker_count, get_worker_override
+
 
 _MINKOWSKI_DIR_MAX = 359
 
@@ -34,6 +43,7 @@ _DEFAULTS = {
     "deflection_angle": 30.0,
     "verbose_logging": False,
     "rotation_angles": MINKOWSKI_ROTATION_PRESETS,
+    "candidate_spacing": DEFAULT_CANDIDATE_SPACING,
     # Defaults from the 2026-09-03 GA sizing benchmark:
     # the cheapest configuration that is no worse than seeded greedy on every
     # benchmarked corpus. Heavier settings are opt-in presets, not the default.
@@ -49,6 +59,24 @@ _GA_PRESETS = [
     (QT_TRANSLATE_NOOP("NestingPanel", "Thorough (10 pop, 20 gen)"), 10, 20),
 ]
 _GA_CUSTOM_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "Custom")
+_SIM_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "Simulation:")
+_SIM_TIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Draws the nesting while it runs, which is slower. Off draws only the result. "
+    "Single draws one layout at a time. All draws every genetic-algorithm population "
+    "member at once, one row each, while GA worker processes evaluate them; "
+    "elsewhere it behaves like Single. Trial positions and master highlighting "
+    "appear only with one worker process.")
+_WORKERS_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "GA worker processes:")
+# {0} is the number of workers Auto will start for the current population, e.g. "Auto - (5)".
+_WORKERS_AUTO_FMT = QT_TRANSLATE_NOOP("NestingPanel", "Auto - ({0})")
+_WORKERS_TIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "How many processes evaluate the genetic algorithm's population at once. "
+    "Auto shows the number it will use: one per physical CPU core and at most one per "
+    "population member, fewer if that fills every batch of layouts equally. More "
+    "workers than physical cores is usually slower. 1 evaluates one layout at a time, "
+    "which also skips the worker start-up cost on small jobs.")
 
 _GA_POP_TOOLTIP = QT_TRANSLATE_NOOP(
     "NestingPanel",
@@ -101,7 +129,7 @@ class NestingPanel(QtWidgets.QWidget):
     """
     def __init__(self, parent=None):
         super(NestingPanel, self).__init__(parent)
-        FreeCAD.Console.PrintMessage("NestingPanel initialized.\n")
+        nw_logger.info("NestingPanel initialized.")
         self.setWindowTitle(QT_TRANSLATE_NOOP("NestingPanel", "Nesting Tool"))
         self.selected_shapes_to_process = []
         self.hidden_originals = []
@@ -155,8 +183,17 @@ class NestingPanel(QtWidgets.QWidget):
         dial.valueChanged.connect(update_dial_label)
         return dial, label
 
-    def _build_algorithm_selector(self, form_layout):
-        """Builds and adds the algorithm dropdown to the form layout."""
+    def _build_algorithm_group(self):
+        """Builds the Nesting Settings group: the algorithm dropdown, each algorithm's
+        parameters page (only the selected one is shown), and the shared Advanced section."""
+        group = QtWidgets.QGroupBox(QT_TRANSLATE_NOOP("NestingPanel", "Nesting Settings"))
+        form_layout = QtWidgets.QFormLayout()
+
+        # The Advanced section places widgets the Minkowski page creates, so it comes after.
+        self.minkowski_settings_group = self._build_minkowski_group()
+        self.physics_settings_group = self._build_physics_group()
+        self.advanced_section = self._build_advanced_section()
+
         self.algorithm_dropdown = QtWidgets.QComboBox()
         self.algorithm_dropdown.addItems([
             QT_TRANSLATE_NOOP("NestingPanel", "Minkowski"),
@@ -164,7 +201,13 @@ class NestingPanel(QtWidgets.QWidget):
         ])
         self.algorithm_dropdown.setCurrentIndex(0)
         self.algorithm_dropdown.currentTextChanged.connect(self._on_algorithm_change)
+
         form_layout.addRow(QT_TRANSLATE_NOOP("NestingPanel", "Nesting Algorithm:"), self.algorithm_dropdown)
+        form_layout.addRow(self.minkowski_settings_group)
+        form_layout.addRow(self.physics_settings_group)
+        form_layout.addRow(self.advanced_section)
+        group.setLayout(form_layout)
+        return group
 
     def _build_sheet_and_boundary_inputs(self):
         """Builds sheet dimension and boundary resolution inputs inside a group box."""
@@ -226,9 +269,10 @@ class NestingPanel(QtWidgets.QWidget):
         return group
 
     def _build_minkowski_group(self):
-        """Builds the Minkowski nesting configuration group box."""
-        group = QtWidgets.QGroupBox(QT_TRANSLATE_NOOP("NestingPanel", "Minkowski Nesting Settings"))
+        """Builds the Minkowski parameters page shown inside Nesting Settings."""
+        page = QtWidgets.QWidget()
         form_layout = QtWidgets.QFormLayout()
+        form_layout.setContentsMargins(*MARGINS_NONE)
 
         self.minkowski_direction_dial, self.minkowski_direction_label = self._build_direction_dial("Down")
         dial_layout = QtWidgets.QVBoxLayout()
@@ -360,6 +404,33 @@ class NestingPanel(QtWidgets.QWidget):
 
         form_layout.addRow(QT_TRANSLATE_NOOP("NestingPanel", "Rotation Angle:"), mink_rot_layout)
 
+        self.minkowski_candidate_spacing_input = make_double_spinbox(
+            _DEFAULTS["candidate_spacing"], 1.0, 100.0, step=0.5,
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
+                "NestingPanel",
+                "Sets distance between candidate points when checking part placement. A smaller value "
+                "means more candidate points which makes it more likely to pack tightly. This can make "
+                "nesting slower, especially for large parts.\n"
+                "Left: 5 mm spacing. Right: 20 mm, which misses the tight corner."),
+                image="NestingWorkbench_CandidateSpacing.svg"))
+
+        translate = QtWidgets.QApplication.translate
+        # Detected once: physical_core_count() shells out to sysctl on macOS.
+        # When it falls back to logical processors, the coordinator warns at
+        # run time (WPS-004).
+        auto_cores, _ = auto_core_count()
+        self.worker_processes_input = make_int_spinbox(
+            0, 0, os.cpu_count() or 1,
+            tooltip=translate("NestingPanel", _WORKERS_TIP))
+
+        def update_auto_label(population):
+            self.worker_processes_input.setSpecialValueText(
+                translate("NestingPanel", _WORKERS_AUTO_FMT).format(
+                    balanced_worker_count(population, auto_cores)))
+
+        self.minkowski_population_size_input.valueChanged.connect(update_auto_label)
+        update_auto_label(self.minkowski_population_size_input.value())
+
         ga_section = CollapsibleSection(QT_TRANSLATE_NOOP("NestingPanel", "Genetic Algorithm"), expanded=True)
         ga_section.addRow(QT_TRANSLATE_NOOP("NestingPanel", "Preset:"), self.ga_preset_dropdown)
         ga_section.addRow(QT_TRANSLATE_NOOP("NestingPanel", "Generations:"), self.minkowski_generations_input)
@@ -368,13 +439,14 @@ class NestingPanel(QtWidgets.QWidget):
         ga_section.addRow(self.ga_warning_label)
         form_layout.addRow(ga_section)
 
-        group.setLayout(form_layout)
-        return group
+        page.setLayout(form_layout)
+        return page
 
     def _build_physics_group(self):
-        """Builds the Physics nesting configuration group box."""
-        group = QtWidgets.QGroupBox(QT_TRANSLATE_NOOP("NestingPanel", "Physics Nesting Settings"))
+        """Builds the Physics parameters page shown inside Nesting Settings."""
+        page = QtWidgets.QWidget()
         form_layout = QtWidgets.QFormLayout()
+        form_layout.setContentsMargins(*MARGINS_NONE)
 
         self.physics_direction_dial, self.physics_direction_label = self._build_direction_dial("Down")
         dial_layout = QtWidgets.QVBoxLayout()
@@ -496,8 +568,49 @@ class NestingPanel(QtWidgets.QWidget):
         anneal_section.addRow(self.anneal_random_shake_checkbox)
         form_layout.addRow(anneal_section)
 
-        group.setLayout(form_layout)
-        return group
+        page.setLayout(form_layout)
+        return page
+
+    def _build_advanced_section(self):
+        """Builds the one Advanced section. Simulation and Verbose Logging apply to every
+        algorithm; the widgets in _minkowski_advanced_widgets are shown only while
+        Minkowski is selected (_on_algorithm_change)."""
+        translate = QtWidgets.QApplication.translate
+        self.simulate_combo = QtWidgets.QComboBox()
+        # Order must match SIM_OFF, SIM_SINGLE, SIM_ALL.
+        self.simulate_combo.addItem(translate("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Off")))
+        self.simulate_combo.addItem(translate("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Single")))
+        self.simulate_combo.addItem(translate("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "All")))
+        self.simulate_combo.setCurrentIndex(SIM_SINGLE)
+        self.simulate_combo.setToolTip(rich_tooltip("NestingPanel", _SIM_TIP))
+
+        self.verbose_logging_checkbox = make_checkbox(
+            QT_TRANSLATE_NOOP("NestingPanel", "Verbose Logging"),
+            checked=_DEFAULTS["verbose_logging"],
+            tooltip=QT_TRANSLATE_NOOP("NestingPanel", "Enables detailed logging of the nesting process in the FreeCAD console.")
+        )
+
+        self.clear_cache_checkbox = make_checkbox(
+            QT_TRANSLATE_NOOP("NestingPanel", "Clear NFP Cache"),
+            checked=False,
+            tooltip=QT_TRANSLATE_NOOP("NestingPanel", "Forces recalculation of No-Fit Polygons. Slower, but resolves potential caching issues.")
+        )
+
+        spacing_label = QtWidgets.QLabel(translate("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Candidate Spacing:")))
+        workers_label = QtWidgets.QLabel(translate("NestingPanel", _WORKERS_LABEL))
+        self._minkowski_advanced_widgets = [
+            spacing_label, self.minkowski_candidate_spacing_input,
+            workers_label, self.worker_processes_input,
+            self.clear_cache_checkbox,
+        ]
+
+        section = CollapsibleSection(QT_TRANSLATE_NOOP("NestingPanel", "Advanced"), expanded=False)
+        section.addRow(_SIM_LABEL, self.simulate_combo)
+        section.addRow(self.verbose_logging_checkbox)
+        section.addRow(spacing_label, self.minkowski_candidate_spacing_input)
+        section.addRow(workers_label, self.worker_processes_input)
+        section.addRow(self.clear_cache_checkbox)
+        return section
 
     def _build_font_layout(self):
         """Builds the font selection button and label layout."""
@@ -535,45 +648,21 @@ class NestingPanel(QtWidgets.QWidget):
         label_options_layout.addStretch()
         return label_options_layout
 
-    def _build_general_checkboxes(self, form_layout):
-        """Builds general runtime options checkboxes inside a collapsible section."""
-        adv_section = CollapsibleSection(
-            QT_TRANSLATE_NOOP("NestingPanel", "Advanced Options"),
-            expanded=False
-        )
-        self.simulate_nesting_checkbox = make_checkbox(
-            QT_TRANSLATE_NOOP("NestingPanel", "Simulate Nesting (slower)"),
-            checked=True
-        )
-
-        self.verbose_logging_checkbox = make_checkbox(
-            QT_TRANSLATE_NOOP("NestingPanel", "Verbose Logging"),
-            checked=_DEFAULTS["verbose_logging"],
-            tooltip=QT_TRANSLATE_NOOP("NestingPanel", "Enables detailed logging of the nesting process in the FreeCAD console.")
-        )
-
-        self.clear_cache_checkbox = make_checkbox(
-            QT_TRANSLATE_NOOP("NestingPanel", "Clear NFP Cache"),
-            checked=False,
-            tooltip=QT_TRANSLATE_NOOP("NestingPanel", "Forces recalculation of No-Fit Polygons. Slower, but resolves potential caching issues.")
-        )
-
+    def _build_display_options_row(self):
+        """Builds the Show Bounds and Play sound row, shown for every algorithm."""
         self.show_bounds_checkbox = make_checkbox(
             QT_TRANSLATE_NOOP("NestingPanel", "Show Bounds"),
             checked=True
         )
-
         self.sound_checkbox = make_checkbox(
             QT_TRANSLATE_NOOP("NestingPanel", "Play sound on completion"),
             checked=True
         )
-
-        adv_section.addRow(self.simulate_nesting_checkbox)
-        adv_section.addRow(self.verbose_logging_checkbox)
-        adv_section.addRow(self.clear_cache_checkbox)
-        adv_section.addRow(self.show_bounds_checkbox)
-        adv_section.addRow(self.sound_checkbox)
-        form_layout.addRow(adv_section)
+        row = QtWidgets.QHBoxLayout()
+        row.addWidget(self.show_bounds_checkbox)
+        row.addWidget(self.sound_checkbox)
+        row.addStretch()
+        return row
 
     def _build_parts_table_and_buttons(self, main_layout):
         """Builds the parts table and Add/Remove buttons."""
@@ -629,12 +718,8 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_setup_group = self._build_sheet_and_boundary_inputs()
         form_layout.addRow(self.sheet_setup_group)
 
-        self._build_algorithm_selector(form_layout)
-
-        self.minkowski_settings_group = self._build_minkowski_group()
-        self.physics_settings_group = self._build_physics_group()
-        form_layout.addRow(self.minkowski_settings_group)
-        form_layout.addRow(self.physics_settings_group)
+        self.algorithm_group = self._build_algorithm_group()
+        form_layout.addRow(self.algorithm_group)
 
         font_layout = self._build_font_layout()
         form_layout.addRow(QT_TRANSLATE_NOOP("NestingPanel", "Identifier Font:"), font_layout)
@@ -642,7 +727,7 @@ class NestingPanel(QtWidgets.QWidget):
         label_options_layout = self._build_label_options_row()
         form_layout.addRow(label_options_layout)
 
-        self._build_general_checkboxes(form_layout)
+        form_layout.addRow(self._build_display_options_row())
         main_layout.addLayout(form_layout)
 
         self._build_parts_table_and_buttons(main_layout)
@@ -656,17 +741,15 @@ class NestingPanel(QtWidgets.QWidget):
 
         # Only after setLayout: until then the groups have no parent widget, and
         # setVisible(True) on a parentless widget pops it up as its own window.
-        self.minkowski_settings_group.setVisible(True)
-        self.physics_settings_group.setVisible(False)
+        self._on_algorithm_change(self.algorithm_dropdown.currentText())
 
         # Connect signals
-        def toggle_label_inputs(state):
-            enabled = state == QtCore.Qt.Checked
+        def toggle_label_inputs(enabled):
             self.label_size_input.setEnabled(enabled)
             self.label_height_input.setEnabled(enabled)
 
-        self.add_labels_checkbox.stateChanged.connect(toggle_label_inputs)
-        toggle_label_inputs(QtCore.Qt.Checked if self.add_labels_checkbox.isChecked() else QtCore.Qt.Unchecked)
+        self.add_labels_checkbox.toggled.connect(toggle_label_inputs)
+        toggle_label_inputs(self.add_labels_checkbox.isChecked())
 
         # Connect the nesting controller
         from .nesting_controller import NestingController
@@ -702,7 +785,7 @@ class NestingPanel(QtWidgets.QWidget):
             tooltip=QT_TRANSLATE_NOOP("NestingPanel", "Override global rotation steps for this part. 0 or 1 means no rotation.")
         )
         rotation_spinbox.setEnabled(override_rotation)
-        override_checkbox.stateChanged.connect(lambda state: rotation_spinbox.setEnabled(state == QtCore.Qt.Checked))
+        override_checkbox.toggled.connect(rotation_spinbox.setEnabled)
 
         rotation_layout.addWidget(override_checkbox)
         rotation_layout.addWidget(rotation_spinbox)
@@ -751,28 +834,28 @@ class NestingPanel(QtWidgets.QWidget):
                 self.selected_font_path = default_font_path
                 self.font_label.setText(os.path.basename(default_font_path))
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"[NestingPanel] Failed to set default font: {e}\n")
+            nw_logger.warn(f"[NestingPanel] Failed to set default font: {e}")
 
     def log_message(self, message, level="message"):
         """Displays a message in the status label and logs to the console."""
         try:
             self.status_label.setText(message)
-        except RuntimeError:
+        except RuntimeError as e:
             # The widget C++ object has been deleted (panel closed), but Python object persists.
             # We can just log to console and ignore the UI update.
-            pass
+            nw_logger.debug(f"[NestingPanel] status_label.setText skipped (widget deleted): {e}")
 
         if level == "warning":
-            FreeCAD.Console.PrintWarning(message + "\n")
+            nw_logger.warn(message)
         else:
-            FreeCAD.Console.PrintMessage(message + "\n")
+            nw_logger.info(message)
         
         # Process UI events to make sure the label updates immediately
         # We wrap this too, just in case
         try:
             FreeCADGui.updateGui()
-        except RuntimeError:
-            pass  # GUI window closed
+        except RuntimeError as e:
+            nw_logger.debug(f"[NestingPanel] updateGui skipped (GUI window closed): {e}")
 
     def load_persisted_settings(self):
         """Loads settings from FreeCAD preferences."""
@@ -786,6 +869,7 @@ class NestingPanel(QtWidgets.QWidget):
         self.simplification_input.setValue(prefs.GetFloat(PROP_SIMPLIFICATION, 1.0))
         self.minkowski_compactness_input.setValue(prefs.GetFloat("GACompactnessWeight", 1.0))
         self.verbose_logging_checkbox.setChecked(prefs.GetBool("VerboseLogging", False))
+        self.worker_processes_input.setValue(get_worker_override())
         self.physics_improvement_threshold_input.setValue(prefs.GetFloat("PhysicsStabilityTolerance", 0.01))
         
         self.physics_anneal_curve_type.setCurrentText(prefs.GetString("PhysicsAnnealCurveType", "Logarithmic"))
@@ -832,10 +916,10 @@ class NestingPanel(QtWidgets.QWidget):
             else:
                 self.progressBar.setValue(0)
                 self.progressBar.setVisible(False)
-        except RuntimeError:
-            pass # Widget deleted
+        except RuntimeError as e:
+            nw_logger.debug(f"[NestingPanel] update_progress widget deleted: {e}")
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"UI Update Error: {e}\n")
+            nw_logger.warn(f"UI Update Error: {e}")
 
     def _update_rotation_label(self):
         algo = self.algorithm_dropdown.currentText()
@@ -856,8 +940,11 @@ class NestingPanel(QtWidgets.QWidget):
 
     def _on_algorithm_change(self, algo_name):
         """Handles switching between nesting algorithms."""
-        self.minkowski_settings_group.setVisible(algo_name == "Minkowski")
+        is_minkowski = algo_name == "Minkowski"
+        self.minkowski_settings_group.setVisible(is_minkowski)
         self.physics_settings_group.setVisible(algo_name == "Physics")
+        for widget in self._minkowski_advanced_widgets:
+            widget.setVisible(is_minkowski)
         # Ensure the rotation label/steps are immediately clarified for the new algorithm
         self._update_rotation_label()
 
@@ -866,7 +953,8 @@ class NestingPanel(QtWidgets.QWidget):
         try:
             self.progressBar.setValue(0)
             self.progressBar.setVisible(False)
-        except RuntimeError: pass  # Widget deleted
+        except RuntimeError as e:
+            nw_logger.debug(f"[NestingPanel] reset_progress widget deleted: {e}")
 
     def _show_compactness_info(self):
         """Shows an informative dialog explaining the GA Compactness function."""
@@ -886,4 +974,4 @@ class NestingPanel(QtWidgets.QWidget):
             "and Population Size are above 1."
         )
         show_info_dialog(self, QT_TRANSLATE_NOOP("NestingPanel", "GA Compactness Optimization"), html_content)
-        
+

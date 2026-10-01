@@ -3,6 +3,7 @@ import FreeCAD
 import FreeCADGui
 import os
 from PySide import QtWidgets, QtCore
+from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.Tools.Cam import cam_manager
 from freecad.nestingworkbench.constants import PREFS_PATH
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
@@ -117,8 +118,8 @@ class CAMOptionsDialog(QtWidgets.QDialog):
                         if full_path not in found_templates:
                             self.template_combo.addItem(f, full_path)
                             found_templates.add(full_path)
-                except Exception:
-                    pass  # Skip candidate template directories that do not exist or are inaccessible
+                except Exception as e:
+                    nw_logger.debug(f"[CAMOptionsDialog] template dir access failed for '{p}': {e}")
     
     def browse_template(self):
         """Opens a file dialog to select a template."""
@@ -145,8 +146,8 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         try:
             import Path.Preferences
             processors = sorted(Path.Preferences.allEnabledPostProcessors())
-        except Exception:
-            pass  # Path/CAM preferences module unavailable or Path workbench not loaded
+        except Exception as e:
+            nw_logger.debug(f"[CAMOptionsDialog] Path.Preferences access failed: {e}")
         for p in processors:
             self.post_processor_combo.addItem(p)
 
@@ -218,7 +219,7 @@ class CreateCAMJobCommand:
                 layout_group = selected
 
         if not layout_group:
-            FreeCAD.Console.PrintMessage("Please select a layout group to create a CAM job from.\n")
+            nw_logger.info("Please select a layout group to create a CAM job from.")
             return
         
         # Show options dialog
@@ -228,7 +229,7 @@ class CreateCAMJobCommand:
             
             # Check that at least one object type is selected
             if not (options['include_parts'] or options['include_labels'] or options['include_outlines']):
-                FreeCAD.Console.PrintWarning("No object types selected. CAM job not created.\n")
+                nw_logger.warn("No object types selected. CAM job not created.")
                 return
             
             cam_manager_instance = cam_manager.CAMManager(layout_group=layout_group)

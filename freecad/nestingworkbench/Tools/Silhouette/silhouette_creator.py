@@ -11,6 +11,7 @@ Supports two methods:
 
 import FreeCAD
 import Part
+from freecad.nestingworkbench import nw_logger
 from ..Nesting.algorithms.shape_processor import get_2d_profile_from_obj
 from ...freecad_helpers import get_nested_containers
 
@@ -29,7 +30,7 @@ def create_cross_section(obj, cut_height=None):
         shape = obj.Shape
         
         if shape.isNull():
-            FreeCAD.Console.PrintWarning(f"[CrossSection] Shape is null for '{obj.Label}'\n")
+            nw_logger.warn(f"[CrossSection] Shape is null for '{obj.Label}'")
             return None
         
         # Get bounding box to determine cut height
@@ -44,7 +45,7 @@ def create_cross_section(obj, cut_height=None):
         wires = shape.slice(cutting_direction, cut_height)
         
         if not wires:
-            FreeCAD.Console.PrintWarning(f"[Silhouette] No cross-section at Z={cut_height:.2f} for '{obj.Label}'\n")
+            nw_logger.warn(f"[Silhouette] No cross-section at Z={cut_height:.2f} for '{obj.Label}'")
             return None
         
         # Convert wires to faces
@@ -55,10 +56,10 @@ def create_cross_section(obj, cut_height=None):
                     face = Part.Face(wire)
                     faces.append(face)
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[CrossSection] Could not make face from wire: {e}\n")
+                    nw_logger.warn(f"[CrossSection] Could not make face from wire: {e}")
         
         if not faces:
-            FreeCAD.Console.PrintWarning(f"[CrossSection] No closed wires found for '{obj.Label}'\n")
+            nw_logger.warn(f"[CrossSection] No closed wires found for '{obj.Label}'")
             return None
         
         # Sort faces by Area descending
@@ -86,9 +87,9 @@ def create_cross_section(obj, cut_height=None):
                     except Exception as e:
                         # Can't tell hole from island without the boolean op, and
                         # appending the face as a body would fill the hole in.
-                        FreeCAD.Console.PrintError(
+                        nw_logger.error(
                             f"[CrossSection] Could not cut a hole out of '{obj.Label}': {e}. "
-                            f"No silhouette created rather than one with the hole filled in.\n"
+                            f"No silhouette created rather than one with the hole filled in."
                         )
                         return None
             if not is_hole:
@@ -107,7 +108,7 @@ def create_cross_section(obj, cut_height=None):
         return result
         
     except Exception as e:
-        FreeCAD.Console.PrintError(f"[CrossSection] Error for '{obj.Label}': {e}\n")
+        nw_logger.error(f"[CrossSection] Error for '{obj.Label}': {e}")
         return None
 
 def is_valid_shape_object(obj):
@@ -149,7 +150,7 @@ def create_silhouette(obj, up_direction="Z+"):
         shapely_polygon = get_2d_profile_from_obj(obj, up_direction)
         
         if shapely_polygon is None or shapely_polygon.is_empty:
-            FreeCAD.Console.PrintError(f"Failed to create silhouette for '{obj.Label}': Empty projection\n")
+            nw_logger.error(f"Failed to create silhouette for '{obj.Label}': Empty projection")
             return None
         
         # Convert Shapely polygon to FreeCAD face
@@ -157,7 +158,7 @@ def create_silhouette(obj, up_direction="Z+"):
         return face
         
     except Exception as e:
-        FreeCAD.Console.PrintError(f"Failed to create silhouette for '{obj.Label}': {e}\n")
+        nw_logger.error(f"Failed to create silhouette for '{obj.Label}': {e}")
         return None
 
 def shapely_to_fc_face(shapely_polygon):
@@ -201,7 +202,7 @@ def shapely_to_fc_face(shapely_polygon):
                 hole_face = Part.Face(hole_wire)
                 face = face.cut(hole_face)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"Could not cut hole: {e}\n")
+                nw_logger.warn(f"Could not cut hole: {e}")
     
     return face
 
@@ -251,7 +252,7 @@ def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cr
     all_silhouettes = []
     sheets_processed = set()
     
-    FreeCAD.Console.PrintMessage(f"[Silhouette] Processing Layout '{layout_group.Label}'...\n")
+    nw_logger.info(f"[Silhouette] Processing Layout '{layout_group.Label}'...")
     
     # Traverse layout → sheets → shapes groups → containers
     for sheet_group in layout_group.Group:
@@ -275,7 +276,7 @@ def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cr
                 try:
                     doc.removeObject(old_outline.Name)
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[Silhouette] Could not remove old outline '{old_outline.Label}': {e}\n")
+                    nw_logger.warn(f"[Silhouette] Could not remove old outline '{old_outline.Label}': {e}")
             
             part_obj = _find_valid_part_in_container(container)
             if part_obj is None:
@@ -284,16 +285,16 @@ def create_silhouettes_for_layout(doc, layout_group, cut_height=None, method="cr
             try:
                 silhouette_face = _compute_silhouette_face(part_obj, cut_height, method)
                 if silhouette_face is None:
-                    FreeCAD.Console.PrintWarning(f"[Silhouette] Could not create silhouette for '{container.Label}'\n")
+                    nw_logger.warn(f"[Silhouette] Could not create silhouette for '{container.Label}'")
                     continue
                 
                 silhouette_obj = _create_silhouette_object(doc, container.Label, silhouette_face, container)
                 all_silhouettes.append(silhouette_obj)
             except Exception as e:
-                FreeCAD.Console.PrintError(f"[Silhouette] Error for '{container.Label}': {e}\n")
+                nw_logger.error(f"[Silhouette] Error for '{container.Label}': {e}")
                 continue
     
-    FreeCAD.Console.PrintMessage(f"[Silhouette] Created {len(all_silhouettes)} silhouettes across {len(sheets_processed)} sheets\n")
+    nw_logger.info(f"[Silhouette] Created {len(all_silhouettes)} silhouettes across {len(sheets_processed)} sheets")
     
     return all_silhouettes
 
@@ -315,17 +316,17 @@ def is_nested_container(obj):
 def create_silhouette_for_container(doc, container, cut_height=None, method="cross_section"):
     """Create a silhouette for the part inside *container* (placed inside alongside the part)."""
     if not is_nested_container(container):
-        FreeCAD.Console.PrintWarning(f"[Silhouette] '{container.Label}' is not a nested container\n")
+        nw_logger.warn(f"[Silhouette] '{container.Label}' is not a nested container")
         return None
     
     part_obj = _find_valid_part_in_container(container)
     if part_obj is None:
-        FreeCAD.Console.PrintWarning(f"[Silhouette] No part object found in '{container.Label}'\n")
+        nw_logger.warn(f"[Silhouette] No part object found in '{container.Label}'")
         return None
     
     silhouette_face = _compute_silhouette_face(part_obj, cut_height, method)
     if silhouette_face is None:
-        FreeCAD.Console.PrintWarning(f"[Silhouette] Could not create silhouette for '{container.Label}'\n")
+        nw_logger.warn(f"[Silhouette] Could not create silhouette for '{container.Label}'")
         return None
     
     return _create_silhouette_object(doc, container.Label, silhouette_face, container)
@@ -334,12 +335,12 @@ def create_silhouette_for_part(doc, part_obj, parent_container=None, cut_height=
     """Create a silhouette for *part_obj*, placed in *parent_container* or at document root."""
     is_valid, reason = is_valid_shape_object(part_obj)
     if not is_valid:
-        FreeCAD.Console.PrintWarning(f"[Silhouette] '{part_obj.Label}' is not valid: {reason}\n")
+        nw_logger.warn(f"[Silhouette] '{part_obj.Label}' is not valid: {reason}")
         return None
     
     silhouette_face = _compute_silhouette_face(part_obj, cut_height, method)
     if silhouette_face is None:
-        FreeCAD.Console.PrintWarning(f"[Silhouette] Could not create silhouette for '{part_obj.Label}'\n")
+        nw_logger.warn(f"[Silhouette] Could not create silhouette for '{part_obj.Label}'")
         return None
     
     return _create_silhouette_object(doc, part_obj.Label, silhouette_face, parent_container)

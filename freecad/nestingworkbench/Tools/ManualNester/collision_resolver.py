@@ -14,6 +14,7 @@ Collision detection uses a two-phase approach:
      actual boundary polygon (extracted from BoundaryObject wires) for a
      precise answer.  Falls back to bbox-only when no polygon is available.
 """
+from freecad.nestingworkbench import nw_logger
 
 class CollisionResolver:
     OVERLAP_PAD_MM = 0.001  # push just past contact so the next strict bbox test clears
@@ -149,7 +150,8 @@ class CollisionResolver:
             try:
                 from shapely.affinity import translate as _shapely_translate
                 entry['poly'] = _shapely_translate(poly, dx, dy)
-            except Exception:
+            except Exception as e:
+                nw_logger.debug(f"[CollisionResolver] _shapely_translate failed: {e}")
                 entry['poly'] = None
         if key in self._base_cache:
             old = self._base_cache[key]
@@ -265,8 +267,8 @@ class CollisionResolver:
                     if CollisionResolver._bboxes_intersect(bb_a, cache[k_b]['bbox']):
                         pairs.append((k_a, k_b))
             return pairs
-        except Exception:
-            pass  # Fallback to O(N^2) AABB+polygon checks if STRtree query fails or is unavailable
+        except Exception as e:
+            nw_logger.debug(f"[CollisionResolver] STRtree query failed: {e}")
 
         # Fallback: O(N²)
         pairs = []
@@ -381,7 +383,8 @@ class CollisionResolver:
             if not poly.is_valid:
                 poly = poly.buffer(0)
             return poly if not poly.is_empty else None
-        except Exception:
+        except Exception as e:
+            nw_logger.debug(f"[CollisionResolver] _extract_face_polygon failed: {e}")
             return None
 
     # Intersection tests
@@ -410,7 +413,8 @@ class CollisionResolver:
                 placement.multVec(type(placement.Base)(bb.XMin, bb.YMax, 0)),
                 placement.multVec(type(placement.Base)(bb.XMax, bb.YMax, 0)),
             ]
-        except (TypeError, AttributeError, NameError):
+        except (TypeError, AttributeError, NameError) as e:
+            nw_logger.debug(f"[CollisionResolver] _transform_bbox placement.Base failed: {e}")
             import FreeCAD
             corners = [
                 placement.multVec(FreeCAD.Vector(bb.XMin, bb.YMin, 0)),

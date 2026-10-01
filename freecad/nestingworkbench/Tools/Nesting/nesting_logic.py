@@ -8,6 +8,7 @@ import copy
 from .algorithms import nesting_strategy
 from .algorithms import physics_nester
 from .visualization_manager import VisualizationManager
+from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.ui_helpers import show_warning_dialog
 
 class _MainThreadRelay(QtCore.QObject):
@@ -46,7 +47,7 @@ class _MainThreadRelay(QtCore.QObject):
                 try:
                     fn()
                 except Exception as e:
-                    FreeCAD.Console.PrintWarning(f"[MainThreadRelay] Callback error: {e}\n")
+                    nw_logger.warn(f"[MainThreadRelay] Callback error: {e}")
         finally:
             self._draining = False
 
@@ -137,7 +138,8 @@ def _sheet_origin_xy(sheet):
         return 0.0, 0.0
     try:
         origin = sheet.get_origin()
-    except Exception:
+    except Exception as e:
+        nw_logger.debug(f"[nesting_logic] sheet.get_origin failed: {e}")
         return 0.0, 0.0
     if origin is None:
         return 0.0, 0.0
@@ -172,7 +174,7 @@ def _visualize_trial_placement(part, angle, x, y, sheet, viz_manager):
             # Use the visualization manager to draw
             viz_manager.draw_trial_placement(doc, wire)
     except Exception as e:
-        FreeCAD.Console.PrintWarning(f"[nesting_logic] Draw failed: {e}\n")
+        nw_logger.warn(f"[nesting_logic] Draw failed: {e}")
 
 def _cleanup_trial_viz(viz_manager):
 # ... (rest of function)
@@ -349,7 +351,7 @@ def _calculate_efficiency(sheets, verbose=False):
     total_sheet_area = 0
     
     if verbose:
-        FreeCAD.Console.PrintMessage("\n--- PACKING EFFICIENCY ---\n")
+        nw_logger.info("\n--- PACKING EFFICIENCY ---")
     
     for i, sheet in enumerate(sheets):
         sheet_area = sheet.width * sheet.height
@@ -361,15 +363,15 @@ def _calculate_efficiency(sheets, verbose=False):
         if verbose and sheet_area > 0:
             efficiency = (parts_area / sheet_area) * 100
             largest_open = largest_open_area(sheet.parts, sheet.width, sheet.height)
-            FreeCAD.Console.PrintMessage(f"  Sheet {i+1}: {efficiency:.1f}% ({parts_area:.0f} / {sheet_area:.0f} mm²), Compactness: {largest_open:.0f} mm² largest open\n")
+            nw_logger.info(f"  Sheet {i+1}: {efficiency:.1f}% ({parts_area:.0f} / {sheet_area:.0f} mm²), Compactness: {largest_open:.0f} mm² largest open")
     
     if total_sheet_area > 0:
         overall_efficiency = (total_parts_area / total_sheet_area) * 100
         if verbose:
-            FreeCAD.Console.PrintMessage(f"  Overall: {overall_efficiency:.1f}% ({total_parts_area:.0f} / {total_sheet_area:.0f} mm²)\n")
-            FreeCAD.Console.PrintMessage("--------------------------\n")
+            nw_logger.info(f"  Overall: {overall_efficiency:.1f}% ({total_parts_area:.0f} / {total_sheet_area:.0f} mm²)")
+            nw_logger.info("--------------------------")
         else:
-            FreeCAD.Console.PrintMessage(f"Packing Efficiency: {overall_efficiency:.1f}%\n")
+            nw_logger.info(f"Packing Efficiency: {overall_efficiency:.1f}%")
 
 
 def show_shapely_installation_instructions():

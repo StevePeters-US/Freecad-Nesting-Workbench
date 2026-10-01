@@ -5,6 +5,19 @@ All notable changes to the FreeCAD Nesting Workbench will be documented in this 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 Releases are named by month and year (e.g. 9-26); the manifest version is year.month.patch (e.g. 2026.9.0).
 
+## [Unreleased]
+
+### Changed
+- The genetic algorithm now starts one worker process per physical CPU core instead of per logical processor, with no fixed limit of 8, and workers no longer start idle math-library threads. The Minkowski settings' Advanced section has a GA worker processes setting that shows the count Auto will use.
+
+### Fixed
+- On Linux, GA worker processes died on start-up and every run silently fell back to one layout at a time. Workers are now started fresh on every platform instead of forked from FreeCAD.
+- GA worker processes started one at a time, and the pool reached its full size only after several generations. Every worker now starts at once before the first generation, which makes population evaluation about 2.9 times faster than serial on a 16-core machine.
+- Warnings raised inside GA worker processes now appear in the Report view and the log file.
+- The genetic algorithm no longer builds and deletes a full set of FreeCAD objects for every population member, which made a 10×4 run about 3.25× faster.
+- Runs that stop early or are cancelled no longer leave `Layout_GA_*` groups in the document.
+- Part labels are built about 6× faster, which takes about 2 s off the end of a genetic-algorithm run with 80 labelled parts.
+
 ## [9-26] - 2026-09-25
 
 Version 2026.9.0.

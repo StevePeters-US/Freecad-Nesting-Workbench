@@ -5,6 +5,7 @@ import Part
 import copy
 import Draft
 import traceback
+from freecad.nestingworkbench import nw_logger
 from .algorithms import shape_processor
 from ...datatypes.shape_object import create_shape_object
 from ...datatypes.shape import Shape
@@ -129,7 +130,7 @@ class ShapePreparer:
                         masters_to_place.append((master_shape_obj.InList[0], temp_shape_wrapper))
 
             except Exception as e:
-                FreeCAD.Console.PrintError(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}\n{traceback.format_exc()}\n")
+                nw_logger.exception(f"Could not create boundary for '{master_obj.Label}', it will be skipped. Error: {e}")
                 continue
         
         self._arrange_masters(masters_to_place, spacing)
@@ -248,7 +249,7 @@ class ShapePreparer:
                     temp_shape_wrapper.source_centroid = temp_container.SourceCentroid
                     self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
             except Exception as e:
-                FreeCAD.Console.PrintWarning(f"Shape reload failed for '{label}': {e}\n{traceback.format_exc()}. Recalculating.\n")
+                nw_logger.warn(f"Shape reload failed for '{label}': {e}\n{traceback.format_exc()}. Recalculating.")
                 temp_shape_wrapper = None
         
         if not temp_shape_wrapper:
@@ -285,7 +286,7 @@ class ShapePreparer:
         
         original_shape = master_obj.Shape.copy()
         if verbose:
-            FreeCAD.Console.PrintMessage(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'\n")
+            nw_logger.info(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_direction='{up_direction}'")
         
         if master_obj.isDerivedFrom("Part::Part2DObject"):
             plc = master_obj.Placement
@@ -361,13 +362,14 @@ class ShapePreparer:
                 wire = Part.Wire(new_edges)
                 try:
                     rebuilt_shape = Part.Face(wire)
-                except Exception:
+                except Exception as e:
+                    nw_logger.debug(f"[ShapePreparer] Face creation failed, falling back to Compound wire: {e}")
                     rebuilt_shape = Part.Compound([wire])
                 if verbose:
-                    FreeCAD.Console.PrintMessage(f"     Rebuilt 2D shape with smooth curves\n")
+                    nw_logger.info("     Rebuilt 2D shape with smooth curves")
                 return rebuilt_shape
         except Exception as e:
-            FreeCAD.Console.PrintWarning(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.\n")
+            nw_logger.warn(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.")
             # Fallback: discretize to polygon
             new_wires = []
             for wire in master_obj.Shape.Wires:
@@ -380,7 +382,8 @@ class ShapePreparer:
             if new_wires:
                 try:
                     return Part.Face(new_wires[0])
-                except Exception:
+                except Exception as e:
+                    nw_logger.debug(f"[ShapePreparer] Face creation failed, falling back to Compound wires: {e}")
                     return Part.Compound(new_wires)
         return original_shape
 
@@ -408,7 +411,7 @@ class ShapePreparer:
                 if hasattr(boundary_obj, "ViewObject"): 
                     boundary_obj.ViewObject.Visibility = True
                 if verbose:
-                    FreeCAD.Console.PrintMessage(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}\n")
+                    nw_logger.info(f"     Bounds centroid from polygon: {temp_shape_wrapper.polygon.centroid}")
 
     def _arrange_masters(self, masters_to_place, spacing):
         masters_to_place.sort(key=lambda item: item[1].area, reverse=True)
@@ -498,7 +501,7 @@ class ShapePreparer:
 
                 # Debug: Check what geometry we're getting
                 if verbose and up_direction != "Z+" and up_direction is not None:
-                    FreeCAD.Console.PrintMessage(f"     Part copy {shape_instance.id}: BoundBox={part_copy.Shape.BoundBox}\n")
+                    nw_logger.info(f"     Part copy {shape_instance.id}: BoundBox={part_copy.Shape.BoundBox}")
 
                 # Copy boundary if exists
                 if hasattr(master_shape_obj, "BoundaryObject") and master_shape_obj.BoundaryObject:

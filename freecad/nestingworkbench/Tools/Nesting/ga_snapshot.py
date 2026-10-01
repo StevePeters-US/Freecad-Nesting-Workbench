@@ -11,6 +11,8 @@ import shapely
 from shapely.affinity import rotate, translate
 from .algorithms.nesting_strategy import Nester
 from .algorithms.genetic_utils import compute_layout_fitness
+from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
+from freecad.nestingworkbench import nw_logger
 
 UNPLACED_PENALTY_FACTOR = 10.0  # each unplaced part costs 10 sheet-areas of fitness
 
@@ -39,7 +41,9 @@ class MemberTask:
     sheet_height: float
     rotation_steps: int
     compactness_weight: float
+    candidate_spacing: float
     sort: bool = False
+    stream: bool = False
 
 
 @dataclass(frozen=True)
@@ -52,6 +56,7 @@ class MemberResult:
     unplaced_ids: tuple
     genes: tuple
     elapsed: float
+    diagnostics: tuple = ()  # (level, line) logged in the worker; nw_logger.drain_worker_messages
 
 
 class SnapshotShape:
@@ -121,7 +126,9 @@ class SnapshotShape:
 
 
 def snapshot_member(layout, ui_params: dict, gen: int, idx: int, seed: int,
-                    search_direction=(0, -1)) -> MemberTask:
+                    search_direction=(0, -1),
+                    candidate_spacing=DEFAULT_CANDIDATE_SPACING,
+                    stream: bool = False) -> MemberTask:
     """Snapshots one population layout into a FreeCAD-free MemberTask."""
     part_snapshots = []
     # Regular parts only for generations (fill deferred to winner)
@@ -158,12 +165,15 @@ def snapshot_member(layout, ui_params: dict, gen: int, idx: int, seed: int,
         sheet_height=float(ui_params.get('sheet_height', 300.0)),
         rotation_steps=int(ui_params.get('rotation_steps', 1)),
         compactness_weight=float(ui_params.get('compactness_weight', 0.0)),
+        candidate_spacing=float(candidate_spacing),
         sort=sort,
+        stream=stream,
     )
 
 
-def nest_from_snapshot(task: MemberTask) -> MemberResult:
-    """Nests a single MemberTask in pure geometry (worker process or serial)."""
+def nest_from_snapshot(task: MemberTask, placement_sink=None) -> MemberResult:
+    """Nests a single MemberTask in pure geometry (worker process or serial).
+    placement_sink(msg) receives (generation, member_idx, sheet_index, part_id, x, y, angle) after each placement."""
     t0 = time.perf_counter()
     shapes = [SnapshotShape(snap) for snap in task.parts]
 
@@ -172,12 +182,19 @@ def nest_from_snapshot(task: MemberTask) -> MemberResult:
         'width': task.sheet_width,
         'height': task.sheet_height,
         'rotation_steps': task.rotation_steps,
+        'candidate_spacing': task.candidate_spacing,
         'quiet': True,
         'rng': rng,
     }
     nester_kwargs['search_direction'] = task.direction
 
     nester = Nester(**nester_kwargs)
+    if placement_sink is not None:
+        def publish(part, sheet):
+            c = part.polygon.centroid
+            placement_sink((task.generation, task.member_idx, sheet.id,
+                            part.id, c.x, c.y, part.angle))
+        nester.update_callback = publish
 
     sheets, unplaced = nester.nest(shapes, sort=task.sort)
 
@@ -261,10 +278,9 @@ def apply_result(layout, result: MemberResult, ui_params: dict | None = None):
         sheets.append(sheet)
 
     if missing:
-        import FreeCAD  # main-thread only; module stays FreeCAD-free for workers
-        FreeCAD.Console.PrintWarning(
+        nw_logger.warn(
             f"[GA] {len(missing)} placement(s) had no matching part and were dropped: "
-            f"{', '.join(map(str, missing[:5]))}{' …' if len(missing) > 5 else ''}\n")
+            f"{', '.join(map(str, missing[:5]))}{' …' if len(missing) > 5 else ''}")
 
 
     layout.sheets = sheets

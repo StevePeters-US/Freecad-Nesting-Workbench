@@ -8,7 +8,7 @@ Constructs and executes QMenu instances from declarative descriptions,
 deferring presentation via QTimer.singleShot to avoid event-loop deadlocks.
 """
 
-import FreeCAD
+from freecad.nestingworkbench import nw_logger
 from PySide import QtCore, QtGui, QtWidgets
 
 
@@ -75,7 +75,7 @@ class NWMenuManager:
             )
             return True
         except Exception as e:
-            FreeCAD.Console.PrintError(f"[NWMenuManager] Error triggering dynamic menu: {e}\n")
+            nw_logger.error(f"[NWMenuManager] Error triggering dynamic menu: {e}")
             self._menu_open = False
             self._active_menu = None
             return False
