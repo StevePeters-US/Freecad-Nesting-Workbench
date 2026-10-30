@@ -4,6 +4,7 @@ import FreeCADGui
 from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.Tools.Exporter import exporter
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, make_checkbox, rich_tooltip
+from freecad.nestingworkbench.constants import PROP_SHOW_BOUNDS
 from freecad.nestingworkbench.freecad_helpers import is_layout_group
 from PySide import QtWidgets
 import os
@@ -13,6 +14,11 @@ _EXPORT_OPTIONS_TITLE = QT_TRANSLATE_NOOP("ExportSheetsCommand", "Export Options
 _DELETE_2D_VIEWS_TEXT = QT_TRANSLATE_NOOP("ExportSheetsCommand", "Delete 2D Views after DXF Export")
 _DELETE_2D_VIEWS_TOOLTIP = QT_TRANSLATE_NOOP(
     "ExportSheetsCommand", "Deletes the temporary 2D views created for the DXF export once it finishes.")
+_INCLUDE_BOUNDS_TEXT = QT_TRANSLATE_NOOP("ExportSheetsCommand", "Include part bounds")
+_INCLUDE_BOUNDS_TOOLTIP = QT_TRANSLATE_NOOP(
+    "ExportSheetsCommand", "Also writes each part's bound (the spacing outline used while "
+    "nesting) on its own layer, in the DXF part bounds color from Nesting Settings. "
+    "Starts checked when this layout was nested with Show Bounds on.")
 
 
 class ExportSheetsCommand:
@@ -23,7 +29,7 @@ class ExportSheetsCommand:
             'MenuText': QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Export Sheets as DXF'),
             'ToolTip': rich_tooltip(
                 'ExportSheetsCommand',
-                QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Exports each sheet in the selected layout to its own DXF file.\nSelect a Layout group first.'),
+                QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Exports each sheet in the selected layout to its own DXF file.\nSelect a Layout group first.\nInkscape: tick "Gcodetools compatible point import" in its DXF import options, or some edges are missing.'),
             ),
         }
 
@@ -84,6 +90,12 @@ class ExportSheetsCommand:
             tooltip=rich_tooltip("ExportSheetsCommand", _DELETE_2D_VIEWS_TOOLTIP)
         )
         layout.addWidget(checkbox)
+        bounds_checkbox = make_checkbox(
+            tr("ExportSheetsCommand", _INCLUDE_BOUNDS_TEXT),
+            checked=getattr(layout_group, PROP_SHOW_BOUNDS, False) is True,
+            tooltip=rich_tooltip("ExportSheetsCommand", _INCLUDE_BOUNDS_TOOLTIP)
+        )
+        layout.addWidget(bounds_checkbox)
         button_box = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
         layout.addWidget(button_box)
         button_box.accepted.connect(dialog.accept)
@@ -92,7 +104,8 @@ class ExportSheetsCommand:
         if dialog.exec_() == QtWidgets.QDialog.Accepted:
             delete_generated = checkbox.isChecked()
             exporter_instance = exporter.SheetExporter(layout_group=layout_group)
-            exporter_instance.export_sheets(export_dir=export_dir, delete_generated_objects=delete_generated)
+            exporter_instance.export_sheets(export_dir=export_dir, delete_generated_objects=delete_generated,
+                                            include_bounds=bounds_checkbox.isChecked())
         else:
             _discard_default()
 

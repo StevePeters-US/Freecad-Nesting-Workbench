@@ -26,10 +26,11 @@ except ImportError:
 from .. import back_side
 from ..constants import (
     FLIP_ANGLE, OFFCUT_COLOR, OFFCUT_GROUP_PREFIX, OFFCUT_LINE_COLOR, OFFCUT_PREFIX, OFFCUT_Z,
+    PREF_FRONT_SHEET_COLOR,
 )
 from .label_object import build_label_shape, create_label_object
 from ..freecad_helpers import calculate_label_placement, create_part_feature, recursive_delete, write_sheet_instance
-from freecad.nestingworkbench import nw_logger
+from freecad.nestingworkbench import nw_logger, nw_settings
 
 class Sheet:
     """
@@ -168,6 +169,7 @@ class Sheet:
             sheet_obj.Placement = FreeCAD.Placement(sheet_origin, FreeCAD.Rotation())
             if FreeCAD.GuiUp and hasattr(sheet_obj, "ViewObject") and sheet_obj.ViewObject:
                 sheet_obj.ViewObject.Transparency = 75
+                sheet_obj.ViewObject.ShapeColor = nw_settings.get_color(PREF_FRONT_SHEET_COLOR)
 
             # Draw the parts placed on this sheet
             for placed_part in self.parts:
@@ -189,6 +191,7 @@ class Sheet:
                 )
                 if FreeCAD.GuiUp and hasattr(sim_boundary, "ViewObject") and sim_boundary.ViewObject:
                     sim_boundary.ViewObject.Transparency = 75
+                    sim_boundary.ViewObject.ShapeColor = nw_settings.get_color(PREF_FRONT_SHEET_COLOR)
                     sim_boundary.ViewObject.DisplayMode = "Flat Lines"
             else:
                 bb = getattr(getattr(sim_boundary, "Shape", None), "BoundBox", None)

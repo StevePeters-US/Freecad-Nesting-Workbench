@@ -9,14 +9,14 @@ import time
 from concurrent.futures import FIRST_COMPLETED, wait
 from ...datatypes.shape import Shape
 from ...constants import ALGO_BEAM, ALGO_GREEDY
-from freecad.nestingworkbench import nw_logger
+from freecad.nestingworkbench import nw_logger, nw_settings
 from .layout_manager import LayoutManager
 from .algorithms import search_genome
 from .algorithms.fitness import weights_from_params
 from .algorithms import sheet_sequence
 from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
 from .worker_sizing import ga_worker_count, SOURCE_LOGICAL_FALLBACK, SOURCE_SETTING
-from ...sheet_library import model as sheet_model, store as sheet_store
+from ...sheet_library import model as sheet_model
 
 DEFAULT_MUTATION_RATE = 0.1     # fallback when ui_params has no 'mutation_rate'
 DEFAULT_WINNERS = 2             # fallback when ui_params has no 'ga_winners'
@@ -497,7 +497,7 @@ class GACoordinator:
                 pool = None
         else:
             reason = ("population size is 1" if population_size <= 1
-                      else "GA worker processes set to 1 in Nesting Settings > Advanced"
+                      else "GA worker processes set to 1 in Algorithm > Advanced"
                       if worker_source == SOURCE_SETTING
                       else "only one CPU core")
             nw_logger.info(f"GA evaluating serially: {reason}.")
@@ -1142,7 +1142,7 @@ class GACoordinator:
         msg += f", Time: {total_time:.2f}s"
         total_cost = sum(s.stock['cost'] for s in best_layout.sheets)
         if total_cost > 0:
-            msg += f", sheets {sheet_model.format_cost(total_cost, sheet_store.currency_symbol())}"
+            msg += f", sheets {sheet_model.format_cost(total_cost, nw_settings.get_currency_symbol())}"
         if getattr(self, '_serial_fallback', False):
             msg += " (workers failed to start - ran serially)"
         

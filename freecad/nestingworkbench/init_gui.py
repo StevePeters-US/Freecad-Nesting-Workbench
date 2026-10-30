@@ -58,6 +58,8 @@ class NestingWorkbench(FreeCADGui.Workbench):
         from freecad.nestingworkbench.commands import command_import_sketch
         # Create Menu (Dropdown)
         self.appendMenu(["Nesting"], [
+            'Nesting_Settings',
+            'Separator',
             'Nesting_ImportSketch',
             'Nesting_Run',
             'Nesting_StackSheets',
@@ -67,7 +69,6 @@ class NestingWorkbench(FreeCADGui.Workbench):
             'Nesting_CreateSilhouette',
             'Nesting_Library',
             'Separator',
-            'Nesting_Settings',
             'Nesting_About'
         ])
         self.appendToolbar("Nesting", [

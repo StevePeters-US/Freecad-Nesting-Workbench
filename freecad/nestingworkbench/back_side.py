@@ -26,9 +26,10 @@ try:
 except ImportError:
     Part = None
 
-from freecad.nestingworkbench import nw_logger
+from freecad.nestingworkbench import nw_logger, nw_settings
 from .constants import (
-    BACK_BOUNDARY_PREFIX, BACK_GROUP_PREFIX, BACK_SHEET_COLOR, FLIPPED_PREFIX,
+    BACK_BOUNDARY_PREFIX, BACK_GROUP_PREFIX, FLIPPED_PREFIX,
+    PREF_BACK_SHEET_COLOR,
     PROP_FLIP_ANGLE, PROP_FLIP_AXIS, PROP_FLIP_Z_MID, PROP_FLOAT, PROP_STRING,
 )
 from .freecad_helpers import (
@@ -119,7 +120,7 @@ def _add_flipped(doc, back_group, container, child, frame):
 def draw_back_side(doc, sheet_group, number, axis, angle, gap):
     """Create Back_<number> inside a freshly drawn Sheet_<number>; returns the group.
 
-    The Back_Boundary_<number> plane, tinted BACK_SHEET_COLOR, is directly above
+    The Back_Boundary_<number> plane, tinted with the Sheet back side color setting, is directly above
     the sheet boundary (+Y, *gap* up). Every part_ and outline_ object in the
     sheet's nested containers gets a copy rotated by *angle* about *axis*
     (to_back), every boundary_ a copy whose visibility follows the container's
@@ -157,7 +158,7 @@ def draw_back_side(doc, sheet_group, number, axis, angle, gap):
     boundary.Placement = FreeCAD.Placement(back_base, FreeCAD.Rotation())
     if FreeCAD.GuiUp and hasattr(boundary, "ViewObject") and boundary.ViewObject:
         boundary.ViewObject.Transparency = 75
-        boundary.ViewObject.ShapeColor = BACK_SHEET_COLOR
+        boundary.ViewObject.ShapeColor = nw_settings.get_color(PREF_BACK_SHEET_COLOR)
 
     frame = BackFrame(axis, float(angle), z_mid, front_base, back_base, width, height)
     for container, child in pairs:

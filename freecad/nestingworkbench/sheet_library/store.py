@@ -23,17 +23,6 @@ def library_root():
     return os.path.join(FreeCAD.getUserAppDataDir(), "NestingWorkbench", "SheetLibrary")
 
 
-def currency_symbol():
-    """The user's currency prefix from Settings, or "" when unset or unreadable."""
-    try:
-        import FreeCAD
-        from ..constants import PREFS_PATH, PREF_CURRENCY_SYMBOL
-        return FreeCAD.ParamGet(PREFS_PATH).GetString(PREF_CURRENCY_SYMBOL, "")
-    except Exception as e:
-        nw_logger.debug(f"Sheet library: failed to read currency symbol: {e}")
-        return ""
-
-
 def _now():
     return datetime.datetime.now().isoformat(timespec="seconds")
 

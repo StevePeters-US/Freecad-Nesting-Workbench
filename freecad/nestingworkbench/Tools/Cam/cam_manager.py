@@ -107,29 +107,37 @@ class CAMManager:
 
     @staticmethod
     def _to_world(shape, world_placement):
-        """A copy of *shape* with *world_placement* baked into its geometry."""
+        """A copy of *shape* with *world_placement* baked into its geometry.
+
+        transformShape keeps lines and circles exact; transformGeometry would turn
+        every edge into a B-spline (XFM-003).
+        """
         transformed = shape.copy()
         transformed.Placement = FreeCAD.Placement()
-        return transformed.transformGeometry(world_placement.toMatrix())
+        transformed.transformShape(world_placement.toMatrix(), True)
+        return transformed
 
     def _bake_part(self, shape, world_placement, sheet_origin, sheet_thickness):
         """World shape shifted by -sheet_origin in XY, with its bottom at Z = -sheet_thickness."""
         transformed = self._to_world(shape, world_placement)
         z_offset = -sheet_thickness - transformed.BoundBox.ZMin
         z_placement = FreeCAD.Placement(FreeCAD.Vector(-sheet_origin.x, -sheet_origin.y, z_offset), FreeCAD.Rotation())
-        return transformed.transformGeometry(z_placement.toMatrix())
+        transformed.transformShape(z_placement.toMatrix(), True)
+        return transformed
 
     def _bake_label(self, shape, world_placement, sheet_origin):
         """World shape shifted by -sheet_origin in XY, with its bottom at Z = 0."""
         transformed = self._to_world(shape, world_placement)
         z_placement = FreeCAD.Placement(FreeCAD.Vector(-sheet_origin.x, -sheet_origin.y, -transformed.BoundBox.ZMin), FreeCAD.Rotation())
-        return transformed.transformGeometry(z_placement.toMatrix())
+        transformed.transformShape(z_placement.toMatrix(), True)
+        return transformed
 
     def _bake_outline(self, shape, world_placement, sheet_origin):
         """World shape shifted by -sheet_origin in XY only."""
         transformed = self._to_world(shape, world_placement)
         shift = FreeCAD.Placement(FreeCAD.Vector(-sheet_origin.x, -sheet_origin.y, 0), FreeCAD.Rotation())
-        return transformed.transformGeometry(shift.toMatrix())
+        transformed.transformShape(shift.toMatrix(), True)
+        return transformed
 
     def _create_back_job(self, sheet_group, include_parts=True, include_labels=True,
                          include_outlines=False, template_path=None, post_processor="grbl"):

@@ -8,7 +8,7 @@ import uuid
 
 from PySide import QtCore, QtGui, QtWidgets
 
-from ... import ICONS_DIR
+from ... import ICONS_DIR, nw_settings
 from ...sheet_library import model, store
 from ...sheet_library.model import Library
 from ...ui_helpers import (
@@ -288,7 +288,7 @@ class SheetEditDialog(QtWidgets.QDialog):
             sheet["cost"], 0.0, 1e7, decimals=2,
             tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
                 "SheetsTab", "Sets the price paid for one sheet.\n0 means free or unknown.")))
-        symbol = store.currency_symbol()
+        symbol = nw_settings.get_currency_symbol()
         if symbol:
             self.price_spin.setPrefix(f"{symbol} ")
         self.price_spin.valueChanged.connect(self._validate)
@@ -542,7 +542,7 @@ class SheetsTab(QtWidgets.QWidget):
 
         # Tree
         self.tree.clear()
-        currency = store.currency_symbol()
+        currency = nw_settings.get_currency_symbol()
         rows = model.sheet_rows(self.library)
 
         parents: List[QtWidgets.QTreeWidgetItem] = []

@@ -1,0 +1,161 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+"""Save and re-apply the Nesting panel's per-part settings between layouts.
+
+A reopened layout already restores every part's row. A new layout starts from an
+empty table on purpose. This macro is the opt-in way to carry settings into a new
+layout: Save once, then Apply whenever the same parts come back.
+
+With the Nesting task panel open, run the macro and choose:
+
+- **Save**: writes every row (Quantity, rotation override and steps, Up Dir, Fill)
+  to ``NestingTableSettings.json`` in FreeCAD's user data folder, keyed by part
+  label. Labels already in the file are updated; others are kept, so settings build
+  up across jobs.
+- **Apply**: fills every row whose label is in the file. Rows with other labels are
+  left as they are.
+
+Parts are matched by label only, so two different parts with the same label share
+settings. FreeCAD keeps labels unique by bumping a 3-digit suffix, so a part saved
+from a reopened layout (``Bracket_003``) and its source in a new layout
+(``Bracket_001``) differ only there. A row with no exact match takes the saved
+settings of the labels that differ from it only in that suffix, when they all agree.
+"""
+
+import json
+import os
+import re
+
+import FreeCAD
+from PySide import QtWidgets
+
+SETTINGS_FILE = os.path.join(FreeCAD.getUserAppDataDir(), "NestingTableSettings.json")
+_UNIQUE_SUFFIX = re.compile(r"\d{3}$")
+
+
+def _base_label(label):
+    """label without FreeCAD's 3-digit uniqueness suffix ("Part_003" -> "Part_")."""
+    return _UNIQUE_SUFFIX.sub("", label)
+
+
+def match_settings(settings, label):
+    """(saved settings or None, "exact" | "suffix" | "ambiguous" | "missing") for a row."""
+    if label in settings:
+        return settings[label], "exact"
+    base = _base_label(label)
+    candidates = [value for key, value in settings.items() if _base_label(key) == base]
+    if not candidates:
+        return None, "missing"
+    if any(value != candidates[0] for value in candidates):
+        return None, "ambiguous"
+    return candidates[0], "suffix"
+
+
+def find_panel():
+    """The open Nesting task panel, or None."""
+    from freecad.nestingworkbench.Tools.Nesting.ui_nesting import NestingPanel
+    for widget in QtWidgets.QApplication.allWidgets():
+        if isinstance(widget, NestingPanel) and widget.isVisible():
+            return widget
+    return None
+
+
+def _row_widgets(table, row):
+    """(quantity, override checkbox, rotation steps, [x, y, z], fill) for one row."""
+    rotation = table.cellWidget(row, 2)
+    return (
+        table.cellWidget(row, 1),
+        rotation.findChild(QtWidgets.QCheckBox),
+        rotation.findChild(QtWidgets.QSpinBox),
+        table.cellWidget(row, 3).findChildren(QtWidgets.QDoubleSpinBox),
+        table.cellWidget(row, 4),
+    )
+
+
+def read_rows(panel):
+    """{label: settings} for every row in the panel's table."""
+    table = panel.shape_table
+    rows = {}
+    for row in range(table.rowCount()):
+        quantity, override, steps, up, fill = _row_widgets(table, row)
+        rows[table.item(row, 0).text()] = {
+            "quantity": quantity.value(),
+            "override_rotation": override.isChecked(),
+            "rotation_steps": steps.value(),
+            "up_vector": [box.value() for box in up],
+            "fill_sheet": fill.isChecked(),
+        }
+    return rows
+
+
+def load_settings(path=SETTINGS_FILE):
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def save_settings(panel, path=SETTINGS_FILE):
+    """Merges the table's rows into the file. Returns the number of rows saved."""
+    settings = load_settings(path)
+    rows = read_rows(panel)
+    settings.update(rows)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(settings, fh, indent=2, sort_keys=True)
+    return len(rows)
+
+
+def apply_settings(panel, path=SETTINGS_FILE):
+    """Fills rows that match a saved label. Returns {how: [row labels]} (see match_settings)."""
+    settings = load_settings(path)
+    table = panel.shape_table
+    result = {"exact": [], "suffix": [], "ambiguous": [], "missing": []}
+    for row in range(table.rowCount()):
+        label = table.item(row, 0).text()
+        saved, how = match_settings(settings, label)
+        result[how].append(label)
+        if saved is None:
+            continue
+        quantity, override, steps, up, fill = _row_widgets(table, row)
+        quantity.setValue(saved["quantity"])
+        override.setChecked(saved["override_rotation"])  # enables the steps box
+        steps.setValue(saved["rotation_steps"])
+        for box, value in zip(up, saved["up_vector"]):
+            box.setValue(value)
+        fill.setChecked(saved["fill_sheet"])
+    return result
+
+
+def main():
+    panel = find_panel()
+    if panel is None:
+        QtWidgets.QMessageBox.warning(
+            None, "Nesting Table Settings",
+            "Open the Nesting task panel (Run Nesting Tool) first.")
+        return
+
+    box = QtWidgets.QMessageBox()
+    box.setWindowTitle("Nesting Table Settings")
+    box.setText("Save this table's part settings, or apply saved settings to it?")
+    box.setInformativeText(SETTINGS_FILE)
+    save_button = box.addButton("Save", QtWidgets.QMessageBox.AcceptRole)
+    apply_button = box.addButton("Apply", QtWidgets.QMessageBox.AcceptRole)
+    box.addButton(QtWidgets.QMessageBox.Cancel)
+    box.exec()
+
+    if box.clickedButton() is save_button:
+        count = save_settings(panel)
+        FreeCAD.Console.PrintMessage(f"Nesting Table Settings: saved {count} part(s) to {SETTINGS_FILE}\n")
+    elif box.clickedButton() is apply_button:
+        result = apply_settings(panel)
+        FreeCAD.Console.PrintMessage(
+            f"Nesting Table Settings: applied {len(result['exact'])} exact and "
+            f"{len(result['suffix'])} suffix-matched part(s); "
+            f"{len(result['missing'])} not in the file\n")
+        if result["ambiguous"]:
+            FreeCAD.Console.PrintWarning(
+                "Nesting Table Settings: not applied, saved labels disagree: "
+                f"{', '.join(result['ambiguous'])}\n")
+
+
+if __name__ == "__main__":
+    main()

@@ -78,6 +78,17 @@ PROP_QUANTITY = "Quantity"
 PREFS_PATH = "User parameter:BaseApp/Preferences/nestingworkbench"
 PREF_CURRENCY_SYMBOL = "CurrencySymbol"
 PREF_SHEET_SEQUENCE = "SheetSequence"  # the panel's sheet list (JSON)
+PREF_VERBOSE_LOGGING = "VerboseLogging"           # nw_settings; was the panel's checkbox
+PREF_PLAY_SOUND = "PlaySoundOnCompletion"          # nw_settings
+PREF_FRONT_SHEET_COLOR = "FrontSheetColor"  # nw_settings; unsigned 0xRRGGBBAA
+PREF_BACK_SHEET_COLOR = "BackSheetColor"    # nw_settings; unsigned 0xRRGGBBAA
+PREF_DXF_PART_COLOR = "DxfPartColor"        # nw_settings; AutoCAD colour index
+PREF_DXF_LABEL_COLOR = "DxfLabelColor"      # nw_settings; AutoCAD colour index
+PREF_DXF_SHEET_COLOR = "DxfSheetColor"      # nw_settings; AutoCAD colour index
+PREF_DXF_BOUND_COLOR = "DxfBoundColor"      # nw_settings; AutoCAD colour index
+# Prefixes of a placed part's bound inside its nested_* container. Placed copies
+# are boundary_<id> (shape_preparer, manual nester); bound_ is Shape.draw_bounds'.
+PART_BOUND_PREFIXES = ("boundary_", "bound_")
 
 # -- Algorithm Presets --
 # Rotation angle presets (degrees). Index 0 = coarsest, last = finest.
@@ -101,8 +112,6 @@ PROP_FLIP_Z_MID = "FlipZMid"
 # Turning a sheet over is a 180-degree rotation about the flip axis. Kept as a
 # parameter: indexed rotary machining may use other angles later (SVF decision 7).
 FLIP_ANGLE = 180.0
-# Back-side boundary tint (RGB 0-1). A setting once NWS-010 lands.
-BACK_SHEET_COLOR = (0.58, 0.50, 0.72)
 
 # A sheet's offcuts (NLA ruling 20): an Offcuts_<n> subgroup inside Sheet_<n> holding one
 # offcut_<n>_<k> plane per free rectangle. Display only: never exported or cut.

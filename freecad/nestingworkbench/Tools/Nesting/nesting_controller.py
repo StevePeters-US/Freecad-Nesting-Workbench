@@ -10,7 +10,7 @@ import threading
 from PySide import QtWidgets, QtCore
 from PySide.QtCore import QThread, Signal
 from ...datatypes.shape import Shape
-from ... import nw_logger
+from ... import nw_logger, nw_settings
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
 from .ga_coordinator import GACoordinator, DocumentClosedError
@@ -265,7 +265,7 @@ class NestingController:
         ui_params, quantities, master_map, rotation_params = self._collect_job_parameters(ui_params)
         
         algo_kwargs = self._prepare_algo_kwargs(ui_params)
-        verbose = self.ui.verbose_logging_checkbox.isChecked()
+        verbose = nw_settings.get_verbose_logging()
         algo_kwargs['verbose'] = verbose
         
         rot_steps = ui_params.get('rotation_steps', 1)
@@ -273,9 +273,6 @@ class NestingController:
         nw_logger.info(f"  -> UI Rotation Steps Slider: {rot_steps}")
         
         algo_kwargs['cancel_callback'] = self._check_cancel
-        
-        prefs = FreeCAD.ParamGet(PREFS_PATH)
-        prefs.SetBool("VerboseLogging", verbose)
         
         
         def progress_cb(current, total, message=None):
@@ -354,14 +351,8 @@ class NestingController:
             self.ui.log_message(" ".join(sentences), level="warning")
 
     def _verbose_logging(self):
-        """True when the panel's verbose-logging checkbox is on.
-
-        Guarded: some entry points build the controller against a minimal UI
-        stub that has no such widget, and a missing checkbox must mean "quiet",
-        not AttributeError.
-        """
-        box = getattr(self.ui, "verbose_logging_checkbox", None)
-        return bool(box.isChecked()) if box is not None else False
+        """True when verbose run logging is on in Nesting Settings."""
+        return nw_settings.get_verbose_logging()
 
     def _load_params_from_layout(self, layout_group):
         """Extracts algorithm parameters from layout properties."""
@@ -898,7 +889,7 @@ class NestingController:
                 'update_progress': lambda c, t, m: self._ui_safe(self.ui.update_progress, c, t, m),
                 'reset_progress': lambda: self._ui_safe(self.ui.reset_progress),
                 'play_sound': lambda: self._ui_safe(
-                    lambda: QtWidgets.QApplication.beep() if getattr(self.ui, 'sound_checkbox', None) and self.ui.sound_checkbox.isChecked() else None
+                    lambda: QtWidgets.QApplication.beep() if nw_settings.get_play_sound() else None
                 ),
             },
             draw_callback=self._worker.request_draw_on_main_thread,
@@ -1460,7 +1451,7 @@ class NestingController:
             **{f"{k}_weight": float(v) for k, v in self.ui.weight_sliders.values().items()},
             'part_direction': self.ui.part_direction_dial.degrees(),
             'min_offcut': self.ui.fitness_min_offcut_input.value(),
-            'verbose': self.ui.verbose_logging_checkbox.isChecked(),
+            'verbose': nw_settings.get_verbose_logging(),
             'nesting_direction': self.ui.minkowski_direction_dial.degrees(),
             'algorithm': self.ui.algorithm(),
             'evolve_direction': self.ui.evolve_direction_checkbox.isChecked(),

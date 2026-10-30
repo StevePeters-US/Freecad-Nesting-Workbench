@@ -56,9 +56,18 @@ def world_shape(obj):
     Body around a Pad or Sketch, an App::Part around any feature) is not in it, so
     reading obj.Shape as world drew such parts unrotated and at the parent's origin
     (GLB-001). getGlobalPlacement() is the whole chain, own Placement included.
+
+    An App::Link is not a GeoFeature and has no getGlobalPlacement(). Its Shape
+    already carries the link's own placement (it replaces the target's), so only
+    the enclosing App::Part chain is added (PBP-002, issue #14).
     """
     shape = obj.Shape.copy()
-    shape.Placement = obj.getGlobalPlacement()
+    if hasattr(obj, "getGlobalPlacement"):
+        shape.Placement = obj.getGlobalPlacement()
+        return shape
+    parent = obj.getParentGeoFeatureGroup()
+    if parent is not None:
+        shape.Placement = parent.getGlobalPlacement().multiply(shape.Placement)
     return shape
 
 

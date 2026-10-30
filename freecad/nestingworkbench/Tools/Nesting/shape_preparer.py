@@ -535,17 +535,21 @@ class ShapePreparer:
         """Bakes the source's world placement and the centring into the geometry.
 
         original_shape is master_obj.Shape.copy(), which already carries
-        master_obj.Placement as its own Placement. transformGeometry acts on the
-        geometry under that Placement and keeps it, and the caller then overwrites
-        the feature's Placement with the up-vector rotation, so the Placement is
+        master_obj.Placement as its own Placement. The caller then overwrites the
+        feature's Placement with the up-vector rotation, so the Placement is
         moved into the matrix and cleared here (SRC-001).
+
+        transformShape keeps lines and circles exact. transformGeometry turned every
+        edge into a B-spline, which reached the DXF as SPLINE entities that some
+        importers drop, and approximated every circle (XFM-001).
         """
         world_plc = original_shape.Placement
         original_shape.Placement = FreeCAD.Placement()
         combined_mat = FreeCAD.Matrix()
         combined_mat.move(center_point.negative())
         combined_mat = combined_mat.multiply(world_plc.Matrix)
-        return original_shape.transformGeometry(combined_mat)
+        original_shape.transformShape(combined_mat, True)
+        return original_shape
 
     def _create_boundary_object(self, master_container, master_shape_obj, temp_shape_wrapper, verbose):
         """Creates the boundary shape object from the temp_shape_wrapper and adds it to the master_container."""

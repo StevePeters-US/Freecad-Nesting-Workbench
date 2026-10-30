@@ -13,7 +13,7 @@ class ManualNesterCommand:
     
     def GetResources(self):
         return {
-            'Pixmap': 'Nesting_Transform_Icon.svg',
+            'Pixmap': 'Nesting_Transform_Icon_Disabled.svg' if MANUAL_NESTER_DISABLED else 'Nesting_Transform_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('ManualNesterCommand', 'Manual Nester'),
             'ToolTip': rich_tooltip(
                 'ManualNesterCommand',

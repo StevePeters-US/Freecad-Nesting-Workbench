@@ -46,7 +46,7 @@ Planned shots:
      left and the top-down nested sheet with parts, identifier labels, and tinted
      offcut rectangles in the 3D viewport on the right.
 2. `docs/images/README_NestingPanel.png` (under `### Nesting`):
-   - Capture the Nesting task panel showing `Sheet Setup`, `Nesting Settings`
+   - Capture the Nesting task panel showing `Sheet Setup`, `Algorithm`
      (`Scoring` weights and direction dials visible), and the parts table populated.
 3. `docs/images/README_SheetLibrary.png` (under `### Library`):
    - Open `Nesting_Library` with a root sheet and a child variant selected, plus the
@@ -73,6 +73,7 @@ Planned shots:
 - **Multi-process Genetic Algorithm:** Evolves part ordering, rotation step counts, beam schedules, and nesting directions across parallel worker processes (`Single run`, `Balanced`, `Thorough`).
 - **Four-weight Scoring & offcut preview:** Balance **Gravity**, **Contact**, **Direction**, and **Offcuts** with linked percentage sliders (`🔓`/`🔒`) and **Nesting Direction** / **Part Direction** dials. `Show Offcuts` tints reusable free rectangles of at least `Minimum Offcut` area directly on each sheet.
 - **Per-part table & labels:** Set copy `Quantity` (or bulk `Set All`), per-part `Rotations`, 3D `Up Dir` `(X, Y, Z)`, `Fill` mode, and optional 3D `Identifier Labels`. Preview objects live in a temporary `Layout_temp_*` group that commits on **OK** or cleans up on **Cancel**.
+- **Edit or extend a saved layout:** Select a `Layout_*` and open the Nesting tool to restore its sheets, settings and every part's row. **Add Selected** adds parts you missed, and running again re-nests that layout in place. A new layout always starts from an empty table. To reuse part settings in a new layout, run `Resources/macros/NestingTableSettings.FCMacro` with the panel open: **Save** stores each row's settings by part label, and **Apply** fills matching rows.
 
 ![Nesting task panel and 3D preview](docs/images/README_NestingPanel.png)
 
@@ -91,7 +92,7 @@ Planned shots:
 | **Bounds Resolution — Curve** | `30°` | Maximum angular deviation (`1°–90°`) when approximating curved edges as polygons. Smaller angles produce smoother curves. |
 | **Bounds Resolution — Simplify** | `1 mm` | Tolerance for removing redundant boundary vertices (`0.001–10 mm`). |
 
-#### Nesting Settings &amp; Rotation
+#### Algorithm &amp; Rotation
 
 | Control | Default | Description |
 |---|---|---|
@@ -141,7 +142,6 @@ $$\text{Fitness} = A_{\text{sheets}} + w_g A_{\text{bbox}} + w_o (A_{\max} - V_{
 | Control | Default | Description |
 |---|---|---|
 | **Simulation** | `Single` | `Off` draws only the final layout; `Single` draws one layout at a time; `All` draws every GA population member in a grid while worker processes run. |
-| **Verbose Logging** | Off | Prints detailed step-by-step nesting diagnostics to the FreeCAD Report view. |
 | **Candidate Spacing** | `5 mm` | Distance between sample points checked along placement edges (`1–100 mm`). Smaller spacing checks tighter corners at the cost of time. |
 | **GA worker processes** | `Auto` (`0`) | Number of parallel worker processes for GA evaluation (`Auto` uses up to one process per physical CPU core, batch-balanced; `1` runs in-process). |
 | **Clear NFP Cache** | Off | Forces recalculation of cached No-Fit Polygons on the next run. |
@@ -170,7 +170,7 @@ $$\text{Fitness} = A_{\text{sheets}} + w_g A_{\text{bbox}} + w_o (A_{\max} - V_{
 
 ### ![Export Sheets as DXF icon](docs/images/icon_dxf.svg) Export Sheets as DXF
 
-**Export Sheets as DXF** (`Nesting` → `Export Sheets as DXF`) exports each `Sheet_N` group in the selected `Layout` to its own `.dxf` file in a chosen directory (defaulting to `~/Downloads/<Layout>_DXF_Export`), with an option to delete or keep the temporary 2D projection views created during export.
+**Export Sheets as DXF** (`Nesting` → `Export Sheets as DXF`) exports each `Sheet_N` group in the selected `Layout` to its own `.dxf` file in a chosen directory (defaulting to `~/Downloads/<Layout>_DXF_Export`), with an option to delete or keep the temporary 2D projection views created during export. Each part outline, label and silhouette outline is written on its own layer, and parts, labels and the sheet border take their DXF colors from **Nesting Settings**. **Include part bounds** in Export Options also writes each part's bound on its own layer; it starts checked when the layout was nested with Show Bounds on. To open the files in Inkscape, tick **Gcodetools compatible point import** in its DXF import dialog; without it, Inkscape leaves out some part edges.
 
 ### ![Stack/Unstack Sheets icon](docs/images/icon_stack.svg) Stack/Unstack Sheets
 
@@ -190,7 +190,7 @@ $$\text{Fitness} = A_{\text{sheets}} + w_g A_{\text{bbox}} + w_o (A_{\max} - V_{
 
 ### Nesting Settings &amp; About
 
-- **Nesting Settings** (`Nesting` → `Nesting Settings`): Sets the currency symbol prefix used for sheet prices in the Library (for example `$`, `€`, or `£`) and toggles persistent crash logs (`Nesting.log` in FreeCAD's user data directory) and verbose debug output in the Report view.
+- **Nesting Settings** (first item in the `Nesting` menu): Sets the currency symbol for prices (it follows FreeCAD's number format until you type one; **Use system default** goes back to that), whether a sound plays when nesting finishes, the sheet colors in the 3D view, the DXF colors of part outlines, labels, part bounds and the sheet border, crash logging (`Nesting.log`), debug logging, and verbose run logging to the Report view.
 - **About Nesting Workbench** (`Nesting` → `About Nesting Workbench`): Displays the installed workbench version from `package.xml` and a link to support development.
 
 ## Requirements
