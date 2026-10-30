@@ -24,7 +24,9 @@ except ImportError:
     SHAPELY_AVAILABLE = False
 
 from .. import back_side
-from ..constants import FLIP_ANGLE
+from ..constants import (
+    FLIP_ANGLE, OFFCUT_COLOR, OFFCUT_GROUP_PREFIX, OFFCUT_LINE_COLOR, OFFCUT_PREFIX, OFFCUT_Z,
+)
 from .label_object import build_label_shape, create_label_object
 from ..freecad_helpers import calculate_label_placement, create_part_feature, recursive_delete, write_sheet_instance
 from freecad.nestingworkbench import nw_logger
@@ -171,6 +173,8 @@ class Sheet:
             for placed_part in self.parts:
                 self._draw_single_part(doc, placed_part.shape, sheet_origin, ui_params, shapes_group, parts_to_place_group, verbose=verbose)
 
+            self._draw_offcuts(doc, sheet_group, sheet_origin, ui_params)
+
             if self.stock is not None and self.stock["flip"] != "none":
                 back_side.draw_back_side(doc, sheet_group, self.id + 1, self.stock["flip"],
                                          FLIP_ANGLE, self.spacing)
@@ -204,6 +208,36 @@ class Sheet:
             
             # Draw the current transient part being placed
             self._draw_single_part(doc, transient_part, sheet_origin, ui_params, verbose=verbose)
+
+    def _draw_offcuts(self, doc, sheet_group, sheet_origin, ui_params):
+        """Draw this sheet's offcuts (NLA ruling 20) into an Offcuts_<n> subgroup.
+
+        The rectangles are offcuts.free_rectangles over the placed parts at the panel's Minimum
+        Offcut, the pieces the Offcuts score counts. Each carries its size, for a later
+        add-to-library step (LKS-006).
+        """
+        from ..Tools.Nesting.algorithms.fitness import MIN_OFFCUT_DEFAULT
+        from ..Tools.Nesting.algorithms.offcuts import free_rectangles
+        n = self.id + 1
+        rects = free_rectangles(self.parts, self.width, self.height,
+                                ui_params.get('min_offcut', MIN_OFFCUT_DEFAULT))
+        if not rects:
+            return
+        group = doc.addObject("App::DocumentObjectGroup", f"{OFFCUT_GROUP_PREFIX}{n}")
+        sheet_group.addObject(group)
+        visible = bool(ui_params.get('show_offcuts', True))
+        for k, (x0, y0, x1, y1) in enumerate(rects, start=1):
+            obj = create_part_feature(doc, f"{OFFCUT_PREFIX}{n}_{k}",
+                                      Part.makePlane(x1 - x0, y1 - y0), group=group, visible=visible)
+            obj.Placement = FreeCAD.Placement(sheet_origin + FreeCAD.Vector(x0, y0, OFFCUT_Z),
+                                              FreeCAD.Rotation())
+            obj.addProperty("App::PropertyLength", "OffcutWidth", "Offcut", "Width along the sheet's X")
+            obj.addProperty("App::PropertyLength", "OffcutHeight", "Offcut", "Height along the sheet's Y")
+            obj.OffcutWidth, obj.OffcutHeight = x1 - x0, y1 - y0
+            if FreeCAD.GuiUp and getattr(obj, "ViewObject", None):
+                obj.ViewObject.ShapeColor = OFFCUT_COLOR
+                obj.ViewObject.LineColor = OFFCUT_LINE_COLOR
+                obj.ViewObject.Transparency = 50
 
     def _draw_single_part(self, doc, shape, sheet_origin, ui_params, shapes_group=None, parts_to_place_group=None, verbose=False):
         """Helper to draw a single part, dispatching to final or simulation path."""
@@ -294,7 +328,7 @@ class Sheet:
             label_name = f"label_{shape.id}"
             # Allow FreeCAD to auto-rename if collision exists (e.g. label_Part001)
             # Do NOT delete existing objects by name as they might belong to other layouts.
-            label_obj = create_label_object(label_name)
+            label_obj = create_label_object(doc, label_name)
 
             label_obj.Shape = build_label_shape(
                 shape.label_text, ui_params['font_path'], ui_params.get('label_size', 10.0))

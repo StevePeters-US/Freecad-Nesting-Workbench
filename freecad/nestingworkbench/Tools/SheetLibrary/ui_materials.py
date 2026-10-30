@@ -46,20 +46,20 @@ class MaterialsTab(QtWidgets.QWidget):
 
         self.new_button = QtWidgets.QPushButton(translate("MaterialsTab", "New…"))
         self.new_button.setToolTip(rich_tooltip("MaterialsTab", QT_TRANSLATE_NOOP(
-            "MaterialsTab", "Add a material to the list sheets pick from.")))
+            "MaterialsTab", "Adds a material to the list sheets pick from.")))
         self.new_button.clicked.connect(self._on_new)
         btn_layout.addWidget(self.new_button)
 
         self.rename_button = QtWidgets.QPushButton(translate("MaterialsTab", "Rename…"))
         self.rename_button.setToolTip(rich_tooltip("MaterialsTab", QT_TRANSLATE_NOOP(
-            "MaterialsTab", "Rename the selected material, on every sheet that uses it.")))
+            "MaterialsTab", "Renames the selected material across every sheet that uses it.")))
         self.rename_button.clicked.connect(self._on_rename)
         btn_layout.addWidget(self.rename_button)
 
         self.del_button = QtWidgets.QPushButton(translate("MaterialsTab", "Delete"))
         self.del_button.setToolTip(rich_tooltip("MaterialsTab", QT_TRANSLATE_NOOP(
             "MaterialsTab",
-            "Remove the selected material. Sheets that use it are kept, with no material.")))
+            "Removes the selected material; sheets that use it are kept with no material.")))
         self.del_button.clicked.connect(self._on_delete)
         btn_layout.addWidget(self.del_button)
 

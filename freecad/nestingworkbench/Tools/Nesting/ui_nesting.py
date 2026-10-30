@@ -11,9 +11,10 @@ import FreeCAD
 import FreeCADGui
 import os
 from ...constants import (
-    MINKOWSKI_ROTATION_PRESETS, PHYSICS_ROTATION_PRESETS, PREFS_PATH, PREF_SHEET_SEQUENCE, PROP_DEFLECTION_ANGLE, PROP_LABEL_SIZE,
-    PROP_PART_SPACING, PROP_SIMPLIFICATION,
+    MINKOWSKI_ROTATION_PRESETS, PREFS_PATH, PREF_SHEET_SEQUENCE, PROP_DEFLECTION_ANGLE, PROP_LABEL_SIZE,
+    PROP_PART_SPACING, PROP_PART_DIRECTION, PROP_SHOW_OFFCUTS, PROP_SIMPLIFICATION, WEIGHT_PROPS,
     SIM_SINGLE,
+    ALGO_BEAM, ALGO_GREEDY,
 )
 from ... import FONTS_DIR, DEFAULT_FONT
 from freecad.nestingworkbench import nw_logger
@@ -22,11 +23,16 @@ from freecad.nestingworkbench.ui_helpers import (
     QT_TRANSLATE_NOOP,
     rich_tooltip,
     make_double_spinbox,
+    make_quantity_spinbox,
+    make_area_spinbox,
+    format_length,
     make_int_spinbox,
     make_checkbox,
     make_slider,
     LinkedSliderSpinBox,
+    LinkedSliderDoubleSpinBox,
     DirectionDial,
+    WeightSliders,
     DIRECTION_DETENT_DEFAULT,
     CollapsibleSection,
     closest_angle_index,
@@ -50,12 +56,82 @@ _DEFAULTS = {
     # benchmarked corpus. Heavier settings are opt-in presets, not the default.
     "ga_population": 1,
     "ga_generations": 1,
+    "ga_winners": 2,
+    "ga_mutation_rate": 0.10,
+    "weight_gravity": 50,
+    "weight_contact": 0,
+    "weight_direction": 0,
+    "weight_offcut": 50,
+    "part_direction": 0.0,
+    "fitness_min_offcut": 100000.0,  # mm², 0.1 m²
+    # Beam Search defaults:
+    "beam_width": 1,
+    "beam_width_decay": 1.0,
+    "max_part_branches": 1,
+    "max_rot_branches": 1,
+    "beam_iterative": False,
 }
+
+# (label, beam_width, max_part_branches, max_rot_branches, iterative, width_decay)
+_BEAM_PRESETS = [
+    (QT_TRANSLATE_NOOP("NestingPanel", "Default (W=1, fast greedy)"), 1, 1, 1, False, 1.0),
+    (QT_TRANSLATE_NOOP("NestingPanel", "Balanced (W=4, iterative)"), 4, 2, 3, True, 1.0),
+    (QT_TRANSLATE_NOOP("NestingPanel", "Thorough (W=8, iterative)"), 8, 2, 3, True, 1.0),
+]
+_BEAM_CUSTOM_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "Custom")
+
+_BEAM_WIDTH_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets the number of top partial sheet layouts kept after each part is placed.\n"
+    "<b>Lower:</b> faster, greedy-like placement. <b>Higher:</b> explores more branches for tighter packing.\n"
+    "With Population Size above 1, this is the widest beam the GA will try.\n"
+    "<b>Default:</b> 1. <b>Typical:</b> 1–8."
+)
+
+_BEAM_DECAY_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Scales the beam width after each placed part (width × decay^parts for the first member).\n"
+    "<b>Lower:</b> narrows the search quickly on later parts. <b>Higher:</b> keeps the full beam width longer.\n"
+    "<b>Default:</b> 1.00. <b>Typical:</b> 0.85–1.00."
+)
+
+_BEAM_PART_BRANCHES_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets the maximum number of distinct remaining part types branched on at each placement step.\n"
+    "<b>Lower:</b> faster search. <b>Higher:</b> tries more part-order alternatives at each step.\n"
+    "<b>Default:</b> 1. <b>Typical:</b> 1–4."
+)
+
+_BEAM_ROT_BRANCHES_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets the maximum number of alternative rotations branched on per part type at each step.\n"
+    "<b>Lower:</b> faster search. <b>Higher:</b> keeps more rotation choices open.\n"
+    "<b>Default:</b> 1. <b>Typical:</b> 1–4."
+)
+
+_BEAM_ITERATIVE_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Runs successive doubling passes (W = 1, 2, 4, … up to Beam Width) and keeps the best layout found so far."
+)
+
+_BEAM_PRESET_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Selects a predefined Beam Search configuration.\n"
+    "<b>Default (W=1, fast greedy):</b> single-branch greedy pass.\n"
+    "<b>Balanced (W=4, iterative):</b> anytime passes up to width 4.\n"
+    "<b>Thorough (W=8, iterative):</b> anytime passes up to width 8.\n"
+    "<b>Default:</b> Default (W=1, fast greedy)."
+)
+
+_BEAM_WARNING_TEXT = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Note: Beam widths > 16 substantially increase runtime with diminishing returns."
+)
 
 # (label, population, generations) — from the 2026-09-03 GA sizing benchmark.
 # Re-run the sizing sweep before changing any number here.
 _GA_PRESETS = [
-    (QT_TRANSLATE_NOOP("NestingPanel", "Default (1 pop, 1 gen)"), 1, 1),
+    (QT_TRANSLATE_NOOP("NestingPanel", "Single run (1 pop, 1 gen)"), 1, 1),
     (QT_TRANSLATE_NOOP("NestingPanel", "Balanced (10 pop, 10 gen)"), 10, 10),
     (QT_TRANSLATE_NOOP("NestingPanel", "Thorough (10 pop, 20 gen)"), 10, 20),
 ]
@@ -63,59 +139,100 @@ _GA_CUSTOM_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "Custom")
 _SIM_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "Simulation:")
 _SIM_TIP = QT_TRANSLATE_NOOP(
     "NestingPanel",
-    "Draws the nesting while it runs, which is slower. Off draws only the result. "
-    "Single draws one layout at a time. All draws every genetic-algorithm population "
-    "member at once, one row each, while GA worker processes evaluate them; "
-    "elsewhere it behaves like Single. Trial positions and master highlighting "
-    "appear only with one worker process.")
+    "Selects how much of the nesting run is drawn live in the 3D view.\n"
+    "<b>Off:</b> draws only the finished layout (fastest).\n"
+    "<b>Single:</b> draws one layout at a time.\n"
+    "<b>All:</b> draws every GA population member at once in a grid while worker processes run.\n"
+    "<b>Default:</b> Single.")
 _WORKERS_LABEL = QT_TRANSLATE_NOOP("NestingPanel", "GA worker processes:")
 # {0} is the number of workers Auto will start for the current population, e.g. "Auto - (5)".
 _WORKERS_AUTO_FMT = QT_TRANSLATE_NOOP("NestingPanel", "Auto - ({0})")
 _WORKERS_TIP = QT_TRANSLATE_NOOP(
     "NestingPanel",
-    "How many processes evaluate the genetic algorithm's population at once. "
-    "Auto shows the number it will use: one per physical CPU core and at most one per "
-    "population member, fewer if that fills every batch of layouts equally. More "
-    "workers than physical cores is usually slower. 1 evaluates one layout at a time, "
-    "which also skips the worker start-up cost on small jobs.")
+    "Sets how many processes evaluate the GA population in parallel.\n"
+    "<b>Lower:</b> uses fewer CPU cores. <b>Higher:</b> evaluates more layouts at once up to physical core count.\n"
+    "0 (Auto) picks up to one worker per physical core and balances batch sizes; 1 runs in-process.\n"
+    "<b>Default:</b> Auto.")
+
+_GA_WINNERS_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets how many of the best layouts breed the next generation (the top one is also kept unchanged).\n"
+    "<b>Lower:</b> converges faster on the leading layout. <b>Higher:</b> keeps the search broader.\n"
+    "Needs Population Size above 1.\n"
+    "<b>Default:</b> 3. <b>Typical:</b> 2–5."
+)
+
+_GA_MUTATION_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets the probability of replacing each child setting with a random value after breeding.\n"
+    "<b>Lower:</b> stays close to the winning parents. <b>Higher:</b> explores more random variations.\n"
+    "0 turns mutation off; 1 makes every child random.\n"
+    "<b>Default:</b> 0.10. <b>Typical:</b> 0.05–0.25."
+)
+
+_WEIGHT_GRAVITY_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets how much packing toward the Nesting Direction counts; finished layouts with a smaller bounding box on the last sheet rank higher.\n"
+    "<b>Higher:</b> pulls parts harder toward the Nesting Direction.\n"
+    "The four weights always add up to 100%; moving one adjusts the unlocked others.\n"
+    "<b>Default:</b> 50%.")
+
+_WEIGHT_CONTACT_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets how much a part touching other parts and sheet edges counts (the fraction of its spaced outline running along a neighbour or edge).\n"
+    "<b>Higher:</b> parts nest into each other and against sheet edges; slower.\n"
+    "0% turns it off.\n"
+    "<b>Default:</b> 0%.")
+
+_WEIGHT_DIRECTION_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets how much a part facing the Part Direction counts (180° also counts as aligned, as with wood grain; 90° off counts least).\n"
+    "<b>Higher:</b> penalizes rotations away from Part Direction.\n"
+    "0% turns it off.\n"
+    "<b>Default:</b> 0%.")
+
+_WEIGHT_OFFCUT_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets how much usable free rectangles on all sheets count when layouts use the same number of sheets.\n"
+    "<b>Higher:</b> favours a few large offcuts over many small ones.\n"
+    "Measured on finished layouts only. Fewer sheets, and every part placed, always come first.\n"
+    "<b>Default:</b> 50%.")
+
+_PART_DIRECTION_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets the target angle in ° that parts should face, measured from how each part is drawn.\n"
+    "Used by the Direction weight; 0% turns it off.\n"
+    "<b>Default:</b> 0°.")
+
+_FITNESS_MIN_OFFCUT_TOOLTIP = QT_TRANSLATE_NOOP(
+    "NestingPanel",
+    "Sets the smallest free rectangle that counts as an offcut; smaller pieces are scrap and count for nothing.\n"
+    "<b>Lower:</b> counts smaller leftover rectangles. <b>Higher:</b> rewards only large reusable sheets.\n"
+    "<b>Default:</b> 0.1 m².")
 
 _GA_POP_TOOLTIP = QT_TRANSLATE_NOOP(
     "NestingPanel",
-    "<b>Population Size:</b><br>"
-    "Number of candidate layouts evaluated per generation.<br><br>"
-    "<b>Default (1):</b> Single seeded placement; matches greedy on both benchmarked "
-    "corpora in under 0.11s.<br>"
-    "<b>Balanced (10):</b> paired with 10 generations, 1.02% better than greedy on "
-    "rectangular parts and 0.79% on irregular parts, at 16.4x the Default's run time "
-    "(1.84s).<br>"
-    "<b>Larger (20-40):</b> measured no better than 10 on either corpus, and costs "
-    "proportionally more time."
+    "Sets the number of candidate layouts (Population Size) evaluated in each generation.\n"
+    "<b>Lower:</b> faster runs. <b>Higher:</b> broader search across part orders, directions and rotations.\n"
+    "1 runs a single seeded pass.\n"
+    "<b>Default:</b> 1. <b>Typical:</b> 1–10."
 )
 
 _GA_GEN_TOOLTIP = QT_TRANSLATE_NOOP(
     "NestingPanel",
-    "<b>Generations:</b><br>"
-    "Number of evolutionary optimization cycles.<br><br>"
-    "<b>Default (1):</b> Single pass without evolutionary iteration.<br>"
-    "<b>Balanced (10):</b> Paired with population 10; the winning layout appeared by "
-    "generation 3 on average (generation 6 at the latest) on rectangular parts.<br>"
-    "<b>Thorough (20):</b> best measured packing, 1.67% better than greedy on "
-    "rectangular parts.<br>"
-    "<b>Large (&gt;20):</b> fitness was identical at 20 and 40 generations on both "
-    "corpora, and stagnation detection halts early anyway, so extra generations cost "
-    "time without changing the result."
+    "Sets the number of evolutionary cycles (Generations) to run.\n"
+    "<b>Lower:</b> finishes sooner. <b>Higher:</b> gives crossover and mutation more cycles to improve the layout.\n"
+    "Needs Population Size above 1 to evolve.\n"
+    "<b>Default:</b> 1. <b>Typical:</b> 1–20."
 )
 
 _GA_PRESET_TOOLTIP = QT_TRANSLATE_NOOP(
     "NestingPanel",
-    "<b>Optimization Preset:</b><br>"
-    "Predefined population and generation configurations, sized from benchmark runs.<br><br>"
-    "<b>Default (1 pop, 1 gen):</b> Fast seeded placement; matched greedy exactly on "
-    "both corpora, in 0.11s or less.<br>"
-    "<b>Balanced (10 pop, 10 gen):</b> 1.02% better than greedy on rectangular parts "
-    "and 0.79% on irregular parts, 16.4x the Default's run time (1.84s).<br>"
-    "<b>Thorough (10 pop, 20 gen):</b> Best measured packing, 1.67% better than greedy "
-    "on rectangular parts, 17.1x the Default's run time (1.92s)."
+    "Selects a predefined population and generation pair.\n"
+    "<b>Single run (1 pop, 1 gen):</b> one seeded pass with no evolution.\n"
+    "<b>Balanced (10 pop, 10 gen):</b> good packing improvement at moderate runtime.\n"
+    "<b>Thorough (10 pop, 20 gen):</b> deepest search for the tightest layout.\n"
+    "<b>Default:</b> Single run (1 pop, 1 gen)."
 )
 
 _GA_WARNING_TEXT = QT_TRANSLATE_NOOP(
@@ -144,7 +261,8 @@ class NestingPanel(QtWidgets.QWidget):
     def accept(self):
         """Called when the user clicks Standard Button OK / Apply."""
         if hasattr(self, 'controller'):
-            self.controller.finalize_job()
+            if not self.controller.finalize_job():
+                return False
             self.controller.on_panel_closed()
         return True
 
@@ -170,25 +288,25 @@ class NestingPanel(QtWidgets.QWidget):
 
         # The Advanced section places widgets the Minkowski page creates, so it comes after.
         self.minkowski_settings_group = self._build_minkowski_group()
-        self.physics_settings_group = self._build_physics_group()
         self.advanced_section = self._build_advanced_section()
 
         self.algorithm_dropdown = QtWidgets.QComboBox()
-        self.algorithm_dropdown.addItems([
-            QT_TRANSLATE_NOOP("NestingPanel", "Minkowski"),
-            QT_TRANSLATE_NOOP("NestingPanel", "Physics"),
-        ])
+        for label, key in ((QT_TRANSLATE_NOOP("NestingPanel", "Greedy"), ALGO_GREEDY),
+                           (QT_TRANSLATE_NOOP("NestingPanel", "Beam Search"), ALGO_BEAM)):
+            self.algorithm_dropdown.addItem(tr("NestingPanel", label), key)
         self.algorithm_dropdown.setCurrentIndex(0)
         self.algorithm_dropdown.setToolTip(rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
             "NestingPanel",
-            "Chooses the placement method.\n"
-            "<b>Minkowski:</b> fits parts edge to edge from precomputed outlines.\n"
-            "<b>Physics:</b> drops parts under simulated gravity.")))
-        self.algorithm_dropdown.currentTextChanged.connect(self._on_algorithm_change)
+            "Selects the placement strategy.\n"
+            "<b>Greedy:</b> places parts one at a time at the best spot found. Fast.\n"
+            "<b>Beam Search:</b> keeps the top partial layouts at every step. Slower, usually tighter.\n"
+            "The Genetic Algorithm section below runs whichever you choose.\n"
+            "<b>Default:</b> Greedy.")))
+        self.algorithm_dropdown.currentIndexChanged.connect(
+            lambda *_: self._on_algorithm_change(self.algorithm()))
 
-        form_layout.addRow(tr("NestingPanel", "Nesting Algorithm:"), self.algorithm_dropdown)
+        form_layout.addRow(tr("NestingPanel", "Placement:"), self.algorithm_dropdown)
         form_layout.addRow(self.minkowski_settings_group)
-        form_layout.addRow(self.physics_settings_group)
         form_layout.addRow(self.advanced_section)
         group.setLayout(form_layout)
         return group
@@ -199,17 +317,17 @@ class NestingPanel(QtWidgets.QWidget):
         group = QtWidgets.QGroupBox(tr("NestingPanel", "Sheet Setup"))
         form_layout = QtWidgets.QFormLayout()
 
-        self.sheet_width_input = make_double_spinbox(
+        self.sheet_width_input = make_quantity_spinbox(
             _DEFAULTS["default_sheet_width"], 1, 10000,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Width of the stock sheet, in mm."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the Width of the stock sheet.\n<b>Default:</b> 600 mm."))
         )
-        self.sheet_height_input = make_double_spinbox(
+        self.sheet_height_input = make_quantity_spinbox(
             _DEFAULTS["default_sheet_height"], 1, 10000,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Height of the stock sheet, in mm."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the Height of the stock sheet.\n<b>Default:</b> 600 mm."))
         )
-        self.sheet_thickness_input = make_double_spinbox(
+        self.sheet_thickness_input = make_quantity_spinbox(
             _DEFAULTS["sheet_thickness"], 0.1, 1000,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Thickness of the stock sheet, in mm."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the Thickness of the stock sheet.\n<b>Default:</b> 3 mm."))
         )
         self.sheet_flip_combo = QtWidgets.QComboBox()
         self.sheet_flip_combo.addItem(tr("NestingPanel", "None (one side)"), "none")
@@ -217,13 +335,17 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_flip_combo.addItem(tr("NestingPanel", "About Y (left edge to right edge)"), "y")
         self.sheet_flip_combo.setToolTip(rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
             "NestingPanel",
-            "Turn this sheet over after the first side is cut, to machine its back. Library sheets set this in the library; Custom sheets set it here.")))
-        self.part_spacing_input = make_double_spinbox(
+            "Turns this sheet over after the first side is cut to machine its back.\n"
+            "Library sheets set this in the library; Custom sheets set it here.\n"
+            "<b>Default:</b> None (one side).")))
+        self.part_spacing_input = make_quantity_spinbox(
             _DEFAULTS["part_spacing"], 0, 1000,
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
                 "NestingPanel",
-                "Minimum gap kept between nested parts, in mm.\n"
-                "0 lets parts touch."))
+                "Sets the minimum gap kept between nested parts and sheet edges.\n"
+                "<b>Lower:</b> tighter packing. <b>Higher:</b> leaves more clearance for wider cutters.\n"
+                "0 lets parts touch.\n"
+                "<b>Default:</b> 12.5 mm. <b>Typical:</b> 0–25 mm."))
         )
 
         self.deflection_input = make_double_spinbox(
@@ -231,24 +353,20 @@ class NestingPanel(QtWidgets.QWidget):
             step=1, decimals=0, suffix="°",
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
                 "NestingPanel",
-                "<b>Curve Angle (Tessellation Quality):</b><br>"
-                "Maximum angular deviation when approximating curves.<br><br>"
-                "<b>Smaller (5-10°):</b> Smoother curves, more points, slower.<br>"
-                "<b>Larger (20-45°):</b> Coarser curves, fewer points, faster.<br><br>"
-                "<i>Tip: 10° is good for most parts. Use 5° for precision, 30°+ for speed.</i>"
+                "Sets the maximum angular deviation in ° when approximating curved edges as polygons.\n"
+                "<b>Lower:</b> smoother curves, more vertices, slower nesting. <b>Higher:</b> coarser curves, fewer vertices, faster.\n"
+                "<b>Default:</b> 30°. <b>Typical:</b> 5–30°."
             ))
         )
 
-        self.simplification_input = make_double_spinbox(
+        self.simplification_input = make_quantity_spinbox(
             1.0, 0.001, 10.0,
-            step=0.1, decimals=3,
+            step=0.1,
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
                 "NestingPanel",
-                "<b>Simplification (Point Reduction):</b><br>"
-                "Tolerance (mm) for removing redundant boundary points.<br><br>"
-                "<b>Smaller (0.1-0.5):</b> More detailed boundaries, slower nesting.<br>"
-                "<b>Larger (1.0-5.0):</b> Simpler boundaries, faster nesting.<br><br>"
-                "<i>Tip: Set this to your machine's precision tolerance (e.g., 1mm for routers).</i>"
+                "Sets the tolerance for removing redundant boundary vertices.\n"
+                "<b>Lower:</b> keeps finer boundary detail, slower nesting. <b>Higher:</b> simpler outlines, faster nesting.\n"
+                "<b>Default:</b> 1 mm. <b>Typical:</b> 0.1–5 mm."
             ))
         )
 
@@ -257,9 +375,8 @@ class NestingPanel(QtWidgets.QWidget):
             "NestingPanel",
             QT_TRANSLATE_NOOP(
                 "NestingPanel",
-                "Pick a sheet from the sheet library to fill in its size and thickness.\n"
-                "Those fields are then locked, so change them in the library.\n"
-                "Custom lets you type them.",
+                "Selects a sheet from the library to fill in its size, thickness and flip.\n"
+                "Library sheets lock those fields here; choose Custom to edit them directly.",
             ),
         ))
         self.sheet_library_button = QtWidgets.QToolButton()
@@ -268,7 +385,7 @@ class NestingPanel(QtWidgets.QWidget):
             "NestingPanel",
             QT_TRANSLATE_NOOP(
                 "NestingPanel",
-                "Open the sheet library to add or edit sheets.",
+                "Opens the Sheet Library to add or edit saved sheets and materials.",
             ),
         ))
         self.sheet_library_button.clicked.connect(self._open_sheet_library)
@@ -284,7 +401,7 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_material_label = QtWidgets.QLabel("—")
         self.sheet_material_label.setToolTip(rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
             "NestingPanel",
-            "Material of the library sheet. Shows — for a Custom size or a sheet with no material.")))
+            "Shows the material of the selected library sheet, or — for a Custom sheet.")))
 
         self._sheet_rows = [
             sheet_sequence.custom_row(_DEFAULTS["default_sheet_width"], _DEFAULTS["default_sheet_height"], _DEFAULTS["sheet_thickness"])
@@ -298,8 +415,8 @@ class NestingPanel(QtWidgets.QWidget):
             "NestingPanel",
             QT_TRANSLATE_NOOP(
                 "NestingPanel",
-                "Sheets are used in this order. The last sheet repeats when more are needed.\n"
-                "'+ back' means that sheet is turned over to machine its back: the layout shows its back side above it, and Create CAM Job makes a second job.",
+                "Lists the sheets used in order; the last sheet repeats when more are needed.\n"
+                "'+ back' means the sheet is flipped to machine its back side.",
             ),
         ))
         self.sheet_list.currentRowChanged.connect(self._on_sheet_list_row_changed)
@@ -308,7 +425,7 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_add_button.setText(tr("NestingPanel", "Add"))
         self.sheet_add_button.setToolTip(rich_tooltip(
             "NestingPanel",
-            QT_TRANSLATE_NOOP("NestingPanel", "Add a copy of the selected sheet."),
+            QT_TRANSLATE_NOOP("NestingPanel", "Adds a copy of the selected sheet to the sequence."),
         ))
         self.sheet_add_button.clicked.connect(self._on_sheet_add)
 
@@ -316,7 +433,7 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_remove_button.setText(tr("NestingPanel", "Remove"))
         self.sheet_remove_button.setToolTip(rich_tooltip(
             "NestingPanel",
-            QT_TRANSLATE_NOOP("NestingPanel", "Remove the selected sheet from the sequence."),
+            QT_TRANSLATE_NOOP("NestingPanel", "Removes the selected sheet from the sequence."),
         ))
         self.sheet_remove_button.clicked.connect(self._on_sheet_remove)
 
@@ -324,7 +441,7 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_up_button.setText(tr("NestingPanel", "Up"))
         self.sheet_up_button.setToolTip(rich_tooltip(
             "NestingPanel",
-            QT_TRANSLATE_NOOP("NestingPanel", "Move the selected sheet earlier in the sequence."),
+            QT_TRANSLATE_NOOP("NestingPanel", "Moves the selected sheet earlier in the sequence."),
         ))
         self.sheet_up_button.clicked.connect(self._on_sheet_up)
 
@@ -332,7 +449,7 @@ class NestingPanel(QtWidgets.QWidget):
         self.sheet_down_button.setText(tr("NestingPanel", "Down"))
         self.sheet_down_button.setToolTip(rich_tooltip(
             "NestingPanel",
-            QT_TRANSLATE_NOOP("NestingPanel", "Move the selected sheet later in the sequence."),
+            QT_TRANSLATE_NOOP("NestingPanel", "Moves the selected sheet later in the sequence."),
         ))
         self.sheet_down_button.clicked.connect(self._on_sheet_down)
 
@@ -384,7 +501,7 @@ class NestingPanel(QtWidgets.QWidget):
         w = float(row["width"])
         h = float(row["height"])
         t = float(row["thickness"])
-        text = f"{index + 1}. {name} — {w:g} × {h:g} × {t:g} mm"
+        text = f"{index + 1}. {name} — {format_length(w)} × {format_length(h)} × {format_length(t)}"
         flip = row["flip"]
         if flip in ("x", "y"):
             text += tr("NestingPanel", " + back (flip %1)").replace("%1", flip.upper())
@@ -639,25 +756,141 @@ class NestingPanel(QtWidgets.QWidget):
 
         self.minkowski_direction_dial = DirectionDial()
 
-        self.minkowski_random_checkbox = make_checkbox(
-            tr("NestingPanel", "Use Random Direction"),
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "If checked, each part will use a randomized placement weighting."))
+        self.evolve_direction_checkbox = make_checkbox(
+            tr("NestingPanel", "Let the GA Vary Direction"),
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
+                "NestingPanel",
+                "Lets the GA vary the nesting direction across population members (Greedy only; the first member uses the dial)."))
         )
-        self.minkowski_random_checkbox.stateChanged.connect(lambda state: self.minkowski_direction_dial.setDisabled(state))
 
-        form_layout.addRow(tr("NestingPanel", "Nesting Direction:"), self.minkowski_direction_dial)
-        form_layout.addRow(self.minkowski_random_checkbox)
+        self.direction_dial_label = QtWidgets.QLabel(tr("NestingPanel", "Nesting Direction:"))
+
+        self.beam_width_input = make_int_spinbox(
+            _DEFAULTS["beam_width"], 1, 64,
+            tooltip=rich_tooltip("NestingPanel", _BEAM_WIDTH_TOOLTIP)
+        )
+        self.beam_max_part_branches_input = make_int_spinbox(
+            _DEFAULTS["max_part_branches"], 1, 16,
+            tooltip=rich_tooltip("NestingPanel", _BEAM_PART_BRANCHES_TOOLTIP)
+        )
+        self.beam_max_rot_branches_input = make_int_spinbox(
+            _DEFAULTS["max_rot_branches"], 1, 32,
+            tooltip=rich_tooltip("NestingPanel", _BEAM_ROT_BRANCHES_TOOLTIP)
+        )
+        self.beam_width_decay_input = make_double_spinbox(
+            _DEFAULTS["beam_width_decay"], 0.5, 1.0, step=0.05, decimals=2,
+            tooltip=rich_tooltip("NestingPanel", _BEAM_DECAY_TOOLTIP)
+        )
+        self.beam_iterative_checkbox = make_checkbox(
+            tr("NestingPanel", "Iterative Anytime"),
+            checked=_DEFAULTS["beam_iterative"],
+            tooltip=rich_tooltip("NestingPanel", _BEAM_ITERATIVE_TOOLTIP)
+        )
+
+        self.beam_preset_dropdown = QtWidgets.QComboBox()
+        for label, *_rest in _BEAM_PRESETS:
+            self.beam_preset_dropdown.addItem(
+                QtWidgets.QApplication.translate("NestingPanel", label)
+            )
+        self.beam_preset_dropdown.addItem(
+            QtWidgets.QApplication.translate("NestingPanel", _BEAM_CUSTOM_LABEL)
+        )
+        self.beam_preset_dropdown.setCurrentIndex(0)
+        self.beam_preset_dropdown.setToolTip(
+            rich_tooltip("NestingPanel", _BEAM_PRESET_TOOLTIP)
+        )
+
+        self.beam_warning_label = QtWidgets.QLabel()
+        self.beam_warning_label.setStyleSheet("color: #d97706; font-size: 11px;")
+        self.beam_warning_label.setWordWrap(True)
+        self.beam_warning_label.setVisible(False)
+
+        self._updating_beam_preset = False
+
+        def _on_beam_preset_changed(idx):
+            if self._updating_beam_preset:
+                return
+            self._updating_beam_preset = True
+            try:
+                if 0 <= idx < len(_BEAM_PRESETS):
+                    _, w, pb, rb, it, dc = _BEAM_PRESETS[idx]
+                    self.beam_width_input.setValue(w)
+                    self.beam_width_decay_input.setValue(dc)
+                    self.beam_max_part_branches_input.setValue(pb)
+                    self.beam_max_rot_branches_input.setValue(rb)
+                    self.beam_iterative_checkbox.setChecked(it)
+            finally:
+                self._updating_beam_preset = False
+            _sync_beam_warning_and_preset()
+
+        def _sync_beam_warning_and_preset():
+            w = self.beam_width_input.value()
+            pb = self.beam_max_part_branches_input.value()
+            rb = self.beam_max_rot_branches_input.value()
+            it = self.beam_iterative_checkbox.isChecked()
+            dc = self.beam_width_decay_input.value()
+
+            if w > 16:
+                self.beam_warning_label.setText(
+                    QtWidgets.QApplication.translate("NestingPanel", _BEAM_WARNING_TEXT)
+                )
+                self.beam_warning_label.setVisible(True)
+            else:
+                self.beam_warning_label.setVisible(False)
+
+            if not self._updating_beam_preset:
+                self._updating_beam_preset = True
+                try:
+                    matched_idx = -1
+                    for i, (_, pw, ppb, prb, pit, pdc) in enumerate(_BEAM_PRESETS):
+                        if w == pw and pb == ppb and rb == prb and it == pit and abs(dc - pdc) < 1e-9:
+                            matched_idx = i
+                            break
+                    if matched_idx != -1:
+                        self.beam_preset_dropdown.setCurrentIndex(matched_idx)
+                    else:
+                        self.beam_preset_dropdown.setCurrentIndex(len(_BEAM_PRESETS))
+                finally:
+                    self._updating_beam_preset = False
+
+        self.beam_preset_dropdown.currentIndexChanged.connect(_on_beam_preset_changed)
+        self.beam_width_input.valueChanged.connect(lambda *a: _sync_beam_warning_and_preset())
+        self.beam_width_decay_input.valueChanged.connect(lambda *a: _sync_beam_warning_and_preset())
+        self.beam_max_part_branches_input.valueChanged.connect(lambda *a: _sync_beam_warning_and_preset())
+        self.beam_max_rot_branches_input.valueChanged.connect(lambda *a: _sync_beam_warning_and_preset())
+        self.beam_iterative_checkbox.toggled.connect(lambda *a: _sync_beam_warning_and_preset())
 
         self.minkowski_population_size_input = make_int_spinbox(
             _DEFAULTS["ga_population"], 1, 500,
-            tooltip=QtWidgets.QApplication.translate("NestingPanel", _GA_POP_TOOLTIP)
+            tooltip=rich_tooltip("NestingPanel", _GA_POP_TOOLTIP)
         )
+        self.ga_winners_input = make_int_spinbox(
+            _DEFAULTS["ga_winners"], 1, 500,
+            tooltip=rich_tooltip("NestingPanel", _GA_WINNERS_TOOLTIP)
+        )
+        self.ga_mutation_rate_input = make_double_spinbox(
+            _DEFAULTS["ga_mutation_rate"], 0.0, 1.0, step=0.05, decimals=2,
+            tooltip=rich_tooltip("NestingPanel", _GA_MUTATION_TOOLTIP)
+        )
+        # Winners can't exceed the population. The box shows min(chosen, population)
+        # and remembers the chosen value, so population 1 shows 1 and a later,
+        # larger population gets the chosen value back. Prefs and layouts store the
+        # chosen value (ga_winners()); the coordinator clamps it as well.
+        self._ga_winners_chosen = _DEFAULTS["ga_winners"]
+        self._clamping_ga_winners = False
 
+        def _on_ga_winners_changed(value):
+            if not self._clamping_ga_winners:
+                self._ga_winners_chosen = value
+
+        self.ga_winners_input.valueChanged.connect(_on_ga_winners_changed)
+        self.minkowski_population_size_input.valueChanged.connect(
+            lambda *_: self._clamp_ga_winners())
+        self._clamp_ga_winners()
         self.minkowski_generations_input = make_int_spinbox(
             _DEFAULTS["ga_generations"], 1, 1000,
-            tooltip=QtWidgets.QApplication.translate("NestingPanel", _GA_GEN_TOOLTIP)
+            tooltip=rich_tooltip("NestingPanel", _GA_GEN_TOOLTIP)
         )
-
         self.ga_preset_dropdown = QtWidgets.QComboBox()
         for label, _, _ in _GA_PRESETS:
             self.ga_preset_dropdown.addItem(
@@ -668,14 +901,12 @@ class NestingPanel(QtWidgets.QWidget):
         )
         self.ga_preset_dropdown.setCurrentIndex(0)
         self.ga_preset_dropdown.setToolTip(
-            QtWidgets.QApplication.translate("NestingPanel", _GA_PRESET_TOOLTIP)
+            rich_tooltip("NestingPanel", _GA_PRESET_TOOLTIP)
         )
-
         self.ga_warning_label = QtWidgets.QLabel()
         self.ga_warning_label.setStyleSheet("color: #d97706; font-size: 11px;")
         self.ga_warning_label.setWordWrap(True)
         self.ga_warning_label.setVisible(False)
-
         self._updating_ga_preset = False
 
         def _on_ga_preset_changed(idx):
@@ -728,25 +959,32 @@ class NestingPanel(QtWidgets.QWidget):
         self.minkowski_population_size_input.valueChanged.connect(lambda *a: _sync_ga_warning_and_preset())
         self.minkowski_generations_input.valueChanged.connect(lambda *a: _sync_ga_warning_and_preset())
 
-        self.minkowski_compactness_input = make_double_spinbox(
-            1.0, 0.0, 10.0, step=0.1,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
-                "NestingPanel",
-                "Shapes the leftover on the last sheet when layouts use the same number of sheets.\n"
-                "<b>Higher:</b> favours one large offcut; parts may spread out.\n"
-                "0 turns it off: parts pack tightest and the leftover may scatter.\n"
-                "It never adds a sheet or leaves a part unplaced. Needs Generations and Population Size above 1.\n"
-                "<b>Default:</b> 1.0."))
-        )
+        self.part_direction_dial = DirectionDial()
+        self.part_direction_dial.setDegrees(_DEFAULTS["part_direction"])
+        self.part_direction_dial.setToolTip(rich_tooltip("NestingPanel", _PART_DIRECTION_TOOLTIP))
+        self.weight_sliders = WeightSliders([
+            ("gravity", tr("NestingPanel", "Gravity:"), _DEFAULTS["weight_gravity"],
+             rich_tooltip("NestingPanel", _WEIGHT_GRAVITY_TOOLTIP)),
+            ("contact", tr("NestingPanel", "Contact:"), _DEFAULTS["weight_contact"],
+             rich_tooltip("NestingPanel", _WEIGHT_CONTACT_TOOLTIP)),
+            ("direction", tr("NestingPanel", "Direction:"), _DEFAULTS["weight_direction"],
+             rich_tooltip("NestingPanel", _WEIGHT_DIRECTION_TOOLTIP)),
+            ("offcut", tr("NestingPanel", "Offcuts:"), _DEFAULTS["weight_offcut"],
+             rich_tooltip("NestingPanel", _WEIGHT_OFFCUT_TOOLTIP)),
+        ])
+        self.fitness_min_offcut_input = make_area_spinbox(
+            _DEFAULTS["fitness_min_offcut"], 1.0, 1.0e8,
+            tooltip=rich_tooltip("NestingPanel", _FITNESS_MIN_OFFCUT_TOOLTIP))
 
         self.minkowski_rotation_steps_slider = make_slider(
             0, len(self.rotation_angles) - 1, 3,
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
                 "NestingPanel", "Sets the angle step parts may be rotated by while nesting.\n"
-                "<b>Smaller steps:</b> tighter fits, slower nesting.")))
+                "<b>Smaller steps:</b> tighter fits, slower nesting. <b>Larger steps:</b> fewer orientations, faster.\n"
+                "<b>Default:</b> 90° (4 steps).")))
         self.minkowski_rotation_display_label = QtWidgets.QLabel("")
         self.minkowski_rotation_display_label.setFixedWidth(100)
-        self.minkowski_rotation_steps_slider.valueChanged.connect(lambda: self._update_rotation_label())
+        self.minkowski_rotation_steps_slider.valueChanged.connect(lambda *_: self._update_rotation_label())
 
         mink_rot_layout = QtWidgets.QHBoxLayout()
         mink_rot_layout.addWidget(self.minkowski_rotation_steps_slider)
@@ -755,7 +993,7 @@ class NestingPanel(QtWidgets.QWidget):
 
         form_layout.addRow(tr("NestingPanel", "Rotation Angle:"), mink_rot_layout)
 
-        self.minkowski_candidate_spacing_input = make_double_spinbox(
+        self.minkowski_candidate_spacing_input = make_quantity_spinbox(
             _DEFAULTS["candidate_spacing"], 1.0, 100.0, step=0.5,
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
                 "NestingPanel",
@@ -772,7 +1010,7 @@ class NestingPanel(QtWidgets.QWidget):
         auto_cores, _ = auto_core_count()
         self.worker_processes_input = make_int_spinbox(
             0, 0, os.cpu_count() or 1,
-            tooltip=translate("NestingPanel", _WORKERS_TIP))
+            tooltip=rich_tooltip("NestingPanel", _WORKERS_TIP))
 
         def update_auto_label(population):
             self.worker_processes_input.setSpecialValueText(
@@ -782,151 +1020,40 @@ class NestingPanel(QtWidgets.QWidget):
         self.minkowski_population_size_input.valueChanged.connect(update_auto_label)
         update_auto_label(self.minkowski_population_size_input.value())
 
-        ga_section = CollapsibleSection(tr("NestingPanel", "Genetic Algorithm"), expanded=True)
-        ga_section.addRow(tr("NestingPanel", "Preset:"), self.ga_preset_dropdown)
-        ga_section.addRow(tr("NestingPanel", "Generations:"), self.minkowski_generations_input)
-        ga_section.addRow(tr("NestingPanel", "Population Size:"), self.minkowski_population_size_input)
-        ga_section.addRow(tr("NestingPanel", "Compactness:"), self.minkowski_compactness_input)
-        ga_section.addRow(self.ga_warning_label)
-        form_layout.addRow(ga_section)
+        self.beam_section = CollapsibleSection(tr("NestingPanel", "Beam Search"), expanded=True)
+        self.beam_section.addRow(tr("NestingPanel", "Preset:"), self.beam_preset_dropdown)
+        self.beam_section.addRow(tr("NestingPanel", "Beam Width:"), self.beam_width_input)
+        self.beam_section.addRow(tr("NestingPanel", "Width Decay:"), self.beam_width_decay_input)
+        self.beam_section.addRow(tr("NestingPanel", "Max Part Branches:"), self.beam_max_part_branches_input)
+        self.beam_section.addRow(tr("NestingPanel", "Max Rotation Branches:"), self.beam_max_rot_branches_input)
+        self.beam_section.addRow(self.beam_iterative_checkbox)
+        self.beam_section.addRow(self.beam_warning_label)
+        form_layout.addRow(self.beam_section)
 
-        page.setLayout(form_layout)
-        return page
+        self.ga_section = CollapsibleSection(tr("NestingPanel", "Genetic Algorithm"), expanded=True)
+        self.ga_section.addRow(tr("NestingPanel", "Preset:"), self.ga_preset_dropdown)
+        self.ga_section.addRow(tr("NestingPanel", "Generations:"), self.minkowski_generations_input)
+        self.ga_section.addRow(tr("NestingPanel", "Population Size:"), self.minkowski_population_size_input)
+        self.ga_section.addRow(tr("NestingPanel", "Winners:"), self.ga_winners_input)
+        self.ga_section.addRow(tr("NestingPanel", "Mutation Rate:"), self.ga_mutation_rate_input)
+        self.ga_section.addRow(self.ga_warning_label)
+        form_layout.addRow(self.ga_section)
 
-    def _build_physics_group(self):
-        """Builds the Physics parameters page shown inside Nesting Settings."""
-        tr = QtWidgets.QApplication.translate
-        page = QtWidgets.QWidget()
-        form_layout = QtWidgets.QFormLayout()
-        form_layout.setContentsMargins(*MARGINS_NONE)
-        form_layout.setLabelAlignment(QtCore.Qt.AlignLeft | QtCore.Qt.AlignTop)
-
-        self.physics_direction_dial = DirectionDial()
-
-        self.physics_random_checkbox = make_checkbox(
-            tr("NestingPanel", "Use Random Direction"),
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "If checked, randomized gravity direction will be applied."))
-        )
-        self.physics_random_checkbox.stateChanged.connect(lambda state: self.physics_direction_dial.setDisabled(state))
-
-        self.physics_step_size_input = make_double_spinbox(
-            5.0, 0.1, 100.0,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Simulation step size in mm per iteration. Smaller values increase accuracy but take longer."))
-        )
-
-        self.physics_max_spawn_input = make_int_spinbox(
-            100, 1, 1000,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Maximum number of attempts to find an initial collision-free position for each part."))
-        )
-
-        self.physics_max_nesting_steps_input = make_int_spinbox(
-            500, 1, 5000,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Maximum physics simulation steps per cycle before freezing placement."))
-        )
-
-        self.physics_anneal_steps_input = make_int_spinbox(
-            25, 0, 500,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Number of simulated annealing shake steps to settle parts into compact gaps."))
-        )
-
-        self.anneal_rotate_checkbox = make_checkbox(
-            tr("NestingPanel", "Anneal Rotate"),
-            checked=True,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Allow rotational perturbation during the annealing phase."))
-        )
-
-        self.anneal_translate_checkbox = make_checkbox(
-            tr("NestingPanel", "Anneal Translate"),
-            checked=True,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Allow translational perturbation during the annealing phase."))
-        )
-
-        self.anneal_random_shake_checkbox = make_checkbox(
-            tr("NestingPanel", "Random Shake Direction"),
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Apply randomized perturbation direction during annealing instead of gravity direction."))
-        )
-
-        self.physics_anneal_rot_steps = make_int_spinbox(
-            10, 0, 500,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Number of rotational perturbation iterations during annealing."))
-        )
-
-        self.physics_anneal_rot_curve_type = QtWidgets.QComboBox()
-        self.physics_anneal_rot_curve_type.addItems(["Logarithmic", "Linear", "Power 1.5", "Quadratic", "Exponential"])
-        self.physics_anneal_rot_curve_type.setToolTip(tr("NestingPanel", "Decay curve profile for rotational annealing temperature/amplitude over iterations."))
-
-        self.physics_anneal_rot_min = make_double_spinbox(
-            1.0, 0.0, 360.0,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Minimum rotation angle (degrees) applied at the end of annealing."))
-        )
-
-        self.physics_anneal_rot_max = make_double_spinbox(
-            90.0, 0.0, 360.0,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Maximum rotation angle (degrees) applied at the start of annealing."))
-        )
-
-        self.physics_anneal_curve_type = QtWidgets.QComboBox()
-        self.physics_anneal_curve_type.addItems(["Logarithmic", "Linear", "Power 1.5", "Quadratic", "Exponential"])
-        self.physics_anneal_curve_type.setToolTip(tr("NestingPanel", "Decay curve profile for translation annealing amplitude over iterations."))
-
-        self.physics_anneal_min_amp = make_double_spinbox(
-            0.1, 0.0, 1000.0,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Minimum translation step (mm) applied at the end of annealing."))
-        )
-
-        self.physics_anneal_max_amp = make_double_spinbox(
-            100.0, 0.0, 5000.0,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Maximum translation step (mm) applied at the start of annealing."))
-        )
-
-        self.physics_improvement_threshold_input = make_double_spinbox(
-            0.01, 0.000001, 1.0, step=0.01, decimals=6,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Minimum score improvement required to reset simulation cycle. Prevents infinite loops from noise."))
-        )
-
-        self.physics_rotation_steps_slider = make_slider(
-            0, len(PHYSICS_ROTATION_PRESETS) - 1, 1,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
-                "NestingPanel", "Sets the angle step parts may be rotated by while nesting.\n"
-                "<b>Smaller steps:</b> tighter fits, slower nesting.")))
-        self.physics_rotation_display_label = QtWidgets.QLabel("")
-        self.physics_rotation_display_label.setFixedWidth(120)
-        self.physics_rotation_steps_slider.valueChanged.connect(lambda: self._update_rotation_label())
-
-        phys_rot_layout = QtWidgets.QHBoxLayout()
-        phys_rot_layout.addWidget(self.physics_rotation_steps_slider)
-        phys_rot_layout.addWidget(self.physics_rotation_display_label)
-        phys_rot_layout.setContentsMargins(*MARGINS_NONE)
-
-        form_layout.addRow(tr("NestingPanel", "Gravity Direction:"), self.physics_direction_dial)
-        form_layout.addRow(self.physics_random_checkbox)
-        form_layout.addRow(tr("NestingPanel", "Step Size:"), self.physics_step_size_input)
-        form_layout.addRow(tr("NestingPanel", "Max Spawn Attempts:"), self.physics_max_spawn_input)
-        form_layout.addRow(tr("NestingPanel", "Max Nesting Steps:"), self.physics_max_nesting_steps_input)
-
-        anneal_section = CollapsibleSection(tr("NestingPanel", "Annealing (Shake)"), expanded=True)
-        anneal_section.addRow(self.anneal_rotate_checkbox)
-        anneal_section.addRow(tr("NestingPanel", "Rotation Steps:"), phys_rot_layout)
-        anneal_section.addRow(tr("NestingPanel", "Rot Anneal Steps:"), self.physics_anneal_rot_steps)
-        anneal_section.addRow(tr("NestingPanel", "Rot Curve Type:"), self.physics_anneal_rot_curve_type)
-        anneal_section.addRow(tr("NestingPanel", "Rot Min Angle:"), self.physics_anneal_rot_min)
-        anneal_section.addRow(tr("NestingPanel", "Rot Max Angle:"), self.physics_anneal_rot_max)
-        anneal_section.addRow(self.anneal_translate_checkbox)
-        anneal_section.addRow(tr("NestingPanel", "Anneal Steps:"), self.physics_anneal_steps_input)
-        anneal_section.addRow(tr("NestingPanel", "Improvement Threshold:"), self.physics_improvement_threshold_input)
-        anneal_section.addRow(tr("NestingPanel", "Curve Type:"), self.physics_anneal_curve_type)
-        anneal_section.addRow(tr("NestingPanel", "Min Amplitude:"), self.physics_anneal_min_amp)
-        anneal_section.addRow(tr("NestingPanel", "Max Amplitude:"), self.physics_anneal_max_amp)
-        anneal_section.addRow(self.anneal_random_shake_checkbox)
-        form_layout.addRow(anneal_section)
+        # One Scoring section (NLA ruling 29): the dials and the four weights score both single
+        # placements and finished layouts, for every placer.
+        self.scoring_section = CollapsibleSection(tr("NestingPanel", "Scoring"), expanded=True)
+        self.scoring_section.addRow(self.direction_dial_label, self.minkowski_direction_dial)
+        self.scoring_section.addRow(self.evolve_direction_checkbox)
+        self.scoring_section.addRow(tr("NestingPanel", "Part Direction:"), self.part_direction_dial)
+        self.scoring_section.addRow(self.weight_sliders)
+        self.scoring_section.addRow(tr("NestingPanel", "Minimum Offcut:"), self.fitness_min_offcut_input)
+        form_layout.addRow(self.scoring_section)
 
         page.setLayout(form_layout)
         return page
 
     def _build_advanced_section(self):
-        """Builds the one Advanced section. Simulation and Verbose Logging apply to every
-        algorithm; the widgets in _minkowski_advanced_widgets are shown only while
-        Minkowski is selected (_on_algorithm_change)."""
+        """Builds the one Advanced section, shared by every algorithm."""
         tr = QtWidgets.QApplication.translate
         self.simulate_combo = QtWidgets.QComboBox()
         # Order must match SIM_OFF, SIM_SINGLE, SIM_ALL.
@@ -950,11 +1077,6 @@ class NestingPanel(QtWidgets.QWidget):
 
         spacing_label = QtWidgets.QLabel(tr("NestingPanel", "Candidate Spacing:"))
         workers_label = QtWidgets.QLabel(tr("NestingPanel", _WORKERS_LABEL))
-        self._minkowski_advanced_widgets = [
-            spacing_label, self.minkowski_candidate_spacing_input,
-            workers_label, self.worker_processes_input,
-            self.clear_cache_checkbox,
-        ]
 
         section = CollapsibleSection(tr("NestingPanel", "Advanced"), expanded=False)
         section.addRow(tr("NestingPanel", _SIM_LABEL), self.simulate_combo)
@@ -969,6 +1091,10 @@ class NestingPanel(QtWidgets.QWidget):
         tr = QtWidgets.QApplication.translate
         font_layout = QtWidgets.QHBoxLayout()
         self.font_select_button = QtWidgets.QPushButton(tr("NestingPanel", "Select Font"))
+        self.font_select_button.setToolTip(rich_tooltip(
+            "NestingPanel",
+            QT_TRANSLATE_NOOP("NestingPanel", "Chooses a TrueType (.ttf) or OpenType (.otf) font file for part identifier labels."),
+        ))
         self.font_label = QtWidgets.QLabel(tr("NestingPanel", "No Font Selected"))
         self.font_label.setWordWrap(True)
         font_layout.addWidget(self.font_select_button)
@@ -984,14 +1110,14 @@ class NestingPanel(QtWidgets.QWidget):
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Adds an identifier label to each nested part."))
         )
 
-        self.label_size_input = make_double_spinbox(
+        self.label_size_input = make_quantity_spinbox(
             10.0, 1, 100,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "The text size for identifier labels in mm."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the text height of part identifier labels.\n<b>Default:</b> 10 mm. <b>Typical:</b> 5–25 mm."))
         )
 
-        self.label_height_input = make_double_spinbox(
+        self.label_height_input = make_quantity_spinbox(
             25.0, 0, 1000,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "The height (Z-offset) for the identifier labels."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the Z-offset height for part identifier labels.\n<b>Default:</b> 25 mm."))
         )
 
         label_options_layout = QtWidgets.QHBoxLayout()
@@ -1004,12 +1130,17 @@ class NestingPanel(QtWidgets.QWidget):
         return label_options_layout
 
     def _build_display_options_row(self):
-        """Builds the Show Bounds and Play sound row, shown for every algorithm."""
+        """Builds the Show Bounds, Show Offcuts and Play sound row, shown for every algorithm."""
         tr = QtWidgets.QApplication.translate
         self.show_bounds_checkbox = make_checkbox(
             tr("NestingPanel", "Show Bounds"),
             checked=True,
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Draws the sheet and part bounds in the 3D view while nesting."))
+        )
+        self.show_offcuts_checkbox = make_checkbox(
+            tr("NestingPanel", "Show Offcuts"),
+            checked=True,
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Tints the offcuts on each sheet: the free rectangles of at least Minimum Offcut that the Offcuts score counts. Display only; they are never exported or cut."))
         )
         self.sound_checkbox = make_checkbox(
             tr("NestingPanel", "Play sound on completion"),
@@ -1018,6 +1149,7 @@ class NestingPanel(QtWidgets.QWidget):
         )
         row = QtWidgets.QHBoxLayout()
         row.addWidget(self.show_bounds_checkbox)
+        row.addWidget(self.show_offcuts_checkbox)
         row.addWidget(self.sound_checkbox)
         row.addStretch()
         return row
@@ -1037,20 +1169,60 @@ class NestingPanel(QtWidgets.QWidget):
         self.shape_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeToContents)
 
         self.add_parts_button = QtWidgets.QPushButton(tr("NestingPanel", "Add Selected"))
+        self.add_parts_button.setToolTip(rich_tooltip(
+            "NestingPanel",
+            QT_TRANSLATE_NOOP("NestingPanel", "Adds the shapes currently selected in the FreeCAD document to the parts table."),
+        ))
         self.remove_parts_button = QtWidgets.QPushButton(tr("NestingPanel", "Remove Selected"))
+        self.remove_parts_button.setToolTip(rich_tooltip(
+            "NestingPanel",
+            QT_TRANSLATE_NOOP("NestingPanel", "Removes the selected rows from the parts table."),
+        ))
 
         table_button_layout = QtWidgets.QHBoxLayout()
         table_button_layout.addWidget(self.add_parts_button)
         table_button_layout.addWidget(self.remove_parts_button)
 
+        self.all_quantity_spinbox = make_int_spinbox(
+            1, 1, 500,
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the copy count applied when clicking Set All.\n<b>Default:</b> 1."))
+        )
+        self.set_all_quantity_button = QtWidgets.QPushButton(tr("NestingPanel", "Set All"))
+        self.set_all_quantity_button.setToolTip(rich_tooltip(
+            "NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the quantity of every part in the table to this value.")))
+        self.set_all_quantity_button.clicked.connect(self.set_all_quantities)
+
+        all_quantity_layout = QtWidgets.QHBoxLayout()
+        all_quantity_layout.addWidget(QtWidgets.QLabel(tr("NestingPanel", "Quantity of all parts:")))
+        all_quantity_layout.addWidget(self.all_quantity_spinbox)
+        all_quantity_layout.addWidget(self.set_all_quantity_button)
+        all_quantity_layout.addStretch()
+
         main_layout.addWidget(self.shape_table)
         main_layout.addLayout(table_button_layout)
+        main_layout.addLayout(all_quantity_layout)
+
+    def set_all_quantities(self):
+        """Sets every row's quantity to the 'all parts' spinbox value."""
+        value = self.all_quantity_spinbox.value()
+        for row in range(self.shape_table.rowCount()):
+            spinbox = self.shape_table.cellWidget(row, 1)
+            if spinbox is not None:
+                spinbox.setValue(value)
 
     def _build_action_buttons(self):
         """Builds the main Run Nesting and Cancel action buttons."""
         tr = QtWidgets.QApplication.translate
         self.nest_button = QtWidgets.QPushButton(tr("NestingPanel", "Run Nesting"))
+        self.nest_button.setToolTip(rich_tooltip(
+            "NestingPanel",
+            QT_TRANSLATE_NOOP("NestingPanel", "Starts nesting the parts in the table onto the configured sheets."),
+        ))
         self.cancel_button = QtWidgets.QPushButton(tr("NestingPanel", "Cancel Nesting"))
+        self.cancel_button.setToolTip(rich_tooltip(
+            "NestingPanel",
+            QT_TRANSLATE_NOOP("NestingPanel", "Stops the running nesting job and keeps the best layout found so far."),
+        ))
         self.cancel_button.setEnabled(False)
 
         action_button_layout = QtWidgets.QHBoxLayout()
@@ -1104,7 +1276,7 @@ class NestingPanel(QtWidgets.QWidget):
 
         # Only after setLayout: until then the groups have no parent widget, and
         # setVisible(True) on a parentless widget pops it up as its own window.
-        self._on_algorithm_change(self.algorithm_dropdown.currentText())
+        self._on_algorithm_change(self.algorithm())
 
         # Connect signals
         def toggle_label_inputs(enabled):
@@ -1114,27 +1286,14 @@ class NestingPanel(QtWidgets.QWidget):
         self.add_labels_checkbox.toggled.connect(toggle_label_inputs)
         toggle_label_inputs(self.add_labels_checkbox.isChecked())
 
-        # Keep direction dial detent steps synchronized between pages
-        def _sync_detent_mink_to_phys(val):
-            step = self.minkowski_direction_dial.detentStep()
-            if abs(self.physics_direction_dial.detentStep() - step) > 1e-4:
-                self.physics_direction_dial.setDetentStep(step)
-
-        def _sync_detent_phys_to_mink(val):
-            step = self.physics_direction_dial.detentStep()
-            if abs(self.minkowski_direction_dial.detentStep() - step) > 1e-4:
-                self.minkowski_direction_dial.setDetentStep(step)
-
-        self.minkowski_direction_dial.step_slider.valueChanged.connect(_sync_detent_mink_to_phys)
-        self.physics_direction_dial.step_slider.valueChanged.connect(_sync_detent_phys_to_mink)
-
         # Connect the nesting controller
         from .nesting_controller import NestingController
         self.controller = NestingController(self)
         self.nest_button.clicked.connect(self.controller.execute_nesting)
         self.cancel_button.clicked.connect(self.controller.request_cancel)
         self.font_select_button.clicked.connect(self.select_font_file)
-        self.show_bounds_checkbox.stateChanged.connect(self.controller.toggle_bounds_visibility)
+        self.show_bounds_checkbox.toggled.connect(lambda _on: self.controller.toggle_bounds_visibility())
+        self.show_offcuts_checkbox.toggled.connect(lambda _on: self.controller.toggle_offcuts_visibility())
         self.add_parts_button.clicked.connect(self.controller.add_selected_shapes)
         self.remove_parts_button.clicked.connect(self.controller.remove_selected_shapes)
 
@@ -1151,19 +1310,21 @@ class NestingPanel(QtWidgets.QWidget):
 
         quantity_spinbox = make_int_spinbox(
             quantity, 1, 500,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Number of copies of this part to place."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the Number of copies of this part to place.\n<b>Default:</b> 1."))
         )
 
         rotation_widget = QtWidgets.QWidget()
         rotation_layout = QtWidgets.QHBoxLayout(rotation_widget)
         rotation_layout.setContentsMargins(*MARGINS_NONE)
 
-        override_checkbox = make_checkbox("", checked=override_rotation)
-        override_checkbox.setToolTip(tr("NestingPanel", "Override global rotation steps for this part."))
+        override_checkbox = make_checkbox(
+            "", checked=override_rotation,
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Overrides the global rotation step count for this part."))
+        )
 
         rotation_spinbox = make_int_spinbox(
             rotation_steps, 0, 360,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Override global rotation steps for this part. 0 or 1 means no rotation."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the number of rotation steps around 360° for this part.\n0 or 1 locks the part to its current angle.\n<b>Default:</b> 4 (90° steps)."))
         )
         rotation_spinbox.setEnabled(override_rotation)
         override_checkbox.toggled.connect(rotation_spinbox.setEnabled)
@@ -1178,7 +1339,7 @@ class NestingPanel(QtWidgets.QWidget):
         up_vector_layout = QtWidgets.QHBoxLayout(up_vector_widget)
         up_vector_layout.setContentsMargins(*MARGINS_NONE)
 
-        tooltip = rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "The local axis of this part that points 'up' before projecting to 2D. Default (0, 0, 1) is the part's own Z axis."))
+        tooltip = rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the local axis of this 3D part that points up (+Z) before projecting to 2D.\n<b>Default:</b> (0, 0, 1)."))
         up_x_spinbox = make_double_spinbox(up_vector.x, -1.0, 1.0, decimals=2, tooltip=tooltip)
         up_x_spinbox.setButtonSymbols(QtWidgets.QAbstractSpinBox.NoButtons)
         up_y_spinbox = make_double_spinbox(up_vector.y, -1.0, 1.0, decimals=2, tooltip=tooltip)
@@ -1192,7 +1353,7 @@ class NestingPanel(QtWidgets.QWidget):
 
         fill_checkbox = make_checkbox(
             "", checked=fill_sheet,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "The quantity is always placed. If checked, extra copies are then added to fill the remaining space."))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Fills remaining space on the sheets with extra copies of this part after placing the required quantity."))
         )
 
         self.shape_table.setItem(row_index, 0, label_item)
@@ -1283,20 +1444,19 @@ class NestingPanel(QtWidgets.QWidget):
         self.label_size_input.setValue(prefs.GetFloat(PROP_LABEL_SIZE, 10.0))
         self.deflection_input.setValue(prefs.GetFloat(PROP_DEFLECTION_ANGLE, 30.0) or 30.0)
         self.simplification_input.setValue(prefs.GetFloat(PROP_SIMPLIFICATION, 1.0))
-        self.minkowski_compactness_input.setValue(prefs.GetFloat("GACompactnessWeight", 1.0))
+        self.weight_sliders.setValues({key: prefs.GetFloat(prop, _DEFAULTS[f"weight_{key}"])
+                                       for prop, key in WEIGHT_PROPS})
+        for prop, key in WEIGHT_PROPS:
+            self.weight_sliders.setLocked(key, prefs.GetBool(prop + "Locked", False))
+        self.part_direction_dial.setDegrees(prefs.GetFloat(PROP_PART_DIRECTION, _DEFAULTS["part_direction"]))
+        self.fitness_min_offcut_input.setValue(prefs.GetFloat("FitnessMinOffcut", _DEFAULTS["fitness_min_offcut"]))
+        self.show_offcuts_checkbox.setChecked(prefs.GetBool(PROP_SHOW_OFFCUTS, True))
+        self.beam_width_decay_input.setValue(prefs.GetFloat("BeamWidthDecay", _DEFAULTS["beam_width_decay"]))
+        self.set_ga_winners(prefs.GetInt("GAWinners", _DEFAULTS["ga_winners"]))
+        self.ga_mutation_rate_input.setValue(prefs.GetFloat("GAMutationRate", _DEFAULTS["ga_mutation_rate"]))
+        self.evolve_direction_checkbox.setChecked(prefs.GetBool("EvolveDirection", False))
         self.verbose_logging_checkbox.setChecked(prefs.GetBool("VerboseLogging", False))
         self.worker_processes_input.setValue(get_worker_override())
-        self.physics_improvement_threshold_input.setValue(prefs.GetFloat("PhysicsStabilityTolerance", 0.01))
-        
-        self.physics_anneal_curve_type.setCurrentText(prefs.GetString("PhysicsAnnealCurveType", "Logarithmic"))
-        self.physics_anneal_min_amp.setValue(prefs.GetFloat("PhysicsAnnealMinAmp", 0.1))
-        self.physics_anneal_max_amp.setValue(prefs.GetFloat("PhysicsAnnealMaxAmp", 100.0))
-        
-        self.physics_anneal_rot_steps.setValue(prefs.GetInt("PhysicsAnnealRotSteps", 10))
-        self.physics_anneal_rot_curve_type.setCurrentText(prefs.GetString("PhysicsAnnealRotCurveType", "Logarithmic"))
-        self.physics_anneal_rot_min.setValue(prefs.GetFloat("PhysicsAnnealRotMin", 1.0))
-        self.physics_anneal_rot_max.setValue(prefs.GetFloat("PhysicsAnnealRotMax", 90.0))
-        
         # Load Rotation Steps (Isolated)
         # Minkowski
         mink_rot_steps = prefs.GetInt("MinkowskiRotationSteps", 4) # Default 90 deg (4 steps)
@@ -1305,18 +1465,10 @@ class NestingPanel(QtWidgets.QWidget):
             self.minkowski_rotation_steps_slider.setValue(
                 closest_angle_index(self.rotation_angles, target_angle)
             )
-            
-        # Physics
-        phys_rot_steps = prefs.GetInt("PhysicsRotationSteps", 4) # Default 90 deg (4 steps)
-        if phys_rot_steps > 0:
-            target_angle = 360.0 / phys_rot_steps
-            self.physics_rotation_steps_slider.setValue(
-                closest_angle_index(PHYSICS_ROTATION_PRESETS, target_angle)
-            )
 
         detent = prefs.GetFloat("DirectionDetentStep", DIRECTION_DETENT_DEFAULT)
         self.minkowski_direction_dial.setDetentStep(detent)
-        self.physics_direction_dial.setDetentStep(detent)
+        self.part_direction_dial.setDetentStep(detent)
         
     def update_progress(self, current, total, message=None):
         """Updates the progress bar."""
@@ -1342,30 +1494,47 @@ class NestingPanel(QtWidgets.QWidget):
             nw_logger.warn(f"UI Update Error: {e}")
 
     def _update_rotation_label(self):
-        algo = self.algorithm_dropdown.currentText()
-        
-        if algo == "Physics":
-            value = self.physics_rotation_steps_slider.value()
-            angles = PHYSICS_ROTATION_PRESETS
-            if value < len(angles):
-                angle = angles[value]
-                steps = int(360 / angle) if angle > 0 else 1
-                self.physics_rotation_display_label.setText(f"{angle}° ({steps} steps)")
-        else:
-            value = self.minkowski_rotation_steps_slider.value()
-            angles = self.rotation_angles
-            if value < len(angles):
-                angle = angles[value]
-                self.minkowski_rotation_display_label.setText(f"{angle}°")
+        value = self.minkowski_rotation_steps_slider.value()
+        angles = self.rotation_angles
+        if value < len(angles):
+            self.minkowski_rotation_display_label.setText(f"{angles[value]}°")
+
+    def algorithm(self):
+        """The selected placement algorithm key (ALGO_GREEDY or ALGO_BEAM)."""
+        return self.algorithm_dropdown.currentData()
+
+    def set_algorithm(self, key):
+        """Select *key*. Returns False, leaving the selection alone, when *key* is not offered."""
+        idx = self.algorithm_dropdown.findData(key)
+        if idx < 0:
+            return False
+        self.algorithm_dropdown.setCurrentIndex(idx)
+        return True
+
+    def ga_winners(self):
+        """The chosen Winners value. The box may show less while the population is smaller."""
+        return self._ga_winners_chosen
+
+    def set_ga_winners(self, value):
+        """Choose *value* winners; the box shows it capped at the population."""
+        self._ga_winners_chosen = max(1, int(value))
+        self._clamp_ga_winners()
+
+    def _clamp_ga_winners(self):
+        """Caps the Winners box at the population and shows min(chosen, population)."""
+        pop = max(1, self.minkowski_population_size_input.value())
+        self._clamping_ga_winners = True
+        try:
+            self.ga_winners_input.setMaximum(pop)
+            self.ga_winners_input.setValue(min(self._ga_winners_chosen, pop))
+        finally:
+            self._clamping_ga_winners = False
 
     def _on_algorithm_change(self, algo_name):
-        """Handles switching between nesting algorithms."""
-        is_minkowski = algo_name == "Minkowski"
-        self.minkowski_settings_group.setVisible(is_minkowski)
-        self.physics_settings_group.setVisible(algo_name == "Physics")
-        for widget in self._minkowski_advanced_widgets:
-            widget.setVisible(is_minkowski)
-        # Ensure the rotation label/steps are immediately clarified for the new algorithm
+        """Shows the selected placer's settings; the GA section is always shown."""
+        is_beam = algo_name == ALGO_BEAM
+        self.beam_section.setVisible(is_beam)
+        self.evolve_direction_checkbox.setVisible(not is_beam)
         self._update_rotation_label()
 
     def reset_progress(self):

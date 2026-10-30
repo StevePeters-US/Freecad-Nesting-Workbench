@@ -47,9 +47,8 @@ class ViewProviderShape:
         """Set up the view object's properties."""
         pass # Use default properties for now
 
-def create_shape_object(name="Shape"):
-    """Helper function to create a new ShapeObject in the active document."""
-    doc = FreeCAD.ActiveDocument
+def create_shape_object(doc, name="Shape"):
+    """Helper function to create a new ShapeObject in doc."""
     obj = doc.addObject("Part::FeaturePython", name)
     ShapeObject(obj)
     if FreeCAD.GuiUp:

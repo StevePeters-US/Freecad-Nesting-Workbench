@@ -72,12 +72,10 @@ class InputManager:
         self._active = True
 
     def deactivate(self):
-        """Stop listening for viewport events."""
+        """Stop listening for viewport events. The filter itself belongs to the workbench."""
         if not self._active:
             return
-        mgr = NWInputManager.get_instance()
-        mgr.clear_active_handler()
-        mgr.restore()
+        NWInputManager.get_instance().clear_active_handler()
         self._active = False
 
     def set_mode(self, mode):

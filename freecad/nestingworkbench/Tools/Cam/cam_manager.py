@@ -174,12 +174,12 @@ class CAMManager:
         the parent group (CAM_Sheet_<group_key>), so a sheet's back job sits beside
         its front job.
         """
-        # Import CAM modules (FreeCAD 1.1+)
+        # Import CAM modules (FreeCAD 26.3+)
         try:
             from Path.Main import Stock as PathStock
         except ImportError as e:
             nw_logger.error(f"Failed to import CAM modules. Error: {e}")
-            nw_logger.error("Please ensure the CAM workbench is installed and enabled in FreeCAD 1.1+.")
+            nw_logger.error("Please ensure the CAM workbench is installed and enabled in FreeCAD 26.3+.")
             return
 
         if not (parts_shapes or labels_shapes or outlines_shapes):

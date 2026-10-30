@@ -13,7 +13,7 @@ except ImportError:
 
 from freecad.nestingworkbench import nw_logger
 from .constants import (
-    BACK_BOUNDARY_PREFIX, BACK_GROUP_PREFIX, LAYOUT_PREFIX, PROP_FLOAT,
+    BACK_BOUNDARY_PREFIX, BACK_GROUP_PREFIX, LAYOUT_PREFIX, OFFCUT_GROUP_PREFIX, PROP_FLOAT,
     PROP_LENGTH, PROP_SHEET_COST, PROP_SHEET_FLIP, PROP_SHEET_HEIGHT,
     PROP_SHEET_LIBRARY_ID, PROP_SHEET_LIBRARY_NAME, PROP_SHEET_MATERIAL,
     PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH, PROP_STRING,
@@ -33,6 +33,13 @@ def find_back_group(sheet_group):
     if not sheet_group or not hasattr(sheet_group, "Group"):
         return None
     return next((c for c in sheet_group.Group if c.Label.startswith(BACK_GROUP_PREFIX)), None)
+
+
+def find_offcut_group(sheet_group):
+    """The Offcuts_* subgroup of a Sheet_N group, or None."""
+    if not sheet_group or not hasattr(sheet_group, "Group"):
+        return None
+    return next((c for c in sheet_group.Group if c.Label.startswith(OFFCUT_GROUP_PREFIX)), None)
 
 
 def find_back_boundary(back_group):

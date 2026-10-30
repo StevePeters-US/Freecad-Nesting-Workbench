@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 
-import math
-import random
 import copy
 from datetime import datetime
 import numpy as np
@@ -13,52 +11,58 @@ from .... import nw_logger
 from . import genetic_utils
 from . import sheet_sequence
 from .minkowski_engine import MinkowskiEngine, DEFAULT_CANDIDATE_SPACING
+from .fitness import FitnessWeights
+from .placement_scorers import ScoreContext, make_scorer
 
 class PlacementOptimizer:
     """
     Handles the geometric logic of finding the best position for a part on a sheet.
     """
-    def __init__(self, engine, rotation_steps, search_direction, log_callback=None, trial_callback=None, rng=None):
+    def __init__(self, engine, rotation_steps, search_direction, log_callback=None, trial_callback=None,
+                 scorer=None):
         self.engine = engine
         self.rotation_steps = max(1, rotation_steps)
         self.search_direction = search_direction
+        # Candidate scorer (placement_scorers); the default is the gravity projection.
+        self.scorer = scorer or make_scorer()
+        # Per type_label rotation-step counts (NLA-021); Nester fills this in.
+        self.rotation_overrides = {}
         self.log_callback = log_callback
         # Called for each trial placement in simulation mode, as
         # (part, angle, x, y, sheet). x/y are sheet-local, so the sheet is
         # needed to draw the preview on the right sheet in a multi-sheet run.
         self.trial_callback = trial_callback
-        self.rng = rng or random  # Seeded random.Random for reproducible runs, or the global module
         self.verbose = False
 
     def log(self, message):
         if self.log_callback:
             self.log_callback(message)
 
-    def find_best_placement(self, part, sheet):
-        """
-        Parallel evaluation of rotations to find best spot.
+    def find_top_placements(self, part, sheet, max_results=1):
+        """Evaluate valid rotations for *part* on *sheet* and return up to
+        *max_results* placement dicts sorted by (metric, angle) ascending.
+
+        Does NOT mutate *part*'s rotation or position. Preserves all
+        find_best_placement behaviour: original_polygon repair,
+        is_known_infeasible filtering, trial_callback on each new best, and
+        [TIMING] logging.
         """
         if part.original_polygon is None and part.polygon is not None:
             part.original_polygon = part.polygon
-            
+
         direction = self.search_direction
-        if direction is None:
-             angle_rad = self.rng.uniform(0, 2 * math.pi)
-             direction = (math.cos(angle_rad), math.sin(angle_rad))
 
         best_result = {'metric': float('inf')}
-        
-        part_rotation_steps = getattr(part, 'rotation_steps', None)
+        valid_results = []
+
+        part_rotation_steps = self.rotation_overrides.get(
+            getattr(part, 'type_label', None), getattr(part, 'rotation_steps', None))
         if part_rotation_steps is None or part_rotation_steps < 1:
             part_rotation_steps = self.rotation_steps
         part_rotation_steps = max(1, part_rotation_steps)
-        
-        gene_angle = getattr(part, 'gene_angle', None)
-        if gene_angle is not None:
-            angles = [gene_angle % 360.0]
-        else:
-            angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
-        
+
+        angles = [i * (360.0 / part_rotation_steps) for i in range(part_rotation_steps)]
+
         # Drop rotations this sheet has already proven impossible at its current
         # occupancy — placed parts have not moved since, so the verdict stands.
         # Scoped to `len(sheet.parts)`, never permanent: see
@@ -67,7 +71,7 @@ class PlacementOptimizer:
         angles = [a for a in angles if not self.engine.is_known_infeasible(part, a, sheet)]
         self.engine.count_skipped_rotations(n_angles_before - len(angles))
         if not angles:
-            return None
+            return []
 
         # Serial evaluation across rotations. Measured against a per-placement
         # ThreadPoolExecutor, serial evaluation is 2.4-3.3x faster due to
@@ -83,6 +87,8 @@ class PlacementOptimizer:
                 if res:
                     total_nfp_ms += res.get('_t_nfp_ms', 0)
                     total_score_ms += res.get('_t_score_ms', 0)
+                    if res.get('x') is not None:
+                        valid_results.append(res)
                     if res['metric'] < best_result['metric']:
                         best_result = res
                         if self.trial_callback and best_result.get('x') is not None:
@@ -91,10 +97,10 @@ class PlacementOptimizer:
                 self.log(f"Error in rotation evaluation: {e}")
 
         dt_eval = (_time.perf_counter() - t0_eval) * 1000
-        self.log(f"[TIMING] '{getattr(part, 'id', '?')}': wall={dt_eval:.0f}ms "
-                 f"nfp={total_nfp_ms:.0f}ms score={total_score_ms:.0f}ms "
-                 f"({len(angles)} rotations, {len(sheet.parts)} placed)")
         if self.verbose:
+            self.log(f"[TIMING] '{getattr(part, 'id', '?')}': wall={dt_eval:.0f}ms "
+                     f"nfp={total_nfp_ms:.0f}ms score={total_score_ms:.0f}ms "
+                     f"({len(angles)} rotations, {len(sheet.parts)} placed)")
             self.log(f"  -> Rotation eval: {len(angles)} rotations in {dt_eval:.1f}ms")
         best_result['_t_nfp_ms'] = total_nfp_ms
         best_result['_t_score_ms'] = total_score_ms
@@ -102,21 +108,32 @@ class PlacementOptimizer:
         if self.verbose:
             self.log(f"  -> Best result for {part.id}: {best_result}")
 
+        if not valid_results:
+            return []
+        valid_results.sort(key=lambda r: (r['metric'], r['angle']))
+        if max_results is not None and max_results > 0:
+            return valid_results[:max_results]
+        return valid_results
 
-
-        if best_result.get('x') is not None:
-             part.set_rotation(best_result['angle'], reposition=False)
-             curr = part.centroid
-             part.move(best_result['x'] - curr.x, best_result['y'] - curr.y)
-             return part
+    def find_best_placement(self, part, sheet):
+        """
+        Parallel evaluation of rotations to find best spot.
+        """
+        top = self.find_top_placements(part, sheet, max_results=1)
+        if top:
+            best_result = top[0]
+            part.set_rotation(best_result['angle'], reposition=False)
+            curr = part.centroid
+            part.move(best_result['x'] - curr.x, best_result['y'] - curr.y)
+            return part
         return None
 
     def _evaluate_rotation(self, angle, part, sheet, direction):
         """Evaluate placing *part* at *angle* on *sheet*.
 
-        Scoring is a single gravity-direction projection (MinkowskiEngine.score_gravity),
-        not a weighted multi-objective score. Returns the best candidate as a dict with
-        'metric' set to inf when no candidate fits.
+        Scoring goes through self.scorer, which make_scorer builds from the Scoring weights
+        (placement_scorers). Returns the best candidate as a dict with 'metric' set to inf
+        when no candidate fits.
         """
         import time as _time, threading
         t0 = _time.perf_counter()
@@ -145,7 +162,9 @@ class PlacementOptimizer:
         best = {'metric': float('inf')}
         if pts_arr is not None and len(pts_arr):
             valid_mask = np.ones(len(pts_arr), dtype=bool)
-            best_idx, metric = MinkowskiEngine.score_gravity(pts_arr, valid_mask, direction, rng=self.rng)
+            best_idx, metric = self.scorer(pts_arr, valid_mask, ScoreContext(
+                direction, part, angle, sheet, self.engine, extents, rotated_poly,
+                (centroid.x, centroid.y)))
             if best_idx is not None:
                 best = {'x': float(pts_arr[best_idx, 0]), 'y': float(pts_arr[best_idx, 1]),
                         'angle': angle, 'metric': metric}
@@ -163,9 +182,21 @@ class PlacementOptimizer:
         best['_t_score_ms'] = (t_end - t_nfp) * 1000
         return best
 
+# Insertion orders the GA can choose between (NLA rulings 2026-10-28). All
+# descending: big parts first is what makes greedy work at all; the keys
+# differ in what "big" means for long, thin or ragged parts.
+SORT_KEYS = {
+    "area": lambda p: p.area,
+    "longest_side": lambda p: max(p.bounding_box()[2:4]),
+    "bbox_area": lambda p: p.bounding_box()[2] * p.bounding_box()[3],
+    "perimeter": lambda p: p.polygon.length,
+}
+DEFAULT_SORT_KEY = "area"
+
+
 class Nester:
     """
-    The main nesting algorithm class. 
+    The main nesting algorithm class.
     It orchestrates the nesting process using PlacementOptimizer and MinkowskiEngine.
     """
     def __init__(self, sheet_sizes, rotation_steps=1, **kwargs):
@@ -174,7 +205,19 @@ class Nester:
         self.sheet_sizes = [(float(w), float(h)) for w, h in sheet_sizes]
         self.spacing = kwargs.get("spacing", 0)
         self.search_direction = kwargs.get("search_direction", (0, -1)) # Default Down
-        
+        if self.search_direction is None:
+            # Per-part random directions were retired (NLA ruling 7, 2026-10-28):
+            # a member must nest the same way every time its genome is evaluated.
+            raise ValueError("search_direction must be a (dx, dy) vector; per-part random directions were retired")
+        self.sort_key = kwargs.get("sort_key", DEFAULT_SORT_KEY)
+        if self.sort_key not in SORT_KEYS:
+            raise ValueError(f"unknown sort_key {self.sort_key!r}; valid keys: {', '.join(SORT_KEYS)}")
+        # Per part type rotation-step counts chosen by the GA (NLA ruling 13). Keyed by
+        # Shape.type_label, which SnapshotShape carries too, so serial and worker
+        # nests read the same key. Each value divides the part's own allowed count,
+        # so every angle tried is on the grid the NFPs were precomputed for.
+        self.rotation_overrides = dict(kwargs.get("rotation_steps_by_type", ()))
+
         # Logging control
         self.quiet = kwargs.get("quiet", False)  # If True, suppress per-part logs
         self.verbose = kwargs.get("verbose", False)  # If True, enable extra detailed logs
@@ -187,12 +230,15 @@ class Nester:
         self.spawn_more_callback = kwargs.get("spawn_more_callback")  # Mints fill-part instances on the main thread
         
         candidate_spacing = kwargs.get("candidate_spacing", DEFAULT_CANDIDATE_SPACING)
-        self.engine = MinkowskiEngine(candidate_spacing, log_callback=self.log_callback, verbose=self.verbose, search_direction=self.search_direction, rng=kwargs.get("rng"))
-        # quiet (multi-layout GA) silences the optimizer's per-placement [TIMING] lines
+        self.engine = MinkowskiEngine(candidate_spacing, log_callback=self.log_callback, verbose=self.verbose, search_direction=self.search_direction)
+        # quiet (multi-layout GA) silences the optimizer's per-placement [TIMING] lines, which also need Verbose
+        self.fitness_weights = kwargs.get("fitness_weights") or FitnessWeights()
+        scorer = make_scorer(self.fitness_weights)
         self.optimizer = PlacementOptimizer(self.engine, rotation_steps, self.search_direction,
                                             None if self.quiet else self.log_callback,
-                                            self.trial_callback, rng=kwargs.get("rng"))
+                                            self.trial_callback, scorer=scorer)
         self.optimizer.verbose = self.verbose
+        self.optimizer.rotation_overrides = self.rotation_overrides
 
         self.parts_to_place = []
         self.sheets = []
@@ -234,7 +280,7 @@ class Nester:
         current_parts = [p for p in all_parts if getattr(p, 'fill_sheet', False) is not True]
         fill_parts = [p for p in all_parts if getattr(p, 'fill_sheet', False) is True]
         if sort:
-            current_parts.sort(key=lambda p: p.area, reverse=True)
+            current_parts.sort(key=SORT_KEYS[self.sort_key], reverse=True)
             fill_parts.sort(key=lambda p: p.area, reverse=True)
 
         # The order parts were actually tried in. The GA records this as the
@@ -400,7 +446,7 @@ class Nester:
             _dt_part = _time.perf_counter() - _t0_part
             if part_timings is not None:
                 part_timings.append((part.id, _dt_part, placed))
-            if not quiet:
+            if not quiet and self.verbose:
                 self.log(f"[TIMING] fill '{part.id}' ({part_type}): "
                          f"{_dt_part * 1000:.0f}ms {'placed' if placed else 'FAILED'} "
                          f"(attempt {attempts[part_type]})")

@@ -3,7 +3,7 @@ import FreeCAD
 import FreeCADGui
 from PySide import QtWidgets
 from freecad.nestingworkbench import task_panel_manager
-from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, show_warning_dialog
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip, show_warning_dialog
 
 _REQUIRED_MODULES = ("shapely", "numpy")
 _MISSING_DEPS_TITLE = QT_TRANSLATE_NOOP("NestingCommand", "Missing Python packages")
@@ -30,35 +30,59 @@ def _warn_missing(names):
         tr("NestingCommand", _MISSING_DEPS_HINT),
     )
 
+class _PanelDocumentObserver:
+    def slotDeletedDocument(self, doc):
+        if not doc or not hasattr(doc, "Name"):
+            return
+        panel = NestingCommand._task_panels.pop(doc.Name, None)
+        if panel is not None:
+            controller = getattr(panel, "controller", None)
+            if controller is not None:
+                controller.doc_closed = True
+                if getattr(controller, "is_running", False):
+                    controller.request_cancel()
+                controller.on_panel_closed()
+
+
+_panel_doc_observer = None
+
+
 # --- FreeCAD Command Classes ---
 
 class NestingCommand:
     """The command that opens the main nesting task panel."""
-    _task_panel = None
+    _task_panels = {}
 
     def GetResources(self):
         """Defines the command's appearance in FreeCAD."""
         return {
             'Pixmap': 'Nesting_Nest_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('NestingCommand', 'Run Nesting Tool'),
-            'ToolTip': QT_TRANSLATE_NOOP('NestingCommand', 'Opens the 2D nesting task panel.')
+            'ToolTip': rich_tooltip(
+                'NestingCommand',
+                QT_TRANSLATE_NOOP('NestingCommand', 'Opens the 2D nesting task panel.\nOpen a document first.')),
         }
 
     def Activated(self):
         """This method is executed when the command is activated."""
-        # Manages its own instance to prevent multiple panels
-        if NestingCommand._task_panel is None:
-            missing = _missing_dependencies()
-            if missing:
-                _warn_missing(missing)
-                return
-            try:
-                NestingCommand._task_panel = task_panel_manager.NestingTaskPanel(
-                    cleanup_callback=lambda: setattr(NestingCommand, "_task_panel", None)
-                )
-            except ImportError as e:
-                _warn_missing([e.name or str(e)])
-                return
+        doc = FreeCAD.ActiveDocument
+        if doc is None:
+            return
+        if doc.Name in NestingCommand._task_panels:
+            return
+
+        missing = _missing_dependencies()
+        if missing:
+            _warn_missing(missing)
+            return
+        try:
+            panel = task_panel_manager.NestingTaskPanel(
+                cleanup_callback=lambda name=doc.Name: NestingCommand._task_panels.pop(name, None)
+            )
+            NestingCommand._task_panels[doc.Name] = panel
+        except ImportError as e:
+            _warn_missing([e.name or str(e)])
+            return
 
     def IsActive(self):
         """Can only be active if a document is open."""
@@ -68,3 +92,6 @@ class NestingCommand:
 # This is where the commands are officially made known to FreeCAD.
 if FreeCAD.GuiUp:
     FreeCADGui.addCommand('Nesting_Run', NestingCommand())
+    if hasattr(FreeCAD, "addDocumentObserver") and _panel_doc_observer is None:
+        _panel_doc_observer = _PanelDocumentObserver()
+        FreeCAD.addDocumentObserver(_panel_doc_observer)

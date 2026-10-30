@@ -13,20 +13,26 @@ from ...datatypes.shape import Shape
 from ... import nw_logger
 from .shape_preparer import ShapePreparer
 from .layout_manager import LayoutManager, Layout
-from .ga_coordinator import GACoordinator
+from .ga_coordinator import GACoordinator, DocumentClosedError
 from .worker_sizing import set_worker_override
 from ...freecad_helpers import (recursive_delete, set_master_shapes_visible,
-                               hide_all_master_shapes, get_sheet_groups, read_sheet_instance)
+                               hide_all_master_shapes, get_sheet_groups, read_sheet_instance,
+                               find_offcut_group)
 from ...constants import (
-    FLIPPED_PREFIX, PHYSICS_ROTATION_PRESETS, PREFS_PATH, PREF_SHEET_SEQUENCE, PROP_ADD_LABELS, PROP_ALGORITHM, PROP_CANDIDATE_SPACING, PROP_DEFLECTION_ANGLE,
+    FLIPPED_PREFIX, PREFS_PATH, PREF_SHEET_SEQUENCE, PROP_ADD_LABELS, PROP_ALGORITHM,
+    PROP_BEAM_ITERATIVE, PROP_BEAM_WIDTH, PROP_BEAM_WIDTH_DECAY, PROP_CANDIDATE_SPACING, PROP_DEFLECTION_ANGLE,
     PROP_FILL_SHEET, PROP_FONT_FILE, PROP_GENERATIONS, PROP_GLOBAL_ROTATION_STEPS, PROP_LABEL_HEIGHT, PROP_LABEL_SIZE,
-    PROP_NESTING_DIRECTION, PROP_PART_ROTATION_OVERRIDE, PROP_PART_ROTATION_STEPS, PROP_PART_SPACING,
-    PROP_POPULATION_SIZE, PROP_QUANTITY, PROP_SHEET_SEQUENCE,
-    PROP_SHOW_BOUNDS, PROP_SIMPLIFICATION, PROP_UP_VECTOR,
+    PROP_MAX_PART_BRANCHES, PROP_MAX_ROT_BRANCHES, PROP_NESTING_DIRECTION, PROP_PART_ROTATION_OVERRIDE, PROP_PART_ROTATION_STEPS, PROP_PART_SPACING,
+    PROP_POPULATION_SIZE, PROP_GA_WINNERS, PROP_MUTATION_RATE, PROP_QUANTITY, PROP_SHEET_SEQUENCE,
+    PROP_FITNESS_MIN_OFFCUT, WEIGHT_PROPS, PROP_PART_DIRECTION,
+    PROP_WEIGHT_GRAVITY, PROP_WEIGHT_CONTACT, PROP_WEIGHT_DIRECTION, PROP_WEIGHT_OFFCUT,
+    PROP_SHOW_BOUNDS, PROP_SHOW_OFFCUTS, PROP_SIMPLIFICATION, PROP_UP_VECTOR,
     SIM_ALL, SIM_OFF, THICKNESS_MATCH_TOL_MM,
+    ALGO_BEAM, ALGO_GREEDY,
 )
 from ...ui_helpers import closest_angle_index
 from .nesting_job import NestingJob
+from . import nfp_store
 from ... import DEFAULT_FONT
 from .algorithms import sheet_sequence
 
@@ -63,6 +69,7 @@ class NestingWorker(QThread):
         self.run_args = run_args
         self.cancel_check_fn = cancel_check_fn
         self._draw_event = threading.Event()
+        self._draw_error = None
     
     def run(self):
         """Execute nesting on worker thread."""
@@ -83,16 +90,19 @@ class NestingWorker(QThread):
         """Called from worker thread. Emits signal and blocks until main thread draws.
 
         The emit goes through the simulation relay rather than straight onto the
-        Qt event queue. Simulation redraws queued on the relay call updateGui(),
-        which would otherwise deliver this request in the middle of the relay's
-        backlog: the final draw ran first, then the leftover sim redraws hid every
-        part again, leaving only the labels on screen. Sharing the relay's FIFO
+        Qt event queue. Sim redraws used to call updateGui() (removed in NLA-059),
+        which delivered this request in the middle of the relay's backlog: the
+        final draw ran first, then the leftover sim redraws hid every part again,
+        leaving only the labels on screen. Sharing the relay's FIFO
         runs every earlier sim callback before the draw. The emit happens on the
         main thread, where the QThread object lives, so the slot runs directly.
         """
+        self._draw_error = None
         self._draw_event.clear()
         nesting_logic._main_thread_relay.post(lambda: self.draw_requested.emit(payload))
         self._draw_event.wait()
+        if self._draw_error is not None:
+            raise self._draw_error
     
     def notify_draw_complete(self):
         """Called from main thread after draw finishes."""
@@ -122,6 +132,16 @@ def _as_int(value, default=0):
         return default
 
 
+def _layout_number(value, as_int=False):
+    """A layout property read as a plain number for a Qt spinbox (RLF-002).
+
+    App::PropertyLength reads back as a Base.Quantity, not a float. Converting here
+    removes the dependence on PySide's implicit numeric conversion. QSpinBox takes an int.
+    """
+    number = float(getattr(value, "Value", value))
+    return int(round(number)) if as_int else number
+
+
 # Human-readable names for the layout settings the reload path can fail to
 # restore. The warning built from these is read by users, not developers, so it
 # must not print raw FreeCAD property names.
@@ -131,9 +151,20 @@ _LAYOUT_SETTING_LABELS = {
     PROP_LABEL_SIZE: "label size",
     PROP_GENERATIONS: "generations",
     PROP_POPULATION_SIZE: "population size",
+    PROP_GA_WINNERS: "GA winners",
+    PROP_MUTATION_RATE: "mutation rate",
+    PROP_WEIGHT_GRAVITY: "gravity weight",
+    PROP_WEIGHT_CONTACT: "contact weight",
+    PROP_WEIGHT_DIRECTION: "direction weight",
+    PROP_WEIGHT_OFFCUT: "offcut weight",
+    PROP_PART_DIRECTION: "part direction",
+    PROP_FITNESS_MIN_OFFCUT: "minimum offcut",
     PROP_NESTING_DIRECTION: "nesting direction",
     PROP_CANDIDATE_SPACING: "candidate spacing",
 }
+
+
+_running_controller = None
 
 
 class NestingController:
@@ -148,7 +179,13 @@ class NestingController:
         self.shape_preparer = ShapePreparer(self.doc, {})
         self.is_running = False
         self.cancel_requested = False
+        self.doc_closed = False
+        self._run_doc_label = None
+        self._has_transaction = False
         self._run_rows = None
+        self._worker = None
+        self._undone_job = None
+        self._undone_names = None
         
         self.viz_manager = VisualizationManager()
         
@@ -159,21 +196,61 @@ class NestingController:
             self.ui.font_label.setText(os.path.basename(default_font))
 
     def execute_nesting(self):
+        global _running_controller
+        if _running_controller is not None and getattr(_running_controller, "is_running", False):
+            other_label = getattr(_running_controller, "_run_doc_label", None)
+            if not other_label:
+                try:
+                    other_doc = getattr(_running_controller, "doc", None)
+                    other_label = getattr(other_doc, "Label", getattr(other_doc, "Name", None)) if other_doc else None
+                except Exception:
+                    other_label = None
+            other_label = other_label or "another document"
+            msg = f"A nest is already running in {other_label}. Wait for it to finish."
+            self.ui.status_label.setText(msg)
+            nw_logger.warn(msg)
+            return
+
         nw_logger.info("\n--- NESTING START ---")
 
         ok, self._run_rows = self._resolve_sheet_sequence()
         if not ok:
             return
         
+        if getattr(self, "_has_transaction", False) and self.doc and not self.doc_closed:
+            try:
+                self.doc.abortTransaction()
+            except Exception as e:
+                nw_logger.debug(f"[NestingController] abortTransaction failed: {e}")
+            self._has_transaction = False
+
         if self.current_job:
             self.current_job.cleanup()
             self.current_job = None
 
         Shape.clear_caches()
 
+        if self.doc:
+            try:
+                self.doc.openTransaction("Nest")
+                self._has_transaction = True
+            except Exception as e:
+                nw_logger.debug(f"[NestingController] openTransaction failed: {e}")
+                self._has_transaction = False
+
+        redone = self._take_redone_job()
+        if redone is not None:
+            redone.cleanup()
+
         target_layout = self._ensure_target_layout()
         if not target_layout:
-             return # Standard error handled in helper
+            if getattr(self, "_has_transaction", False) and self.doc and not self.doc_closed:
+                try:
+                    self.doc.abortTransaction()
+                except Exception as e:
+                    nw_logger.debug(f"[NestingController] abortTransaction failed: {e}")
+                self._has_transaction = False
+            return # Standard error handled in helper
              
         is_simulating = self.ui.simulate_combo.currentIndex() != SIM_OFF
         if hasattr(target_layout, "ViewObject"):
@@ -192,10 +269,8 @@ class NestingController:
         algo_kwargs['verbose'] = verbose
         
         rot_steps = ui_params.get('rotation_steps', 1)
-        ann_steps = algo_kwargs.get('anneal_steps', 25) if ui_params.get('algorithm') == 'Physics' else 0
         nw_logger.info(f"Algorithm Selected: {ui_params.get('algorithm', 'Unknown')}")
         nw_logger.info(f"  -> UI Rotation Steps Slider: {rot_steps}")
-        nw_logger.info(f"  -> UI Anneal Steps Input: {ann_steps}")
         
         algo_kwargs['cancel_callback'] = self._check_cancel
         
@@ -212,6 +287,8 @@ class NestingController:
         self.ui.reset_progress()
         algo_kwargs['progress_callback'] = progress_cb
         
+        _running_controller = self
+        self._run_doc_label = getattr(self.doc, "Label", getattr(self.doc, "Name", "another document")) if self.doc else "another document"
         self.is_running = True
         self.cancel_requested = False
         self.ui.nest_button.setEnabled(False)
@@ -248,6 +325,10 @@ class NestingController:
         params_missing = self._load_params_from_layout(layout_group) or []
         library_sentence = self._restore_sheet_sequence(layout_group)
         shapes_missing, dropped_masters = self._load_shapes_from_layout(layout_group)
+        try:
+            nfp_store.load(self.doc, layout_group)
+        except Exception as e:
+            nw_logger.warn(f"Layout '{layout_group.Label}': stored NFPs could not be loaded: {e}")
 
         # The panel owns master visibility while it is open: this layout's row is
         # on screen, every other layout's row is off.
@@ -261,7 +342,7 @@ class NestingController:
         if missing:
             sentences.append(
                 f"Layout '{layout_group.Label}' was saved without "
-                f"{len(missing)} setting(s), now at defaults: "
+                f"{len(missing)} setting(s): "
                 f"{'; '.join(missing)}. Re-nest and save to store them.")
         if dropped_masters:
             sentences.append(
@@ -285,41 +366,83 @@ class NestingController:
     def _load_params_from_layout(self, layout_group):
         """Extracts algorithm parameters from layout properties."""
         missing = []
+        # The bool marks a QSpinBox, which takes an int.
         props_map = {
             PROP_PART_SPACING: self.ui.part_spacing_input,
             PROP_SIMPLIFICATION: self.ui.simplification_input,
             PROP_LABEL_SIZE: self.ui.label_size_input,
-            PROP_GENERATIONS: self.ui.minkowski_generations_input,
-            PROP_POPULATION_SIZE: self.ui.minkowski_population_size_input,
             PROP_CANDIDATE_SPACING: self.ui.minkowski_candidate_spacing_input,
+            PROP_GENERATIONS: (self.ui.minkowski_generations_input, True),
+            PROP_POPULATION_SIZE: (self.ui.minkowski_population_size_input, True),
+            PROP_MUTATION_RATE: self.ui.ga_mutation_rate_input,
+            PROP_FITNESS_MIN_OFFCUT: self.ui.fitness_min_offcut_input,
         }
         
         verbose = self._verbose_logging()
 
         for prop, widget in props_map.items():
+            widget, as_int = widget if isinstance(widget, tuple) else (widget, False)
             val = getattr(layout_group, prop, None)
             if val is not None:
-                widget.setValue(val)
+                widget.setValue(_layout_number(val, as_int))
             else:
-                missing.append(f"{_LAYOUT_SETTING_LABELS.get(prop, prop)} (defaulted)")
+                missing.append(f"{_LAYOUT_SETTING_LABELS.get(prop, prop)} (kept the panel's current value)")
+        # The four Scoring weights are read as a set: all four or none (NLA ruling 30).
+        weight_vals = {key: getattr(layout_group, prop, None) for prop, key in WEIGHT_PROPS}
+        if all(v is not None for v in weight_vals.values()):
+            self.ui.weight_sliders.setValues({key: float(v) for key, v in weight_vals.items()})
+        else:
+            missing.append("scoring weights (kept the panel's current values)")
+        part_direction = getattr(layout_group, PROP_PART_DIRECTION, None)
+        if part_direction is not None:
+            self.ui.part_direction_dial.setDegrees(part_direction)
+        else:
+            missing.append(f"{_LAYOUT_SETTING_LABELS[PROP_PART_DIRECTION]} (kept the panel's current value)")
+        # Winners goes through the panel's setter, after the population: a plain
+        # setValue would clamp the chosen value to the box's current maximum.
+        winners = getattr(layout_group, PROP_GA_WINNERS, None)
+        if winners is not None:
+            self.ui.set_ga_winners(winners)
+        else:
+            missing.append(f"{_LAYOUT_SETTING_LABELS.get(PROP_GA_WINNERS, PROP_GA_WINNERS)} (kept the panel's current value)")
+
+        beam_props = ((PROP_BEAM_WIDTH,
+                       lambda v: self.ui.beam_width_input.setValue(_layout_number(v, True))),
+                      (PROP_MAX_PART_BRANCHES,
+                       lambda v: self.ui.beam_max_part_branches_input.setValue(_layout_number(v, True))),
+                      (PROP_MAX_ROT_BRANCHES,
+                       lambda v: self.ui.beam_max_rot_branches_input.setValue(_layout_number(v, True))),
+                      (PROP_BEAM_ITERATIVE,
+                       lambda v: self.ui.beam_iterative_checkbox.setChecked(bool(v))),
+                      (PROP_BEAM_WIDTH_DECAY,
+                       lambda v: self.ui.beam_width_decay_input.setValue(_layout_number(v))))
+        beam_absent = 0
+        for prop, apply in beam_props:
+            val = getattr(layout_group, prop, None)
+            if val is None:
+                beam_absent += 1
+            else:
+                apply(val)
+        if beam_absent:
+            missing.append("beam search settings (kept the panel's current values)")
 
 
         nesting_direction = getattr(layout_group, PROP_NESTING_DIRECTION, None)
         if nesting_direction is not None:
             self.ui.minkowski_direction_dial.setDegrees(nesting_direction)
         else:
-            missing.append(f"{_LAYOUT_SETTING_LABELS[PROP_NESTING_DIRECTION]} (defaulted)")
+            missing.append(f"{_LAYOUT_SETTING_LABELS[PROP_NESTING_DIRECTION]} (kept the panel's current value)")
 
         # Deflection has three outcomes and only one of them is a real default.
         deflection_angle = getattr(layout_group, PROP_DEFLECTION_ANGLE, None)
         if deflection_angle is not None:
-            self.ui.deflection_input.setValue(deflection_angle)
+            self.ui.deflection_input.setValue(_layout_number(deflection_angle))
         elif hasattr(layout_group, 'Deflection'):
             # Legacy documents stored millimetres. The setting is genuinely
             # restored, so this is a migration rather than a fallback and does
             # not belong in the warning — but it is still worth being able to
             # see, so it goes out under verbose.
-            self.ui.deflection_input.setValue(layout_group.Deflection * DEFLECTION_ANGLE_PER_MM)
+            self.ui.deflection_input.setValue(_layout_number(layout_group.Deflection) * DEFLECTION_ANGLE_PER_MM)
             if verbose:
                 nw_logger.info(
                     f"[NestingController] Layout '{layout_group.Label}': converted legacy "
@@ -349,17 +472,18 @@ class NestingController:
         # hasattr() was true and nothing was reported as defaulted.
         if hasattr(layout_group, PROP_ALGORITHM):
             algo = str(getattr(layout_group, PROP_ALGORITHM))
+            if not self.ui.set_algorithm(algo):
+                missing.append(f"algorithm '{algo}' (no longer an option; "
+                               f"kept the panel's current choice)")
         else:
-            algo = "Minkowski"
-            missing.append("algorithm (defaulted to Minkowski)")
-        self.ui.algorithm_dropdown.setCurrentText(algo)
+            self.ui.set_algorithm(ALGO_GREEDY)
+            missing.append("algorithm (defaulted to Greedy)")
 
         steps = _as_int(getattr(layout_group, PROP_GLOBAL_ROTATION_STEPS, 0), 0)
         if steps > 0:
             target_angle = 360.0 / steps
-            angles = PHYSICS_ROTATION_PRESETS if algo == "Physics" else self.ui.rotation_angles
-            slider = self.ui.physics_rotation_steps_slider if algo == "Physics" else self.ui.minkowski_rotation_steps_slider
-            slider.setValue(closest_angle_index(angles, target_angle))
+            self.ui.minkowski_rotation_steps_slider.setValue(
+                closest_angle_index(self.ui.rotation_angles, target_angle))
         else:
             # Absent, or stored as a value the slider cannot be derived from.
             # Either way the slider keeps whatever the panel already had.
@@ -740,23 +864,19 @@ class NestingController:
             self.ui.nest_button.setEnabled(False)
 
     def _get_rotation_steps(self):
-        """Returns the orientation count based on algorithm-specific angle mapping."""
-        algo = self.ui.algorithm_dropdown.currentText()
-        
-        if algo == "Physics":
-            idx = self.ui.physics_rotation_steps_slider.value()
-            # Mapping: 360(1), 90(4), 45(8), 30(12), 15(24), 10(36), 5(72), 2(180), 1(360)
-            angles = PHYSICS_ROTATION_PRESETS
-            if idx < len(angles):
-                angle = angles[idx]
-                return int(360 / angle)
-        else:
-            idx = self.ui.minkowski_rotation_steps_slider.value()
-            angles = self.ui.rotation_angles
-            if idx < len(angles):
-                angle = angles[idx]
-                return int(360 / angle)
+        """Returns the orientation count from the rotation slider's angle preset."""
+        idx = self.ui.minkowski_rotation_steps_slider.value()
+        angles = self.ui.rotation_angles
+        if idx < len(angles):
+            return int(360 / angles[idx])
         return 1
+
+    def _ui_safe(self, fn, *args):
+        try:
+            return fn(*args)
+        except RuntimeError as e:
+            nw_logger.debug(f"[NestingController] panel gone: {e}")
+            return None
 
     def _execute_ga_nesting(self, target_layout, ui_params, quantities, master_map, 
                             rotation_params, algo_kwargs, is_simulating, viz_manager=None):
@@ -774,18 +894,20 @@ class NestingController:
             doc=self.doc,
             shape_preparer=self.shape_preparer,
             ui_callbacks={
-                'set_status': lambda msg: self.ui.status_label.setText(msg),
-                'update_progress': lambda c, t, m: self.ui.update_progress(c, t, m),
-                'reset_progress': lambda: self.ui.reset_progress(),
-                'play_sound': lambda: QtWidgets.QApplication.beep() if self.ui.sound_checkbox.isChecked() else None,
+                'set_status': lambda msg: self._ui_safe(self.ui.status_label.setText, msg),
+                'update_progress': lambda c, t, m: self._ui_safe(self.ui.update_progress, c, t, m),
+                'reset_progress': lambda: self._ui_safe(self.ui.reset_progress),
+                'play_sound': lambda: self._ui_safe(
+                    lambda: QtWidgets.QApplication.beep() if getattr(self.ui, 'sound_checkbox', None) and self.ui.sound_checkbox.isChecked() else None
+                ),
             },
             draw_callback=self._worker.request_draw_on_main_thread,
             worker=self._worker
         )
         self._worker.coordinator = coordinator
         
-        self._worker.status_changed.connect(lambda msg: self.ui.status_label.setText(msg))
-        self._worker.progress_updated.connect(lambda c, t, m: self.ui.update_progress(c, t, m))
+        self._worker.status_changed.connect(lambda msg: self._ui_safe(self.ui.status_label.setText, msg))
+        self._worker.progress_updated.connect(lambda c, t, m: self._ui_safe(self.ui.update_progress, c, t, m))
         self._worker.draw_requested.connect(self._handle_draw_request)
         self._worker.finished_signal.connect(self._on_nesting_finished)
         self._worker.error_signal.connect(self._on_nesting_error)
@@ -795,6 +917,8 @@ class NestingController:
     def _handle_draw_request(self, payload):
         """Main-thread handler for draw requests from worker."""
         try:
+            if getattr(self, "doc_closed", None) is True:
+                raise DocumentClosedError("The document was closed during nesting.")
             if payload.get('updateGui_only'):
                 FreeCADGui.updateGui()
             elif payload.get('create_population'):
@@ -806,10 +930,10 @@ class NestingController:
                 self._worker.coordinator._pending_layouts = layouts
             elif payload.get('build_next_generation'):
                 layouts = self._worker.coordinator._build_next_generation(
-                    payload['gen'], payload['layouts'], payload['elites'], 
-                    payload['master_map'], payload['quantities'], payload['ui_params'], 
-                    payload['rotation_steps'], payload['mutation_rate'], 
-                    payload['immigrant_ratio'], payload.get('verbose', False)
+                    payload['gen'], payload['layouts'], payload['parents'],
+                    payload['master_map'], payload['quantities'], payload['ui_params'],
+                    payload['rotation_steps'], payload['mutation_rate'],
+                    payload.get('verbose', False)
                 )
                 self._worker.coordinator._pending_layouts = layouts
             elif payload.get('spawn_fill_part'):
@@ -846,34 +970,67 @@ class NestingController:
                 self.viz_manager.clear_member_rows(self.doc)
             elif payload.get('doc_recompute_only'):
                 self._worker.coordinator.doc.recompute()
+        except Exception as e:
+            self._worker._draw_error = e
         finally:
             self._worker.notify_draw_complete()
 
     def _on_nesting_finished(self, job):
         """Main-thread handler for nesting completion."""
-        if self.cancel_requested:
+        was_cancelled = self.cancel_requested
+        self.is_running = False
+        self.cancel_requested = False
+        global _running_controller
+        if _running_controller is self:
+            _running_controller = None
+
+        if getattr(self, "doc_closed", None) is True:
+            self._retire_worker()
+            return
+
+        if was_cancelled:
             if job:
                 job.cleanup()
             self.cancel_job()
         else:
             self.current_job = job
-            
-        self.is_running = False
-        self.cancel_requested = False
-        self.ui.nest_button.setEnabled(True)
-        self.ui.cancel_button.setEnabled(False)
-        self.ui.reset_progress()
+
+        try:
+            if was_cancelled:
+                # request_cancel showed "Cancelling... Please wait."; the run is over now.
+                self.ui.status_label.setText("Nesting cancelled.")
+            self.ui.nest_button.setEnabled(True)
+            self.ui.cancel_button.setEnabled(False)
+            self.ui.reset_progress()
+        except RuntimeError as e:
+            nw_logger.debug(f"[NestingController] panel gone: {e}")
+
         self._retire_worker()
 
     def _on_nesting_error(self, error_msg):
         """Main-thread handler for nesting errors."""
-        nw_logger.error(f"Nesting Error: {error_msg}")
-        self.ui.status_label.setText(f"Error: {error_msg.split(chr(10))[0]}")
         self.is_running = False
         self.cancel_requested = False
-        self.ui.nest_button.setEnabled(True)
-        self.ui.cancel_button.setEnabled(False)
-        self.ui.reset_progress()
+        global _running_controller
+        if _running_controller is self:
+            _running_controller = None
+
+        if getattr(self, "_has_transaction", False) and self.doc and not self.doc_closed:
+            try:
+                self.doc.abortTransaction()
+            except Exception as e:
+                nw_logger.debug(f"[NestingController] abortTransaction failed: {e}")
+            self._has_transaction = False
+
+        nw_logger.error(f"Nesting Error: {error_msg}")
+        try:
+            self.ui.status_label.setText(f"Error: {error_msg.split(chr(10))[0]}")
+            self.ui.nest_button.setEnabled(True)
+            self.ui.cancel_button.setEnabled(False)
+            self.ui.reset_progress()
+        except RuntimeError as e:
+            nw_logger.debug(f"[NestingController] panel gone: {e}")
+
         self._retire_worker()
 
     def _retire_worker(self):
@@ -890,7 +1047,8 @@ class NestingController:
         take FreeCAD down. Wait for the thread, then break the cycle so the
         wrapper is freed here, deterministically, by refcount.
         """
-        worker, self._worker = self._worker, None
+        worker = getattr(self, "_worker", None)
+        self._worker = None
         if worker is None:
             return
         worker.wait()
@@ -900,11 +1058,85 @@ class NestingController:
             coordinator.worker = None
             coordinator.draw_callback = None
 
+    def _job_objects_exist(self, job):
+        if not job or self.doc is None:
+            return False
+        try:
+            temp_layout = getattr(job, "temp_layout", None)
+            if temp_layout is None:
+                return False
+            name = getattr(temp_layout, "Name", None)
+            if not isinstance(name, str) or self.doc.getObject(name) is None:
+                return False
+            for obj_name in getattr(job, "_owned_object_names", set()):
+                if not isinstance(obj_name, str) or self.doc.getObject(obj_name) is None:
+                    return False
+            return True
+        except (ReferenceError, RuntimeError, TypeError):
+            return False
+
+    def _take_redone_job(self):
+        job = getattr(self, "_undone_job", None)
+        names = getattr(self, "_undone_names", None)
+        self._undone_job = None
+        self._undone_names = None
+        if job is None or self.doc is None:
+            return None
+        if not self._job_objects_exist(job):
+            return None
+        if names:
+            try:
+                temp_name, target_name = names
+                job.temp_layout = self.doc.getObject(temp_name)
+                job.target_layout = self.doc.getObject(target_name)
+            except Exception as e:
+                nw_logger.debug(f"[NestingController] re-resolving redone job layouts failed: {e}")
+        return job
+
     def finalize_job(self):
         """Called when User clicks OK."""
-        if self.current_job:
+        redone = False
+        if not self.current_job:
+            redone_job = self._take_redone_job()
+            if redone_job is not None:
+                self.current_job = redone_job
+                redone = True
+                if self.doc:
+                    try:
+                        self.doc.openTransaction("Nest")
+                        self._has_transaction = True
+                    except Exception as e:
+                        nw_logger.debug(f"[NestingController] openTransaction failed: {e}")
+                        self._has_transaction = False
+                nw_logger.info("The redone nest was committed.")
+            else:
+                return True
+
+        if not redone and getattr(self, "_has_transaction", False) and self.doc and not getattr(self.doc, "HasPendingTransaction", False):
+            if self._job_objects_exist(self.current_job):
+                self._has_transaction = False
+                nw_logger.warn("The nest was committed, but other edits were made before OK, so Undo won't remove it in one step.")
+            else:
+                try:
+                    self._undone_job = self.current_job
+                    self._undone_names = (self.current_job.temp_layout.Name, self.current_job.target_layout.Name)
+                except (AttributeError, ReferenceError, RuntimeError):
+                    self._undone_job = None
+                    self._undone_names = None
+                self.current_job = None
+                self._has_transaction = False
+                nw_logger.warn("The nest was undone before OK. Run Nest again.")
+                try:
+                    self.ui.status_label.setText("The nest was undone. Run Nest again.")
+                except RuntimeError as e:
+                    nw_logger.debug(f"[NestingController] panel gone: {e}")
+                return False
+
+        try:
+            job_sheets = self.current_job.sheets
             final_layout = self.current_job.commit()
-            
+            self._store_nfps(final_layout, job_sheets)
+
             self.ui.current_layout = final_layout
             
             if final_layout and hasattr(final_layout, "ViewObject"):
@@ -919,7 +1151,28 @@ class NestingController:
             
             self.current_job = None
             nw_logger.info("Job Finalized & Committed.")
-            self.doc.recompute()
+            if self.doc:
+                self.doc.recompute()
+                if getattr(self, "_has_transaction", False):
+                    self.doc.commitTransaction()
+                    self._has_transaction = False
+            return True
+        except Exception:
+            if self.doc and getattr(self, "_has_transaction", False):
+                try:
+                    self.doc.abortTransaction()
+                except Exception as e:
+                    nw_logger.debug(f"[NestingController] abortTransaction failed: {e}")
+                self._has_transaction = False
+            raise
+
+    def _store_nfps(self, layout, sheets):
+        """Saves the accepted layout's NFPs beside the document. A failure here
+        must not undo an accepted nest, so it is reported and swallowed."""
+        try:
+            nfp_store.save(self.doc, layout, sheets)
+        except Exception as e:
+            nw_logger.warn(f"The accepted layout's NFPs could not be stored: {e}")
 
     def request_cancel(self):
         """Called when the custom Cancel Nesting button is clicked."""
@@ -944,6 +1197,49 @@ class NestingController:
 
     def cancel_job(self):
         """Called when User clicks Cancel."""
+        if not self.current_job:
+            redone = self._take_redone_job()
+            if redone is not None:
+                if self.doc:
+                    try:
+                        self.doc.openTransaction("Discard nest")
+                    except Exception as e:
+                        nw_logger.debug(f"[NestingController] openTransaction failed: {e}")
+                self.current_job = redone
+                target = self.current_job.target_layout
+                self.current_job.cleanup()
+                if target:
+                    try:
+                        has_content = any(
+                            child.Label.startswith("Sheet_") or child.Label.startswith("MasterShapes")
+                            for child in (target.Group if hasattr(target, "Group") else [])
+                        )
+                        if not has_content:
+                            recursive_delete(self.doc, target)
+                            if hasattr(self.ui, 'current_layout') and self.ui.current_layout == target:
+                                self.ui.current_layout = None
+                            nw_logger.info("Removed empty target layout.")
+                    except Exception as e:
+                        nw_logger.warn(f"[NestingController] Cancel cleanup failed for child: {e}")
+                self.current_job = None
+                if self.doc:
+                    try:
+                        self.doc.commitTransaction()
+                    except Exception as e:
+                        nw_logger.debug(f"[NestingController] commitTransaction failed: {e}")
+                nw_logger.warn("A nest brought back by Redo was discarded.")
+                return
+
+        if getattr(self, "_has_transaction", False) and self.doc and not self.doc_closed:
+            try:
+                self.doc.abortTransaction()
+            except Exception as e:
+                nw_logger.debug(f"[NestingController] abortTransaction failed: {e}")
+            self._has_transaction = False
+            self.current_job = None
+            nw_logger.info("Job Cancelled (transaction aborted).")
+            return
+
         if self.current_job:
             target = self.current_job.target_layout
             
@@ -978,7 +1274,11 @@ class NestingController:
             
             self.current_job = None
             nw_logger.info("Job Cancelled.")
-            self.doc.recompute()
+            if self.doc and not self.doc_closed:
+                try:
+                    self.doc.recompute()
+                except Exception as e:
+                    nw_logger.debug(f"[NestingController] doc recompute skipped on cancel: {e}")
     
     def on_panel_closed(self):
         """Called when the task panel closes, whatever route it took.
@@ -987,8 +1287,12 @@ class NestingController:
         go away with it — including rows belonging to layouts this session never
         touched, which older runs could leave switched on.
         """
+        self._undone_job = None
+        self._undone_names = None
         try:
             self.viz_manager.clear_highlight()
+            if getattr(self, "doc_closed", False):
+                return
             hide_all_master_shapes(self.doc)
             if self.doc:
                 self.doc.recompute()
@@ -1031,6 +1335,25 @@ class NestingController:
                     set_show_bounds(child, depth + 1)
                     
         set_show_bounds(target_layout)
+        self.doc.recompute()
+
+    def toggle_offcuts_visibility(self, _state=None):
+        """Show or hide every offcut in the layout on screen (NLA ruling 20).
+
+        `_state` is the checkbox's stateChanged argument; the checkbox is read instead.
+        """
+        visible = self.ui.show_offcuts_checkbox.isChecked()
+        if self.current_job and self.current_job.temp_layout:
+            target_layout = self.current_job.temp_layout
+        else:
+            target_layout = getattr(self.ui, 'current_layout', None)
+        if not target_layout:
+            return
+        for sheet_group in get_sheet_groups(target_layout):
+            group = find_offcut_group(sheet_group)
+            for obj in (group.Group if group else ()):
+                if getattr(obj, "ViewObject", None):
+                    obj.ViewObject.Visibility = visible
         self.doc.recompute()
 
     def _resolve_sheet_sequence(self):
@@ -1121,24 +1444,27 @@ class NestingController:
             'add_labels': self.ui.add_labels_checkbox.isChecked(),
             'font_path': getattr(self.ui, 'selected_font_path', None),
             'show_bounds': self.ui.show_bounds_checkbox.isChecked(),
+            'show_offcuts': self.ui.show_offcuts_checkbox.isChecked(),
             'label_height': self.ui.label_height_input.value(),
             'label_size': self.ui.label_size_input.value(),
             'generations': self.ui.minkowski_generations_input.value(),
             'population_size': self.ui.minkowski_population_size_input.value(),
+            'beam_width': self.ui.beam_width_input.value() if hasattr(self.ui, 'beam_width_input') else 1,
+            'max_part_branches': self.ui.beam_max_part_branches_input.value() if hasattr(self.ui, 'beam_max_part_branches_input') else 2,
+            'max_rot_branches': self.ui.beam_max_rot_branches_input.value() if hasattr(self.ui, 'beam_max_rot_branches_input') else 3,
+            'beam_width_decay': self.ui.beam_width_decay_input.value(),
+            'ga_winners': self.ui.ga_winners(),
+            'mutation_rate': self.ui.ga_mutation_rate_input.value(),
+            'beam_iterative': self.ui.beam_iterative_checkbox.isChecked() if hasattr(self.ui, 'beam_iterative_checkbox') else False,
             'candidate_spacing': self.ui.minkowski_candidate_spacing_input.value(),
-            'compactness_weight': self.ui.minkowski_compactness_input.value(),
+            **{f"{k}_weight": float(v) for k, v in self.ui.weight_sliders.values().items()},
+            'part_direction': self.ui.part_direction_dial.degrees(),
+            'min_offcut': self.ui.fitness_min_offcut_input.value(),
             'verbose': self.ui.verbose_logging_checkbox.isChecked(),
             'nesting_direction': self.ui.minkowski_direction_dial.degrees(),
-            'algorithm': self.ui.algorithm_dropdown.currentText(),
-            'use_random_direction': (self.ui.physics_random_checkbox.isChecked() if self.ui.algorithm_dropdown.currentText() == 'Physics' else self.ui.minkowski_random_checkbox.isChecked()),
-            'stability_tolerance': self.ui.physics_improvement_threshold_input.value(),
-            'anneal_curve': self.ui.physics_anneal_curve_type.currentText(),
-            'anneal_min_amp': self.ui.physics_anneal_min_amp.value(),
-            'anneal_max_amp': self.ui.physics_anneal_max_amp.value(),
-            'anneal_rot_steps': self.ui.physics_anneal_rot_steps.value(),
-            'anneal_rot_curve': self.ui.physics_anneal_rot_curve_type.currentText(),
-            'anneal_rot_min': self.ui.physics_anneal_rot_min.value(),
-            'anneal_rot_max': self.ui.physics_anneal_rot_max.value(),
+            'algorithm': self.ui.algorithm(),
+            'evolve_direction': self.ui.evolve_direction_checkbox.isChecked(),
+            'direction_detent': self.ui.minkowski_direction_dial.detentStep(),
             'worker_processes': self.ui.worker_processes_input.value(),
             'sheet_sequence': [dict(r) for r in self._run_rows] if self._run_rows else [],
             'sheet_thickness': self._run_rows[0]['thickness'] if self._run_rows else self.ui.sheet_thickness_input.value(),
@@ -1155,29 +1481,25 @@ class NestingController:
         prefs.SetFloat(PROP_PART_SPACING, float(settings['spacing']))
         prefs.SetFloat(PROP_DEFLECTION_ANGLE, float(settings.get('deflection_angle', 10)))  # Save angle, not mm
         prefs.SetFloat(PROP_SIMPLIFICATION, float(settings['simplification']))
-        prefs.SetFloat("GACompactnessWeight", float(settings['compactness_weight']))
+        for prop, key in WEIGHT_PROPS:
+            prefs.SetFloat(prop, float(settings[f"{key}_weight"]))
+            prefs.SetBool(prop + "Locked", self.ui.weight_sliders.isLocked(key))
+        prefs.SetFloat(PROP_PART_DIRECTION, float(settings['part_direction']))
+        prefs.SetFloat("FitnessMinOffcut", float(settings['min_offcut']))
+        prefs.SetFloat("BeamWidthDecay", float(settings.get('beam_width_decay', 1.0)))
+        prefs.SetInt("GAWinners", int(settings.get('ga_winners', 2)))
+        prefs.SetFloat("GAMutationRate", float(settings.get('mutation_rate', 0.1)))
+        prefs.SetBool("EvolveDirection", bool(settings.get('evolve_direction', False)))
         prefs.SetFloat("DirectionDetentStep", self.ui.minkowski_direction_dial.detentStep())
         
         mink_steps = int(360 / self.ui.rotation_angles[self.ui.minkowski_rotation_steps_slider.value()])
         prefs.SetInt("MinkowskiRotationSteps", mink_steps)
         
-        phys_angles = PHYSICS_ROTATION_PRESETS
-        phys_steps = int(360 / phys_angles[self.ui.physics_rotation_steps_slider.value()])
-        prefs.SetInt("PhysicsRotationSteps", phys_steps)
-
         prefs.SetBool(PROP_ADD_LABELS, bool(settings['add_labels']))
         prefs.SetBool(PROP_SHOW_BOUNDS, bool(settings['show_bounds']))
+        prefs.SetBool(PROP_SHOW_OFFCUTS, bool(settings['show_offcuts']))
         prefs.SetFloat(PROP_LABEL_HEIGHT, float(settings['label_height']))
         prefs.SetFloat(PROP_LABEL_SIZE, float(settings['label_size']))
-        prefs.SetFloat("PhysicsStabilityTolerance", float(settings.get('stability_tolerance', 0.01)))
-        prefs.SetString("PhysicsAnnealCurveType", str(settings.get('anneal_curve', "Logarithmic")))
-        prefs.SetFloat("PhysicsAnnealMinAmp", float(settings.get('anneal_min_amp', 0.1)))
-        prefs.SetFloat("PhysicsAnnealMaxAmp", float(settings.get('anneal_max_amp', 100.0)))
-        
-        prefs.SetInt("PhysicsAnnealRotSteps", int(settings.get('anneal_rot_steps', 10)))
-        prefs.SetString("PhysicsAnnealRotCurveType", str(settings.get('anneal_rot_curve', "Logarithmic")))
-        prefs.SetFloat("PhysicsAnnealRotMin", float(settings.get('anneal_rot_min', 1.0)))
-        prefs.SetFloat("PhysicsAnnealRotMax", float(settings.get('anneal_rot_max', 90.0)))
         if settings['font_path']:
              prefs.SetString("FontPath", str(settings['font_path']))
         set_worker_override(settings.get('worker_processes', 0))
@@ -1239,44 +1561,26 @@ class NestingController:
 
     def _prepare_algo_kwargs(self, ui_params):
         algo_kwargs = {}
-        algorithm = ui_params.get('algorithm', 'Minkowski')
-        
-        if algorithm == 'Physics':
-            if self.ui.physics_random_checkbox.isChecked():
-                algo_kwargs['physics_direction'] = None 
-            else:
-                # degrees() is a maths angle: 0 = Right (1,0), 90 = Up (0,1), 180 = Left, 270 = Down (0,-1)
-                angle_rad = math.radians(self.ui.physics_direction_dial.degrees())
-                algo_kwargs['physics_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
-            
-            algo_kwargs['step_size'] = self.ui.physics_step_size_input.value()
-            algo_kwargs['max_spawn_count'] = self.ui.physics_max_spawn_input.value()
-            algo_kwargs['max_nesting_steps'] = self.ui.physics_max_nesting_steps_input.value()
-            algo_kwargs['anneal_steps'] = self.ui.physics_anneal_steps_input.value()
-            algo_kwargs['anneal_rotate_enabled'] = self.ui.anneal_rotate_checkbox.isChecked()
-            algo_kwargs['anneal_translate_enabled'] = self.ui.anneal_translate_checkbox.isChecked()
-            algo_kwargs['anneal_random_shake_direction'] = self.ui.anneal_random_shake_checkbox.isChecked()
-            algo_kwargs['stability_tolerance'] = ui_params.get('stability_tolerance', 0.01)
-            algo_kwargs['anneal_curve'] = ui_params.get('anneal_curve', "Logarithmic")
-            algo_kwargs['anneal_min_amp'] = ui_params.get('anneal_min_amp', 0.1)
-            algo_kwargs['anneal_max_amp'] = ui_params.get('anneal_max_amp', 100.0)
-            algo_kwargs['anneal_rot_steps'] = ui_params.get('anneal_rot_steps', 10)
-            algo_kwargs['anneal_rot_curve'] = ui_params.get('anneal_rot_curve', "Logarithmic")
-            algo_kwargs['anneal_rot_min'] = ui_params.get('anneal_rot_min', 1.0)
-            algo_kwargs['anneal_rot_max'] = ui_params.get('anneal_rot_max', 90.0)
-        else:
-            if self.ui.minkowski_random_checkbox.isChecked():
-                algo_kwargs['search_direction'] = None
-            else:
-                # degrees() is a maths angle: 0 = Right (1,0), 90 = Up (0,1), 180 = Left, 270 = Down (0,-1)
-                angle_rad = math.radians(self.ui.minkowski_direction_dial.degrees())
-                algo_kwargs['search_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
-            
-            algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
-            algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
-            algo_kwargs['candidate_spacing'] = self.ui.minkowski_candidate_spacing_input.value()
-            algo_kwargs['worker_processes'] = ui_params.get('worker_processes', 0)
-            algo_kwargs['sim_show_all_members'] = self.ui.simulate_combo.currentIndex() == SIM_ALL
+        algorithm = ui_params.get('algorithm', ALGO_GREEDY)
+
+        # degrees() is a maths angle: 0 = Right (1,0), 90 = Up (0,1), 180 = Left, 270 = Down (0,-1)
+        # Always the dial's vector: under Greedy the genome decides per member, under
+        # Beam it is a fixed setting.
+        angle_rad = math.radians(self.ui.minkowski_direction_dial.degrees())
+        algo_kwargs['search_direction'] = (math.cos(angle_rad), math.sin(angle_rad))
+
+        algo_kwargs['population_size'] = self.ui.minkowski_population_size_input.value()
+        algo_kwargs['generations'] = self.ui.minkowski_generations_input.value()
+        if algorithm == ALGO_BEAM:
+            # Only the chosen placer's keys: Nester ignores stray kwargs silently.
+            algo_kwargs['beam_width'] = self.ui.beam_width_input.value()
+            algo_kwargs['width_decay'] = self.ui.beam_width_decay_input.value()
+            algo_kwargs['max_part_branches'] = self.ui.beam_max_part_branches_input.value()
+            algo_kwargs['max_rot_branches'] = self.ui.beam_max_rot_branches_input.value()
+            algo_kwargs['iterative'] = self.ui.beam_iterative_checkbox.isChecked()
+        algo_kwargs['candidate_spacing'] = self.ui.minkowski_candidate_spacing_input.value()
+        algo_kwargs['worker_processes'] = ui_params.get('worker_processes', 0)
+        algo_kwargs['sim_show_all_members'] = self.ui.simulate_combo.currentIndex() == SIM_ALL
 
         algo_kwargs['clear_nfp_cache'] = self.ui.clear_cache_checkbox.isChecked()
         algo_kwargs['spacing'] = ui_params['spacing']

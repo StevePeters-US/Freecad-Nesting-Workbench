@@ -21,6 +21,20 @@ DEFAULT_CANDIDATE_SPACING = 5.0
 _hole_fit_warned = set()
 _hole_fit_warned_lock = Lock()
 
+def _centred(polygon):
+    """*polygon* translated so its centroid is the origin, cached by identity: every instance
+    of a part type shares its master's polygon object, so each type is centred once per run
+    instead of once per NFP, and the same centred object keeps minkowski_utils' outline cache
+    warm (ARS round 4). The entry holds the polygon, so its id can't be reused while cached;
+    Shape.clear_caches() empties it."""
+    entry = Shape.centred_cache.get(id(polygon))
+    if entry is not None and entry[0] is polygon:
+        return entry[1]
+    c = polygon.centroid
+    centred = translate(polygon, -c.x, -c.y)
+    Shape.centred_cache[id(polygon)] = (polygon, centred)
+    return centred
+
 def _warn_hole_fit_failed(cache_key, error, log):
     """Warns once per part pair (not once per angle) that a hole fit failed."""
     pair = cache_key[:2]
@@ -62,10 +76,8 @@ def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, l
             level="error")
         return {}
     try:
-        mA, mB = shape_A.original_polygon, part_to_place.original_polygon
-        cA, cB = mA.centroid, mB.centroid
-        poly_A_centered = translate(mA, -cA.x, -cA.y)
-        poly_B_centered = translate(mB, -cB.x, -cB.y)
+        poly_A_centered = _centred(shape_A.original_polygon)
+        poly_B_centered = _centred(part_to_place.original_polygon)
         nfp_exterior = minkowski_utils.minkowski_sum(poly_A_centered, angle_A, False, poly_B_centered, angle_B, True, log)
         nfp_interiors = []
         if poly_A_centered.interiors:
@@ -104,19 +116,44 @@ def compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, l
         Shape.nfp_cache[cache_key] = nfp_data
     return nfp_data
 
+def clone_sheet_state(sheet):
+    """Return a lightweight clone of *sheet* and its incremental candidate cache
+    so child branches in tree search reuse all candidate filtering up to
+    len(sheet.parts) without mutating the parent sheet."""
+    from ....datatypes.sheet import Sheet
+    new_sheet = Sheet(sheet.id, sheet.width, sheet.height, spacing=sheet.spacing)
+    new_sheet.used_area = sheet.used_area
+    new_sheet.spec_index = sheet.spec_index
+    new_sheet.origin_x = sheet.origin_x
+    new_sheet.stock = sheet.stock
+    new_sheet.parent_group_name = sheet.parent_group_name
+    new_sheet.parts = list(sheet.parts)
+    src_cache = sheet.__dict__.get('_cand_cache')
+    if src_cache:
+        new_sheet.__dict__['_cand_cache'] = {
+            k: {
+                'n': entry['n'],
+                'pts': entry['pts'].copy() if entry['pts'] is not None else None,
+                # Prepared NFP polygons are never mutated in place; shallow list copy is safe.
+                'polys': list(entry['polys']),
+                'seen': set(entry['seen']),
+            }
+            for k, entry in src_cache.items()
+        }
+    return new_sheet
+
 class MinkowskiEngine:
     """
     Handles geometric operations for Minkowski nesting, such as NFP generation,
     candidate point finding, and placement validation.
     """
-    def __init__(self, candidate_spacing, discretize_edges=True, log_callback=None, verbose=False, search_direction=(0, -1), rng=None):
+    def __init__(self, candidate_spacing, discretize_edges=True, log_callback=None, verbose=False, search_direction=(0, -1)):
         self.candidate_spacing = candidate_spacing
         self.discretize_edges = discretize_edges
         self.log_callback = log_callback
         self.verbose = verbose
         
         self.search_direction = search_direction
-        self.rng = rng
         self._log_lock = Lock()
 
         self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0, 'rotations_skipped': 0}
@@ -354,15 +391,22 @@ class MinkowskiEngine:
                      f"total={dt:.1f}ms candidates={len(pts)}")
         return pts
 
+    def candidate_nfps(self, part_to_place, angle, sheet):
+        """The translated, prepared NFPs of *sheet*'s placed parts against *part_to_place* at
+        *angle*: one polygon per placed part, never unioned (AGENTS.md). Read-only; valid after
+        get_incremental_candidates for the same (part, angle, sheet). Empty when it hasn't run."""
+        cache = sheet.__dict__.get('_cand_cache', {})
+        entry = cache.get(self.candidate_cache_key(part_to_place, angle))
+        return list(entry['polys']) if entry else []
+
     @staticmethod
-    def score_gravity(pts_np, valid, direction, rng=None):
+    def score_gravity(pts_np, valid, direction):
         """Score candidates by gravity direction. Lower metric = better (furthest along direction).
 
         pts_np: (N, 2) float array of candidate positions
         valid:  (N,) bool mask — invalid positions get metric=inf
         direction: (gx, gy) unit vector pointing toward preferred side
-        rng: optional random.Random — when given, ties for the best score are
-             broken randomly instead of always taking the first index
+        Ties take the first candidate in order (NLA ruling 19).
         Returns: (best_idx, metric) or (None, inf) when no valid candidates exist.
         """
         gx, gy = direction
@@ -370,12 +414,7 @@ class MinkowskiEngine:
         metric = float(scores.min())
         if not np.isfinite(metric):
             return None, float('inf')
-        tied = np.flatnonzero(scores == metric)
-        if rng is not None and len(tied) > 1:
-            best_idx = int(tied[rng.randrange(len(tied))])
-        else:
-            best_idx = int(tied[0])
-        return best_idx, metric
+        return int(np.argmin(scores)), metric
 
     def _calculate_and_cache_nfp(self, shape_A, angle_A, part_to_place, angle_B, cache_key):
         return compute_and_cache_nfp(shape_A, angle_A, part_to_place, angle_B, cache_key, self.log, self.candidate_spacing)
@@ -389,25 +428,42 @@ class MinkowskiEngine:
             self._perf_stats = {'cache_hits': 0, 'cache_misses': 0, 'nfp_compute_ms': 0.0, 'rotations_skipped': 0}
 
     @staticmethod
+    def _ring_vertices(coords, tol=1e-6):
+        """The ring's vertices in ring order, without the closing duplicate. A vertex within `tol`
+        of the last one kept is dropped (ARS-027)."""
+        pts = coords
+        if len(pts) > 1 and (np.hypot(*np.diff(pts, axis=0).T) < tol).any():
+            kept = [pts[0]]
+            for p in pts[1:]:
+                if np.hypot(p[0] - kept[-1][0], p[1] - kept[-1][1]) >= tol:
+                    kept.append(p)
+            pts = np.array(kept)
+        if len(pts) > 1 and np.hypot(*(pts[-1] - pts[0])) < tol:
+            pts = pts[:-1]
+        return pts
+
+    @staticmethod
     def _discretize_ring_np(ring, candidate_spacing):
         """Vectorized ring discretisation. Returns (N, 2) float64 array.
 
-        Replaces the Shapely interpolate() loop — samples at equal arc-length
-        intervals using numpy cumulative distance + np.interp.
+        The ring's vertices come first, in ring order, so that the dedup grid in
+        get_incremental_candidates keeps them: vertices give exact corner contacts at any
+        spacing (ARS-B03). Then equal arc-length samples, from distance > 0 (vertex 0 is
+        already in the output), via numpy cumulative distance + np.interp. A ring shorter
+        than `candidate_spacing` gives its vertices alone.
         `candidate_spacing` is the target arc length between samples, in mm.
         """
-        coords = np.array(ring.coords, dtype=np.float64)
-        diffs = np.diff(coords, axis=0)
+        verts = MinkowskiEngine._ring_vertices(np.array(ring.coords, dtype=np.float64))
+        closed = np.vstack([verts, verts[:1]])
+        diffs = np.diff(closed, axis=0)
         seg_lens = np.hypot(diffs[:, 0], diffs[:, 1])
-        cum_dist = np.empty(len(seg_lens) + 1, dtype=np.float64)
-        cum_dist[0] = 0.0
-        np.cumsum(seg_lens, out=cum_dist[1:])
+        cum_dist = np.concatenate(([0.0], np.cumsum(seg_lens)))
         total = cum_dist[-1]
         if total < candidate_spacing:
-            return coords[:1]
+            return verts
         n = max(2, int(total / candidate_spacing))
-        sample_dists = np.linspace(0.0, total, n, endpoint=False)
-        xs = np.interp(sample_dists, cum_dist, coords[:, 0])
-        ys = np.interp(sample_dists, cum_dist, coords[:, 1])
-        return np.column_stack([xs, ys])
+        sample_dists = np.linspace(0.0, total, n, endpoint=False)[1:]
+        xs = np.interp(sample_dists, cum_dist, closed[:, 0])
+        ys = np.interp(sample_dists, cum_dist, closed[:, 1])
+        return np.vstack([verts, np.column_stack([xs, ys])])
 

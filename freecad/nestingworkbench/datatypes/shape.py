@@ -41,11 +41,15 @@ class Shape:
     nfp_cache = {}
     nfp_cache_lock = threading.Lock()
     decomposition_cache = {}
-    
+    # Keyed by id(polygon); each entry holds the polygon, so the id can't be reused while
+    # cached (minkowski_utils._outline_pieces, minkowski_engine._centred; ARS round 4).
+    outline_cache = {}
+    centred_cache = {}
+
     @classmethod
     def clear_caches(cls):
-        """Clears the decomposition cache between nesting runs, and any NFP
-        entries that record a failure.
+        """Clears the decomposition, outline and centred-polygon caches between nesting
+        runs, and any NFP entries that record a failure.
 
         Successful NFPs are expensive and are kept; that is the point of the
         cache. A failure is not a result. Kept across runs, it means a fixed
@@ -55,6 +59,8 @@ class Shape:
         cannot be computed is tried once, not on every placement attempt.
         """
         cls.decomposition_cache.clear()
+        cls.outline_cache.clear()
+        cls.centred_cache.clear()
         with cls.nfp_cache_lock:
             for key in [k for k, v in cls.nfp_cache.items() if v.get('error')]:
                 del cls.nfp_cache[key]

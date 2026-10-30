@@ -20,8 +20,11 @@ class VisualizationManager:
         
         Args:
             doc: The active FreeCAD document
-            bounds: A Part.Shape (typically a wire) or a list of FreeCAD.Vectors 
+            bounds: A Part.Shape (typically a wire) or a list of FreeCAD.Vectors
                    representing the boundary to visualize.
+
+        A failed draw raises: the simulation's caller records it, and the run reports
+        every failure in one warning (_SimFailures), not one per frame.
         """
         if not doc or not FreeCAD.GuiUp:
             return
@@ -33,19 +36,13 @@ class VisualizationManager:
                 self._trial_viz_obj.ViewObject.LineColor = (0.0, 0.5, 1.0)  # Blue
                 self._trial_viz_obj.ViewObject.LineWidth = 1.5
                 self._trial_viz_obj.ViewObject.Transparency = 50
-        
-        try:
-            if isinstance(bounds, Part.Shape):
-                self._trial_viz_obj.Shape = bounds
-            elif isinstance(bounds, list):
-                # Assume list of vectors
-                wire = Part.makePolygon(bounds)
-                self._trial_viz_obj.Shape = wire
-            
-            # Force UI update to show the change immediately during simulation
-            FreeCADGui.updateGui()
-        except Exception as e:
-            nw_logger.warn(f"[VisualizationManager] Draw failed: {e}")
+
+        if isinstance(bounds, Part.Shape):
+            self._trial_viz_obj.Shape = bounds
+        elif isinstance(bounds, list):
+            # Assume list of vectors
+            wire = Part.makePolygon(bounds)
+            self._trial_viz_obj.Shape = wire
 
     def clear_trial_placement(self, doc):
         """
@@ -87,7 +84,6 @@ class VisualizationManager:
             if obj:
                 self._set_highlight(obj, True)
                 self._highlighted_master = obj
-                FreeCADGui.updateGui()
 
     def clear_highlight(self):
         """Removes the highlight from the currently highlighted master container."""

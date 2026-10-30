@@ -29,9 +29,31 @@ PROP_LABEL_SIZE = "LabelSize"
 PROP_GLOBAL_ROTATION_STEPS = "GlobalRotationSteps"
 PROP_GENERATIONS = "Generations"
 PROP_POPULATION_SIZE = "PopulationSize"
+PROP_GA_WINNERS = "GAWinners"
+PROP_MUTATION_RATE = "MutationRate"
+PROP_WEIGHT_GRAVITY = "WeightGravity"
+PROP_WEIGHT_CONTACT = "WeightContact"
+PROP_WEIGHT_DIRECTION = "WeightDirection"
+PROP_WEIGHT_OFFCUT = "WeightOffcut"
+# (property, panel key) for the four Scoring weights (NLA ruling 30). The lock state
+# of each is kept in prefs only, as prop + "Locked".
+WEIGHT_PROPS = ((PROP_WEIGHT_GRAVITY, "gravity"), (PROP_WEIGHT_CONTACT, "contact"),
+                (PROP_WEIGHT_DIRECTION, "direction"), (PROP_WEIGHT_OFFCUT, "offcut"))
+PROP_PART_DIRECTION = "PartDirectionDeg"
+PROP_FITNESS_MIN_OFFCUT = "FitnessMinOffcut"
+PROP_BEAM_WIDTH = "BeamWidth"
+PROP_MAX_PART_BRANCHES = "MaxPartBranches"
+PROP_MAX_ROT_BRANCHES = "MaxRotBranches"
+PROP_BEAM_ITERATIVE = "BeamIterative"
+PROP_BEAM_WIDTH_DECAY = "BeamWidthDecay"
 PROP_NESTING_DIRECTION = "NestingDirectionDeg"
 PROP_CANDIDATE_SPACING = "CandidateSpacing"
 PROP_ALGORITHM = "Algorithm"
+
+# Values stored in PROP_ALGORITHM and carried as ui_params['algorithm']: the
+# placement algorithm. The GA always wraps it (population 1 = a single run).
+ALGO_GREEDY = "Greedy"
+ALGO_BEAM = "Beam"
 
 # -- Sheet-instance (Sheet_N group) Property Names --
 # A Sheet_N records the library sheet it was nested on and a snapshot of that
@@ -59,7 +81,6 @@ PREF_SHEET_SEQUENCE = "SheetSequence"  # the panel's sheet list (JSON)
 
 # -- Algorithm Presets --
 # Rotation angle presets (degrees). Index 0 = coarsest, last = finest.
-PHYSICS_ROTATION_PRESETS = [360, 90, 45, 30, 15, 10, 5, 2, 1]
 MINKOWSKI_ROTATION_PRESETS = [360, 180, 120, 90, 45, 30, 15, 10, 5, 1]
 
 # -- Document Label Prefixes --
@@ -82,6 +103,15 @@ PROP_FLIP_Z_MID = "FlipZMid"
 FLIP_ANGLE = 180.0
 # Back-side boundary tint (RGB 0-1). A setting once NWS-010 lands.
 BACK_SHEET_COLOR = (0.58, 0.50, 0.72)
+
+# A sheet's offcuts (NLA ruling 20): an Offcuts_<n> subgroup inside Sheet_<n> holding one
+# offcut_<n>_<k> plane per free rectangle. Display only: never exported or cut.
+OFFCUT_GROUP_PREFIX = "Offcuts_"
+OFFCUT_PREFIX = "offcut_"
+OFFCUT_COLOR = (0.30, 0.75, 0.35)
+OFFCUT_LINE_COLOR = (0.10, 0.45, 0.15)
+OFFCUT_Z = 0.1  # mm above the sheet plane, so the tint doesn't z-fight it
+PROP_SHOW_OFFCUTS = "ShowOffcuts"
 
 # -- Simulation dropdown (NestingPanel) item indexes --
 SIM_OFF = 0

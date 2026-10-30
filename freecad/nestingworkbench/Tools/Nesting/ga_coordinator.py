@@ -4,26 +4,27 @@ Coordinates the Genetic Algorithm nesting loop.
 Extracted from NestingController._execute_ga_nesting() to follow SRP.
 """
 import FreeCADGui
-import math
 import random
 import time
-import zlib
 from concurrent.futures import FIRST_COMPLETED, wait
 from ...datatypes.shape import Shape
+from ...constants import ALGO_BEAM, ALGO_GREEDY
 from freecad.nestingworkbench import nw_logger
 from .layout_manager import LayoutManager
-from .algorithms import genetic_utils
+from .algorithms import search_genome
+from .algorithms.fitness import weights_from_params
 from .algorithms import sheet_sequence
 from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
 from .worker_sizing import ga_worker_count, SOURCE_LOGICAL_FALLBACK, SOURCE_SETTING
 from ...sheet_library import model as sheet_model, store as sheet_store
 
-ELITE_FRACTION_DIVISOR = 5      # top 1/5 of the population survives unchanged
-MIN_ELITE_COUNT = 2             # always keep a breeding pair
-DEFAULT_MUTATION_RATE = 0.1
-DEFAULT_IMMIGRANT_RATIO = 0.15  # fraction of each new generation seeded at random
+DEFAULT_MUTATION_RATE = 0.1     # fallback when ui_params has no 'mutation_rate'
+DEFAULT_WINNERS = 2             # fallback when ui_params has no 'ga_winners'
 POOL_POLL_SECONDS = 0.25        # how often a wait on workers re-checks for cancel
 POOL_STARTUP_TIMEOUT = 60.0     # a worker that has not answered by now never will
+TERMINATE_JOIN_SECONDS = 2.0   # per worker; terminate() is immediate, so this is a cap, not a wait
+CACHE_REMOVE_ATTEMPTS = 5
+CACHE_REMOVE_RETRY_SECONDS = 0.1
 
 # numpy's BLAS reads these at import and otherwise starts os.cpu_count() - 1
 # threads in every worker. Nesting never makes a BLAS call big enough to use them.
@@ -109,11 +110,13 @@ def worker_mp_context():
     raise RuntimeError(f"no Python interpreter found in {bin_dir} to start workers")
 
 def terminate_pool(pool):
-    """Stops a worker pool without waiting on its workers.
+    """Stops a worker pool without waiting on its work.
 
     shutdown(wait=False) only stops handing out work: a worker busy on a
     member, or one that never started, stays alive and so does the run
     waiting on it. Workers hold nothing the GA needs, so terminate them.
+    Terminated workers are joined (at most TERMINATE_JOIN_SECONDS each) so
+    Windows releases the cache file before it is deleted.
     Also deletes the pool's NFP cache file.
     """
     if pool is None:
@@ -125,6 +128,11 @@ def terminate_pool(pool):
             process.terminate()
         except Exception as e:
             nw_logger.debug(f"[GACoordinator] Worker process terminate ignored (already exited): {e}")
+    for process in processes:
+        try:
+            process.join(TERMINATE_JOIN_SECONDS)
+        except Exception as e:
+            nw_logger.debug(f"[GACoordinator] Worker process join ignored: {e}")
     _remove_cache_file(_pool_cache_files.pop(id(pool), None))
 
 def _write_cache_file(cache_payload):
@@ -142,13 +150,22 @@ def _write_cache_file(cache_payload):
     return path
 
 def _remove_cache_file(path):
+    """Deletes the NFP cache file, retrying briefly: on Windows a just-terminated worker or a
+    virus scanner can hold it for a moment. Warns if it is still there."""
     import os
     if path is None:
         return
-    try:
-        os.remove(path)
-    except OSError as e:
-        nw_logger.debug(f"[GACoordinator] NFP cache file not removed: {e}")
+    error = None
+    for _ in range(CACHE_REMOVE_ATTEMPTS):
+        try:
+            os.remove(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError as e:
+            error = e
+            time.sleep(CACHE_REMOVE_RETRY_SECONDS)
+    nw_logger.warn(f"[GACoordinator] NFP cache file not removed: {path}: {error}")
 
 def wait_for_any(pending, cancel_callback, deadline=None, on_poll=None):
     """Blocks until at least one future in pending finishes.
@@ -281,6 +298,11 @@ def start_worker_pool(max_workers, cache_payload, cancel_callback, sim_queue=Non
         terminate_pool(pool)
         raise
 
+
+class DocumentClosedError(RuntimeError):
+    """The nest's document was deleted while the nest ran."""
+
+
 class GACoordinator:
     """Runs the GA optimization loop and returns the best Layout."""
 
@@ -351,9 +373,8 @@ class GACoordinator:
         generations = algo_kwargs.get('generations', 1)
         population_size = algo_kwargs.get('population_size', 1)
         rotation_steps = ui_params.get('rotation_steps', 1)
-        elite_count = min(population_size, max(MIN_ELITE_COUNT, population_size // ELITE_FRACTION_DIVISOR)) if population_size > 1 else population_size
-        mutation_rate = DEFAULT_MUTATION_RATE
-        immigrant_ratio = DEFAULT_IMMIGRANT_RATIO
+        winners = max(1, min(population_size, int(ui_params.get('ga_winners', DEFAULT_WINNERS))))
+        mutation_rate = float(ui_params.get('mutation_rate', DEFAULT_MUTATION_RATE))
         early_stop_threshold = algo_kwargs.get('early_stop_threshold', 5)
         stagnation_epsilon = algo_kwargs.get('stagnation_epsilon', 1e-4)
         verbose = algo_kwargs.get('verbose', False)
@@ -374,8 +395,10 @@ class GACoordinator:
         if verbose:
             nw_logger.info(f"GA Mode: {generations} generations, {population_size} population")
         
-        self.layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache, rng=self.rng)
+        self.layout_manager = LayoutManager(self.doc, self.shape_preparer.processed_shape_cache)
         
+        self._seen_genomes = set()
+
         self._set_status(f"Creating {population_size} layouts...")
         if self.draw_callback:
             self.draw_callback({'updateGui_only': True})
@@ -397,9 +420,20 @@ class GACoordinator:
             layouts = self._pending_layouts
         else:
             layouts = self.layout_manager.create_ga_population(
-                master_map, quantities, ui_params, population_size, rotation_steps, verbose=verbose
+                master_map, quantities, ui_params, population_size,
+                rotation_steps, verbose=verbose
             )
-        
+
+        # Genomes need the parts' types and allowed rotation counts, so they are
+        # assigned here, once the population exists (member 0 = the panel's values).
+        if layouts:
+            regular, _ = self._split_fill_parts(layouts[0].parts)
+            self._bounds = self._build_bounds(ui_params, algo_kwargs, regular)
+            for i, layout in enumerate(layouts):
+                layout.genome = (search_genome.seed_genome(self._bounds) if i == 0
+                                 else search_genome.random_genome(self._bounds, self.rng))
+                self._seen_genomes.add(search_genome.canonical(layout.genome, self._bounds))
+
         if layouts and layouts[0].parts:
             misfits = sheet_sequence.parts_that_fit_no_sheet(
                 layouts[0].parts, sheet_sequence.sizes(ui_params['sheet_sequence']),
@@ -499,7 +533,7 @@ class GACoordinator:
 
                 # Strict best: the winner must always be the best layout we
                 # actually found. The epsilon below only governs *stagnation*,
-                # because a converged population still jitters the compactness
+                # because a converged population still jitters the offcuts
                 # blend by ~1e-9 and a strict `<` would read that as progress.
                 if best_layout is None or current_best.fitness < best_layout.fitness:
                     best_layout = current_best
@@ -519,8 +553,8 @@ class GACoordinator:
                 
                 # Early Stopping / Stagnation Check:
                 # An early stopping threshold of 5 generations is selected because nesting jobs typically
-                # operate with relatively small chromosome/population sizes where genetic diversity 
-                # converges quickly. If no elite child (improved ordering/rotation layout) is found 
+                # operate with relatively small populations where genetic diversity 
+                # converges quickly. If no child (a genome of placer parameters) beats the champion 
                 # after 5 generations, the population has converged to a local optimum, and continuing
                 # to run more generations would waste CPU/GPU resources without realistic chance of improvement.
                 if generations_without_improvement >= early_stop_threshold:
@@ -529,29 +563,27 @@ class GACoordinator:
                 
                 # STEP 2 & 3: Build next generation
                 if gen < generations - 1:
-                    actual_elite = min(elite_count, len(layouts))
-                    elites = layouts[:actual_elite]
+                    parents = layouts[:winners]
                     
                     if self.draw_callback:
                         next_gen_payload = {
                             'build_next_generation': True,
                             'gen': gen,
                             'layouts': layouts,
-                            'elites': elites,
+                            'parents': parents,
                             'master_map': master_map,
                             'quantities': quantities,
                             'ui_params': ui_params,
                             'rotation_steps': rotation_steps,
                             'mutation_rate': mutation_rate,
-                            'immigrant_ratio': immigrant_ratio,
                             'verbose': verbose
                         }
                         self.draw_callback(next_gen_payload)
                         layouts = self._pending_layouts
                     else:
                         layouts = self._build_next_generation(
-                            gen, layouts, elites, master_map, quantities, ui_params, 
-                            rotation_steps, mutation_rate, immigrant_ratio, verbose
+                            gen, layouts, parents, master_map, quantities, ui_params,
+                            rotation_steps, mutation_rate, verbose
                         )
                 else:
                     # Final cleanup
@@ -581,9 +613,10 @@ class GACoordinator:
                     self._set_status("Filling winning layout...")
                     fill_kwargs = algo_kwargs.copy()
                     fill_kwargs.pop('clear_nfp_cache', None)
-                    fill_kwargs['rng'] = self.rng
                     fill_kwargs['spawn_more_callback'] = self.request_spawn
                     fill_kwargs['cancel_callback'] = cancel_callback
+                    # Fill places with the same Scoring weights as the members (ruling 26).
+                    fill_kwargs['fitness_weights'] = weights_from_params(ui_params)
                     if self.draw_callback:
                         fill_kwargs.pop('progress_callback', None)
                         fill_kwargs['log_callback'] = (
@@ -605,7 +638,7 @@ class GACoordinator:
                         for placed in sheet.parts:
                             placed.shape.placement = placed.shape.get_final_placement(sheet.get_origin())
                     self.layout_manager.calculate_efficiency(
-                        best_layout, ui_params.get('compactness_weight', 0.0))
+                        best_layout, weights_from_params(ui_params))
                     best_efficiency = best_layout.efficiency
             
             # An unplaced part is a failed run (owner decision): nothing is
@@ -629,18 +662,30 @@ class GACoordinator:
                     self._dispatch_recompute()
                     return None
 
+            # A cancelled run commits nothing: _on_nesting_finished discards
+            # whatever job comes back. Don't adopt the template and draw the
+            # winner's sheets only to delete them a signal later.
+            if cancel_callback():
+                self._dispatch_discard_template()
+                self._dispatch_recompute()
+                return None
+
             # STEP 4: Finalize result — dispatch to main thread (ViewObject + recompute)
             job = self._dispatch_finalize(best_layout, best_efficiency, total_nesting_time, target_layout, ui_params)
             return job
 
         except Exception as e:
-            nw_logger.exception(f"GA Nesting Error: {e}")
+            if isinstance(e, DocumentClosedError):
+                nw_logger.error(f"Nesting Error: {e}")
+            else:
+                nw_logger.exception(f"GA Nesting Error: {e}")
             self._set_status(f"Error: {e}")
-            if 'layouts' in locals():
-                for layout in layouts:
-                    self.layout_manager.delete_layout(layout)
-            self._dispatch_discard_template()
-            self._dispatch_recompute()
+            if not isinstance(e, DocumentClosedError):
+                if 'layouts' in locals():
+                    for layout in layouts:
+                        self.layout_manager.delete_layout(layout)
+                self._dispatch_discard_template()
+                self._dispatch_recompute()
             return None
         finally:
             if is_simulating and self.draw_callback and pool is not None:
@@ -738,6 +783,10 @@ class GACoordinator:
 
         self._set_status(f"Precomputing {total} NFPs...")
         done = 0
+        # One update per shown percent, plus the last: a signal per NFP (7,688 on
+        # 30_Piece_Test) kept the GUI thread repainting and slowed the precompute
+        # from 18 s to 73 s (ARS round 2).
+        shown_pct = -1
         # Measured 2026-09-02 post-NPERF-001..003, 324 jobs on 24 cores:
         # 1w 1.611s, 2w 1.341s (1.20x), 4w 1.411s, 8w 1.505s, 16w 1.925s,
         # 24w 2.257s. Shapely/GEOS releases the GIL only briefly here, so
@@ -751,7 +800,50 @@ class GACoordinator:
                     pool.shutdown(wait=False, cancel_futures=True)
                     return
                 done += 1
-                self._update_progress(done, total, f"Precomputing NFPs {done}/{total}")
+                pct = done * 100 // total
+                if pct != shown_pct or done == total:
+                    shown_pct = pct
+                    self._update_progress(done, total, f"Precomputing NFPs {done}/{total}")
+
+    @staticmethod
+    def _build_bounds(ui_params, algo_kwargs, regular_parts):
+        """The GenomeBounds for this run: what the panel lets the GA vary.
+
+        *regular_parts* are the parts the placer will place (fill parts excluded):
+        their count is the number of beam steps and their types the rotation genes.
+        """
+        default_steps = ui_params.get('rotation_steps', 1)
+        counts = {}
+        for p in regular_parts:
+            n = max(1, int(getattr(p, 'rotation_steps', None) or default_steps))
+            if counts.setdefault(p.type_label, n) != n:
+                raise ValueError(
+                    f"Part type '{p.type_label}' has two different allowed rotation counts "
+                    f"({counts[p.type_label]} and {n}); the rotation gene key would be ambiguous.")
+        return search_genome.GenomeBounds(
+            algorithm=ui_params['algorithm'],
+            direction_deg=float(ui_params.get('nesting_direction', 270.0)),
+            evolve_direction=bool(ui_params.get('evolve_direction', False)),
+            detent_deg=float(ui_params.get('direction_detent', 0.0)),
+            beam_width=int(algo_kwargs.get('beam_width', 1)),
+            width_decay=float(algo_kwargs.get('width_decay', 1.0)),
+            n_steps=len(regular_parts),
+            part_types=tuple(sorted(counts.items())),
+        )
+
+    @staticmethod
+    def _fixed_kwargs(ui_params, algo_kwargs):
+        """Placer settings that are not genes, as sorted (key, value) pairs.
+
+        Greedy has none (its direction and sort key are genes). Beam keeps the
+        panel's branch limits, iterative flag and direction fixed.
+        """
+        if ui_params['algorithm'] != ALGO_BEAM:
+            return ()
+        fixed = {k: algo_kwargs[k] for k in ('max_part_branches', 'max_rot_branches',
+                                             'iterative', 'search_direction')
+                 if k in algo_kwargs}
+        return tuple(sorted(fixed.items()))
 
     def _run_generation(self, layouts, gen, generations, ui_params, rotation_steps, algo_kwargs,
                         is_simulating, cancel_callback, verbose, viz_manager=None, pool=None):
@@ -772,7 +864,8 @@ class GACoordinator:
                     if cancel_callback(): return total_time, True
 
                     if verbose:
-                        nw_logger.info(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}")
+                        nw_logger.info(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}"
+                                       + (f" ({search_genome.describe(layout.genome)})" if layout.genome is not None else ""))
 
                     if layout.sheets:
                         # The champion carries its layout; it is not nested again.
@@ -783,8 +876,8 @@ class GACoordinator:
                         continue
 
                     member_idx = layout.member_idx
-                    task = snapshot_member(layout, ui_params, gen, member_idx, getattr(self, 'seed', 0),
-                                           search_direction=algo_kwargs.get('search_direction', (0, -1)),
+                    task = snapshot_member(layout, ui_params, gen, member_idx,
+                                           fixed_kwargs=self._fixed_kwargs(ui_params, algo_kwargs),
                                            candidate_spacing=algo_kwargs.get('candidate_spacing', DEFAULT_CANDIDATE_SPACING),
                                            stream=self._sim_queue is not None)
                     tasks.append(task)
@@ -887,7 +980,8 @@ class GACoordinator:
             if cancel_callback(): return total_time, True
 
             if verbose:
-                nw_logger.info(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}")
+                nw_logger.info(f"  [Gen {gen+1}] Layout {idx+1}/{len(layouts)}: {layout.name}"
+                               + (f" ({search_genome.describe(layout.genome)})" if layout.genome is not None else ""))
 
             if layout.sheets: continue
             if not layout.parts:
@@ -896,15 +990,11 @@ class GACoordinator:
             
             # Run nesting
             current_kwargs = algo_kwargs.copy()
-            # Per-member stream: a member's draws must not depend on how many
-            # draws earlier members made, or the run stops being reproducible
-            # the moment members are reordered or run concurrently.
-            member_idx = layout.member_idx
-            current_kwargs['rng'] = random.Random(
-                zlib.crc32(f"{self.seed}:{gen}:{member_idx}".encode()))
             current_kwargs['spawn_more_callback'] = self.request_spawn
-            if layout.direction is not None:
-                current_kwargs['search_direction'] = layout.direction
+            current_kwargs.update(search_genome.placer_kwargs(layout.genome))
+            # Beam's pass pick scores with the GA's weights (NLA ruling 6); the
+            # worker path reads MemberTask.fitness_weights instead.
+            current_kwargs['fitness_weights'] = weights_from_params(ui_params)
             if self.draw_callback:
                 # Route through thread-safe signal instead of direct Qt widget calls
                 if 'progress_callback' in current_kwargs:
@@ -917,19 +1007,17 @@ class GACoordinator:
             if len(layouts) > 1 or generations > 1:
                  current_kwargs['quiet'] = True
                  if 'progress_callback' in current_kwargs: del current_kwargs['progress_callback']
-            if layout.genes: current_kwargs['sort'] = False
             
             # Fill placement is deferred to the winner (see run(), Phase B) —
-            # generations score regular parts only, so the compactness term
+            # generations score regular parts only, so the offcuts term
             # measures the true free area.
             regular_parts, _ = self._split_fill_parts(layout.parts)
-            consumption_order = []
             sizes = sheet_sequence.sizes(ui_params['sheet_sequence'])
             sheets, unplaced, _, elapsed = nest(
                 regular_parts,
                 sizes,
-                rotation_steps, is_simulating, algorithm=ui_params.get('algorithm', 'Minkowski'),
-                viz_manager=viz_manager, order_out=consumption_order, **current_kwargs
+                rotation_steps, is_simulating, algorithm=ui_params['algorithm'],
+                viz_manager=viz_manager, **current_kwargs
             )
 
             original_parts_map = {p.id: p for p in layout.parts}
@@ -952,176 +1040,65 @@ class GACoordinator:
             total_time += elapsed
             layout.sheets, layout.unplaced = sheets, unplaced
 
-            # Capture genes (fill parts are not part of the genotype).
-            # The order is the nester's CONSUMPTION order, not layout.parts
-            # order — see the same note in ga_snapshot.nest_from_snapshot.
-            # A chromosome that does not reproduce its own layout poisons
-            # every child bred from it.
-            gene_parts, _ = self._split_fill_parts(layout.parts)
-            gene_map = {placed_part.shape.id: getattr(placed_part.shape, '_angle', 0)
-                        for s in layout.sheets for placed_part in s.parts}
-            gene_ids = {p.id for p in gene_parts}
-            ordered = [pid for pid in consumption_order if pid in gene_ids]
-            seen_ids = set(ordered)
-            ordered += [p.id for p in gene_parts if p.id not in seen_ids]
-            angles = {p.id: getattr(p, '_angle', 0) for p in gene_parts}
-            layout.genes = [(pid, gene_map.get(pid, angles.get(pid, 0)))
-                            for pid in ordered] if gene_parts else []
-            
             # Efficiency/Fitness
-            self.layout_manager.calculate_efficiency(
-                layout, ui_params.get('compactness_weight', 0.0))
             unplaced_regular, _ = self._split_fill_parts(unplaced)
-            if unplaced_regular:
-                layout.fitness += genetic_utils.unplaced_penalty(len(unplaced_regular), sizes)
+            self.layout_manager.calculate_efficiency(
+                layout, weights_from_params(ui_params), len(unplaced_regular), sizes)
             
         return total_time, False
 
-    def _diversify(self, genes, seen, mutation_rate, rotation_steps, attempts=4):
-        """
-        Returns a chromosome that is not already in `seen` (a set of gene
-        tuples), and records it there.
+    def _diversify(self, genome, mutation_rate, attempts=4):
+        """Returns *genome*, re-mutated until it is new to this run, and records it.
 
-        Re-mutates at an escalating rate; if that still collides — a tiny part
-        count, or a search space this population has saturated — falls back to
-        a fresh random ordering with random angles.
+        The set of evaluated genomes is run-scoped (``_seen_genomes``). If every
+        attempt collides, the duplicate is returned rather than a random genome.
         """
-        from .algorithms import genetic_utils
-        genes = list(genes)
-        if not genes:
-            return genes
+        bounds = self._bounds
         for attempt in range(attempts):
-            if tuple(genes) not in seen:
-                seen.add(tuple(genes))
-                return genes
-            genes = genetic_utils.mutate_genes(
-                genes, min(1.0, mutation_rate * (attempt + 2)), rotation_steps, rng=self.rng)
-        part_ids = [g[0] for g in genes]
-        self.rng.shuffle(part_ids)
-        step = 360.0 / rotation_steps if rotation_steps > 1 else 0.0
-        genes = [(pid, self.rng.randrange(rotation_steps) * step if rotation_steps > 1 else 0.0)
-                 for pid in part_ids]
-        seen.add(tuple(genes))
-        return genes
+            if search_genome.canonical(genome, bounds) not in self._seen_genomes:
+                break
+            genome = search_genome.mutate(
+                genome, min(1.0, mutation_rate * (attempt + 2)), bounds, self.rng)
+        self._seen_genomes.add(search_genome.canonical(genome, bounds))
+        return genome
 
-    def _build_next_generation(self, gen, layouts, elites, master_map, quantities, ui_params, 
-                               rotation_steps, mutation_rate, immigrant_ratio, verbose):
-        """Handles selection, crossover, mutation, and immigrants."""
-        from .algorithms import genetic_utils
-        
-        use_random_direction = ui_params.get('use_random_direction', False)
-        # Breed from the WHOLE evaluated population, not just the elites.
-        # elite_count is max(2, pop // 5), so an elite-only pool holds exactly
-        # two members at pop <= 10; rng.sample() then returns the entire pool
-        # and tournament_selection becomes deterministic, handing back the same
-        # parent twice. Crossover of a chromosome with itself is the identity,
-        # so the population collapses to clones after generation 0.
-        ranked_pool = [(l.fitness, (l.genes, l.direction))
-                       for l in layouts if l.genes and l.fitness != float('inf')]
-        if not ranked_pool:
-            ranked_pool = [(e.fitness, (e.genes, e.direction)) for e in elites if e.genes]
-        new_layouts = [elites[0]] # Champion carries forward
-        elites[0].member_idx = 0
+    def _build_next_generation(self, gen, layouts, parents, master_map, quantities, ui_params,
+                               rotation_steps, mutation_rate, verbose):
+        """Champion carried; children of the winners; then one mutation pass (NLA rulings 10-11).
 
-        for e in elites[1:]: self.layout_manager.delete_layout(e, verbose=verbose)
+        *parents* are the top-N members by fitness (N = the panel's Winners). The
+        champion, parents[0], survives unchanged and is never mutated. Every other
+        member is bred from two distinct winners (a clone when N is 1), gene by
+        gene from either parent. Only after all children exist does the mutation
+        pass run, so a mutation never leaks into another child's parents.
+        """
+        bounds = self._bounds
+        champion = parents[0]
+        champion.member_idx = 0
         for layout in layouts:
-            if layout not in elites: self.layout_manager.delete_layout(layout, verbose=verbose)
+            if layout is not champion:
+                self.layout_manager.delete_layout(layout, verbose=verbose)
 
-        population_size = len(layouts)
-        if population_size <= 1:
-            n_immigrants = 0
-            n_offspring = 0
-        else:
-            n_immigrants = min(population_size - 1, max(1, int((population_size - 1) * immigrant_ratio)))
-            n_offspring = max(0, (population_size - 1) - n_immigrants)
-
-        next_member_idx = 1
-        # A chromosome already present in the next generation nests to a result
-        # we have measured; re-evaluating it costs a full nest() for nothing.
-        seen = {tuple(elites[0].genes or ())}
-        for i in range(n_offspring):
-            # k must leave at least one pool member out, otherwise sample()
-            # draws the whole pool and the "tournament" always returns its
-            # fittest member.
-            k = min(3, max(1, len(ranked_pool) - 1))
-            if len(ranked_pool) >= 2:
-                winner1 = genetic_utils.tournament_selection(ranked_pool, k=k, rng=self.rng)
-                winner2 = genetic_utils.tournament_selection(ranked_pool, k=k, rng=self.rng)
-                p1_genes, p1_dir = winner1
-                p2_genes, p2_dir = winner2
-                child_genes = genetic_utils.crossover_genes(p1_genes, p2_genes, rng=self.rng)
-                parent_direction = p1_dir
+        pool = [p.genome for p in parents if p.genome is not None]
+        children = []
+        for _ in range(max(0, len(layouts) - 1)):
+            if len(pool) >= 2:
+                a, b = self.rng.sample(pool, 2)
+                children.append(search_genome.crossover(a, b, self.rng))
             else:
-                p1_genes, p1_dir = ranked_pool[0][1] if ranked_pool else ([], None)
-                child_genes = list(p1_genes)
-                parent_direction = p1_dir
-            child_genes = genetic_utils.mutate_genes(child_genes, mutation_rate, rotation_steps, rng=self.rng)
-            child_genes = self._diversify(child_genes, seen, mutation_rate, rotation_steps)
-            child_layout = self.layout_manager.create_layout(
-                f"Layout_GA_{gen+2}_c{i+1}", master_map, quantities, ui_params,
-                chromosome_ordering=child_genes, member_idx=next_member_idx
-            )
-            next_member_idx += 1
-            # Offspring: inherit parent 1's direction, mutated by a small random rotation:
-            if use_random_direction:
-                if parent_direction is not None and self.rng.random() < mutation_rate:
-                    jitter = self.rng.uniform(-math.pi / 4, math.pi / 4)
-                    cur = math.atan2(parent_direction[1], parent_direction[0])
-                    parent_direction = (math.cos(cur + jitter), math.sin(cur + jitter))
-                child_layout.direction = parent_direction
-            else:
-                child_layout.direction = None
-            new_layouts.append(child_layout)
+                children.append(pool[0] if pool else search_genome.seed_genome(bounds))
 
-        for i in range(n_immigrants):
-            imm = self.layout_manager.create_layout(
-                f"Layout_GA_{gen+2}_i{i+1}", master_map, quantities, ui_params,
-                member_idx=next_member_idx
-            )
-            next_member_idx += 1
-            if imm.parts:
-                regular, fill = self._split_fill_parts(imm.parts)
+        # Mutation pass over the whole new generation (ruling 11), then dedup.
+        children = [search_genome.mutate(g, mutation_rate, bounds, self.rng) for g in children]
+        if champion.genome is not None:
+            self._seen_genomes.add(search_genome.canonical(champion.genome, bounds))
+        children = [self._diversify(g, mutation_rate) for g in children]
 
-                # Shuffle the regular parts order; fill parts stay at the tail
-                self.rng.shuffle(regular)
-                imm.parts = regular + fill
-
-                # Random rotations for regular parts only — fill parts keep their
-                # full rotation sweep and never get a gene_angle pin
-                if rotation_steps > 1:
-                    for part in regular:
-                        angle = self.rng.randrange(rotation_steps) * (360.0 / rotation_steps)
-                        part.set_rotation(angle)
-                        part.gene_angle = angle
-                else:
-                    for part in regular:
-                        part.gene_angle = 0.0
-                imm.genes = [(p.id, getattr(p, '_angle', 0)) for p in regular]
-                diversified = self._diversify(imm.genes, seen, mutation_rate, rotation_steps)
-                if diversified != imm.genes:
-                    # The shuffle collided with a chromosome already queued for
-                    # this generation; _diversify reshuffled it, so re-sync the
-                    # parts list nest() actually consumes. Fill parts stay at
-                    # the tail — they are never part of the genotype.
-                    by_id = {p.id: p for p in regular}
-                    regular = []
-                    for part_id, angle in diversified:
-                        part = by_id.get(part_id)
-                        if part is None:
-                            continue
-                        part.set_rotation(angle)
-                        part.gene_angle = angle
-                        regular.append(part)
-                    imm.parts = regular + fill
-                    imm.genes = diversified
-
-                # Immigrants get a fresh random direction if enabled
-                if use_random_direction:
-                    angle_rad = self.rng.uniform(0, 2 * math.pi)
-                    imm.direction = (math.cos(angle_rad), math.sin(angle_rad))
-                else:
-                    imm.direction = None
-            new_layouts.append(imm)
+        new_layouts = [champion]
+        for i, genome in enumerate(children, start=1):
+            new_layouts.append(self.layout_manager.create_layout(
+                f"Layout_GA_{gen+2}_c{i}", master_map, quantities, ui_params,
+                genome=genome, member_idx=i))
         return new_layouts
 
     def _finalize(self, best_layout, best_efficiency, total_time, target_layout, ui_params):
@@ -1155,7 +1132,13 @@ class GACoordinator:
         )
         
         placed_count = sum(len(s) for s in best_layout.sheets)
-        msg = f"GA Complete: {best_efficiency:.1f}% efficiency, {len(best_layout.sheets)} sheets, {placed_count} placed"
+        algo_label = {ALGO_BEAM: "Beam Search",
+                      ALGO_GREEDY: "Greedy"}.get(ui_params.get('algorithm'), "Nesting")
+        pop = int(ui_params.get('population_size', 1))
+        gens = int(ui_params.get('generations', 1))
+        search = "single run" if pop <= 1 and gens <= 1 else f"GA {pop}\u00d7{gens}"
+        msg = (f"{algo_label}, {search} complete: {best_efficiency:.1f}% efficiency, "
+               f"{len(best_layout.sheets)} sheets, {placed_count} placed")
         msg += f", Time: {total_time:.2f}s"
         total_cost = sum(s.stock['cost'] for s in best_layout.sheets)
         if total_cost > 0:

@@ -16,6 +16,8 @@ from ...ui_helpers import (
     QT_TRANSLATE_NOOP,
     make_checkbox,
     make_double_spinbox,
+    make_quantity_spinbox,
+    format_length,
     rich_tooltip,
     show_warning_dialog,
 )
@@ -224,7 +226,7 @@ class SheetEditDialog(QtWidgets.QDialog):
                 translate("SheetsTab", "Override"),
                 checked=(key not in self._inherited_keys),
                 tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-                    "SheetsTab", "Tick to give this variant its own value. Untick to follow the sheet it is a variant of."))
+                    "SheetsTab", "Gives this variant its own value instead of following the parent sheet."))
             )
             self.override_cbs[key] = cb
             cb.toggled.connect(lambda chk, k=key: self._on_override_toggled(k, chk))
@@ -233,7 +235,7 @@ class SheetEditDialog(QtWidgets.QDialog):
 
         self.name_edit = QtWidgets.QLineEdit(sheet["name"])
         self.name_edit.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Name of this sheet, as shown in the panel's Sheet list.")))
+            "SheetsTab", "Sets the name of this sheet as shown in the panel's Sheet list.")))
         self.name_edit.textChanged.connect(self._validate)
         form.addRow(translate("SheetsTab", "Name:"), self.name_edit)
 
@@ -259,33 +261,33 @@ class SheetEditDialog(QtWidgets.QDialog):
         self.material_combo.setCurrentIndex(self.material_combo.findData(listed or ""))
         self.material_combo.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
             "SheetsTab",
-            "What the sheet is made of. Add, rename or delete materials on the Materials tab.")))
+            "Selects the material this sheet is made of.\nAdd, rename or delete materials on the Materials tab.")))
         self.material_combo.currentIndexChanged.connect(self._validate)
         form.addRow(translate("SheetsTab", "Material:"), wrap_row("material", self.material_combo))
 
-        self.width_spin = make_double_spinbox(
-            sheet["width"], 1.0, 100000.0, suffix=" mm",
-            tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP("SheetsTab", "Sheet width (X), in mm.")))
+        self.width_spin = make_quantity_spinbox(
+            sheet["width"], 1.0, 100000.0,
+            tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP("SheetsTab", "Sets the sheet width (X).")))
         self.width_spin.valueChanged.connect(self._validate)
         form.addRow(translate("SheetsTab", "Width:"), wrap_row("width", self.width_spin))
 
-        self.height_spin = make_double_spinbox(
-            sheet["height"], 1.0, 100000.0, suffix=" mm",
-            tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP("SheetsTab", "Sheet height (Y), in mm.")))
+        self.height_spin = make_quantity_spinbox(
+            sheet["height"], 1.0, 100000.0,
+            tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP("SheetsTab", "Sets the sheet height (Y).")))
         self.height_spin.valueChanged.connect(self._validate)
         form.addRow(translate("SheetsTab", "Height:"), wrap_row("height", self.height_spin))
 
-        self.thickness_spin = make_double_spinbox(
-            sheet["thickness"], 0.1, 1000.0, suffix=" mm",
+        self.thickness_spin = make_quantity_spinbox(
+            sheet["thickness"], 0.1, 1000.0,
             tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-                "SheetsTab", "Sheet thickness, in mm. Parts are matched to sheets by thickness.")))
+                "SheetsTab", "Sets the sheet thickness.")))
         self.thickness_spin.valueChanged.connect(self._validate)
         form.addRow(translate("SheetsTab", "Thickness:"), wrap_row("thickness", self.thickness_spin))
 
         self.price_spin = make_double_spinbox(
             sheet["cost"], 0.0, 1e7, decimals=2,
             tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-                "SheetsTab", "Price paid for one of these sheets. 0 means free or unknown.")))
+                "SheetsTab", "Sets the price paid for one sheet.\n0 means free or unknown.")))
         symbol = store.currency_symbol()
         if symbol:
             self.price_spin.setPrefix(f"{symbol} ")
@@ -300,13 +302,13 @@ class SheetEditDialog(QtWidgets.QDialog):
             grain if grain is not None else 0.0, 0.0, 179.9, step=1.0, decimals=1, suffix="°",
             tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
                 "SheetsTab",
-                "Grain angle measured from the sheet's width (X) edge. "
+                "Sets the grain angle in ° measured from the sheet's width (X) edge.\n"
                 "0° and 180° are the same line; nesting does not use it yet.")))
         self.grain_spin.valueChanged.connect(self._validate)
         self.no_grain_cb = make_checkbox(
             translate("SheetsTab", "No grain"),
             tooltip=rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-                "SheetsTab", "Tick for a sheet with no grain direction, such as MDF or acrylic.")))
+                "SheetsTab", "Marks this sheet as having no grain direction, such as MDF or acrylic.")))
         self.no_grain_cb.setChecked(grain is None)
         self.grain_spin.setEnabled(grain is not None)
         self.no_grain_cb.toggled.connect(self._on_no_grain_toggled)
@@ -321,15 +323,14 @@ class SheetEditDialog(QtWidgets.QDialog):
         self.flip_combo.setCurrentIndex(self.flip_combo.findData(sheet["flip"]))
         self.flip_combo.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
             "SheetsTab",
-            "Turn this sheet over after the first side is cut, to machine its back.\n"
-            "The layout then shows a back side above each sheet, and Create CAM Job\n"
-            "makes a second job for it.")))
+            "Turns this sheet over after the first side is cut to machine its back.\n"
+            "The layout shows a back side above each sheet, and Create CAM Job makes a second job for it.")))
         self.flip_combo.currentIndexChanged.connect(self._validate)
         form.addRow(translate("SheetsTab", "Flip:"), wrap_row("flip", self.flip_combo))
 
         self.notes_edit = QtWidgets.QLineEdit(sheet["notes"])
         self.notes_edit.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Optional notes, such as the supplier.")))
+            "SheetsTab", "Stores optional notes for this sheet, such as the supplier.")))
         form.addRow(translate("SheetsTab", "Notes:"), self.notes_edit)
 
         main_layout.addLayout(form)
@@ -464,7 +465,7 @@ class SheetsTab(QtWidgets.QWidget):
         self.remove_skipped_button = QtWidgets.QPushButton(
             translate("SheetsTab", "Remove Skipped Files…"))
         self.remove_skipped_button.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Delete the sheet files listed above, which the library can't read. They can't be recovered.")))
+            "SheetsTab", "Deletes the unreadable sheet files listed above permanently.")))
         self.remove_skipped_button.clicked.connect(self._on_remove_skipped)
         self.remove_skipped_button.setVisible(False)
         layout.addWidget(self.remove_skipped_button, 0, QtCore.Qt.AlignLeft)
@@ -493,31 +494,31 @@ class SheetsTab(QtWidgets.QWidget):
 
         self.new_button = QtWidgets.QPushButton(translate("SheetsTab", "New…"))
         self.new_button.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Add a sheet to the library.")))
+            "SheetsTab", "Adds a new sheet to the library.")))
         self.new_button.clicked.connect(self._on_new)
         btn_layout.addWidget(self.new_button)
 
         self.variant_button = QtWidgets.QPushButton(translate("SheetsTab", "New Variant…"))
         self.variant_button.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Add a variant of the selected sheet. It follows the selected sheet's values until you override them.")))
+            "SheetsTab", "Creates a variant of the selected sheet that inherits its values until overridden.")))
         self.variant_button.clicked.connect(self._on_new_variant)
         btn_layout.addWidget(self.variant_button)
 
         self.dup_button = QtWidgets.QPushButton(translate("SheetsTab", "Duplicate…"))
         self.dup_button.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Make a copy of the selected sheet. A copy of a variant is a variant of the same sheet, with the same overrides.")))
+            "SheetsTab", "Duplicates the selected sheet or variant.")))
         self.dup_button.clicked.connect(self._on_duplicate)
         btn_layout.addWidget(self.dup_button)
 
         self.edit_button = QtWidgets.QPushButton(translate("SheetsTab", "Edit…"))
         self.edit_button.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Change the selected sheet.")))
+            "SheetsTab", "Edits the selected sheet.")))
         self.edit_button.clicked.connect(self._on_edit)
         btn_layout.addWidget(self.edit_button)
 
         self.del_button = QtWidgets.QPushButton(translate("SheetsTab", "Delete"))
         self.del_button.setToolTip(rich_tooltip("SheetsTab", QT_TRANSLATE_NOOP(
-            "SheetsTab", "Remove the selected sheet from the library. Layouts already nested on it keep their size.")))
+            "SheetsTab", "Removes the selected sheet from the library; existing layouts keep their dimensions.")))
         self.del_button.clicked.connect(self._on_delete)
         btn_layout.addWidget(self.del_button)
 
@@ -564,8 +565,8 @@ class SheetsTab(QtWidgets.QWidget):
                 w = sheet["width"]
                 h = sheet["height"]
                 item.setText(1, sheet["material"] or translate("SheetsTab", "none"))
-                item.setText(2, f"{w:g} × {h:g}")
-                item.setText(3, f"{sheet['thickness']:g} mm")
+                item.setText(2, f"{format_length(w)} × {format_length(h)}")
+                item.setText(3, format_length(sheet['thickness']))
                 item.setText(4, model.format_cost(sheet["cost"], currency))
                 grain = sheet.get("grain_angle")
                 item.setText(5, f"{grain:g}°" if grain is not None else translate("SheetsTab", "none"))

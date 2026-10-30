@@ -5,12 +5,11 @@ Enables nesting population members in worker processes without FreeCAD dependenc
 """
 from dataclasses import dataclass
 import time
-import zlib
-import random
 import shapely
 from shapely.affinity import rotate, translate
-from .algorithms.nesting_strategy import Nester
-from .algorithms.genetic_utils import compute_layout_fitness, unplaced_penalty
+from .algorithms.placers import make_placer
+from .algorithms.search_genome import Genome, placer_kwargs
+from .algorithms.fitness import FitnessWeights, score_layout, weights_from_params
 from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
 from freecad.nestingworkbench import nw_logger
 
@@ -23,7 +22,6 @@ class PartSnapshot:
     part_id: str          # was Shape.id
     type_label: str       # was source_freecad_object.Label — the NFP cache key field
     polygon_wkb: bytes    # shapely.to_wkb(shape.original_polygon)
-    gene_angle: float | None  # None means "no gene — sweep all rotations"
     rotation_steps: int
     spacing: float
     deflection: float
@@ -35,14 +33,14 @@ class PartSnapshot:
 class MemberTask:
     member_idx: int
     generation: int
-    rng_seed: int          # derived from (seed, generation, member_idx) for reproducible worker-process randomness
-    parts: tuple           # of PartSnapshot, in chromosome order
-    direction: tuple | None
+    parts: tuple           # of PartSnapshot (regular parts only)
+    algorithm: str         # ALGO_GREEDY or ALGO_BEAM
+    genome: Genome         # the member's placer parameters
+    fixed_kwargs: tuple    # sorted (key, value) pairs of the non-gene placer settings
     sheet_sizes: tuple     # of (w, h) tuples
     rotation_steps: int
-    compactness_weight: float
+    fitness_weights: FitnessWeights   # the panel's Fitness weights (NLA ruling 14)
     candidate_spacing: float
-    sort: bool = False
     stream: bool = False
 
 
@@ -54,7 +52,6 @@ class MemberResult:
     sheet_count: int
     placements: tuple      # (part_id, sheet_index, x, y, angle)
     unplaced_ids: tuple
-    genes: tuple
     elapsed: float
     sheet_specs: tuple = ()  # one spec_index per output sheet, in sheet order
     diagnostics: tuple = ()  # (level, line) logged in the worker; nw_logger.drain_worker_messages
@@ -71,18 +68,9 @@ class SnapshotShape:
         self.deflection = snap.deflection
         self.simplification = snap.simplification
         self.fill_sheet = snap.fill_sheet
-        if snap.gene_angle is not None:
-            self.gene_angle = snap.gene_angle
-            self._angle = snap.gene_angle
-        else:
-            self._angle = 0.0
-
+        self._angle = 0.0
         self.original_polygon = shapely.from_wkb(snap.polygon_wkb)
-        if snap.gene_angle is not None and snap.gene_angle != 0.0:
-            center = self.original_polygon.centroid
-            self.polygon = rotate(self.original_polygon, snap.gene_angle, origin=center)
-        else:
-            self.polygon = self.original_polygon
+        self.polygon = self.original_polygon
         self.source_freecad_object = None
 
     @property
@@ -126,8 +114,8 @@ class SnapshotShape:
         return None
 
 
-def snapshot_member(layout, ui_params: dict, gen: int, idx: int, seed: int,
-                    search_direction=(0, -1),
+def snapshot_member(layout, ui_params: dict, gen: int, idx: int,
+                    fixed_kwargs=(),
                     candidate_spacing=DEFAULT_CANDIDATE_SPACING,
                     stream: bool = False) -> MemberTask:
     """Snapshots one population layout into a FreeCAD-free MemberTask."""
@@ -135,15 +123,10 @@ def snapshot_member(layout, ui_params: dict, gen: int, idx: int, seed: int,
     # Regular parts only for generations (fill deferred to winner)
     regular_parts = [p for p in layout.parts if not getattr(p, 'fill_sheet', False)]
     for p in regular_parts:
-        # None and 0.0 are different: None means "no gene, sweep every
-        # rotation"; 0.0 means "the chromosome pins this part to 0deg".
-        # An `or` chain collapses them and silently kills the sweep.
-        _gene = getattr(p, 'gene_angle', None)
         snap = PartSnapshot(
             part_id=p.id,
             type_label=getattr(p, 'type_label', None) or (p.source_freecad_object.Label if getattr(p, 'source_freecad_object', None) else "unknown"),
             polygon_wkb=shapely.to_wkb(p.original_polygon),
-            gene_angle=None if _gene is None else float(_gene),
             rotation_steps=int(getattr(p, 'rotation_steps', 1) or 1),
             spacing=float(getattr(p, 'spacing', 0.0) or 0.0),
             deflection=float(getattr(p, 'deflection', 0.05) or 0.05),
@@ -152,21 +135,17 @@ def snapshot_member(layout, ui_params: dict, gen: int, idx: int, seed: int,
         )
         part_snapshots.append(snap)
 
-    rng_seed = zlib.crc32(f"{seed}:{gen}:{idx}".encode())
-    sort = False if getattr(layout, 'genes', None) else True
-
     return MemberTask(
         member_idx=idx,
         generation=gen,
-        rng_seed=rng_seed,
         parts=tuple(part_snapshots),
-        direction=(layout.direction if layout.direction is not None
-                   else search_direction),
+        algorithm=ui_params['algorithm'],
+        genome=layout.genome,
+        fixed_kwargs=tuple(sorted(dict(fixed_kwargs).items())),
         sheet_sizes=tuple(sheet_sequence.sizes(ui_params['sheet_sequence'])),
         rotation_steps=int(ui_params.get('rotation_steps', 1)),
-        compactness_weight=float(ui_params.get('compactness_weight', 0.0)),
+        fitness_weights=weights_from_params(ui_params),
         candidate_spacing=float(candidate_spacing),
-        sort=sort,
         stream=stream,
     )
 
@@ -177,16 +156,16 @@ def nest_from_snapshot(task: MemberTask, placement_sink=None) -> MemberResult:
     t0 = time.perf_counter()
     shapes = [SnapshotShape(snap) for snap in task.parts]
 
-    rng = random.Random(task.rng_seed)
     nester_kwargs = {
+        **dict(task.fixed_kwargs),
+        **placer_kwargs(task.genome),
         'rotation_steps': task.rotation_steps,
         'candidate_spacing': task.candidate_spacing,
+        'fitness_weights': task.fitness_weights,
         'quiet': True,
-        'rng': rng,
     }
-    nester_kwargs['search_direction'] = task.direction
 
-    nester = Nester(list(task.sheet_sizes), **nester_kwargs)
+    nester = make_placer(task.algorithm, list(task.sheet_sizes), **nester_kwargs)
     if placement_sink is not None:
         def publish(part, sheet):
             c = part.polygon.centroid
@@ -194,34 +173,16 @@ def nest_from_snapshot(task: MemberTask, placement_sink=None) -> MemberResult:
                             part.id, c.x, c.y, part.angle))
         nester.update_callback = publish
 
-    sheets, unplaced = nester.nest(shapes, sort=task.sort)
-
-    fitness, efficiency = compute_layout_fitness(
-        sheets, compactness_weight=task.compactness_weight
-    )
+    sheets, unplaced = nester.nest(shapes)
 
     unplaced_regular = [p for p in unplaced if not getattr(p, 'fill_sheet', False)]
-    if unplaced_regular:
-        fitness += unplaced_penalty(len(unplaced_regular), task.sheet_sizes)
+    fitness, efficiency = score_layout(sheets, len(unplaced_regular), task.sheet_sizes,
+                                       task.fitness_weights)
 
     placements = []
     for s_idx, s in enumerate(sheets):
         for p in s.parts:
             placements.append((p.shape.id, s_idx, p.x, p.y, p.angle))
-
-    # Genes record the order the nester CONSUMED parts, not the input order.
-    # Member 0 of every population nests with sort=True, so the nester picks
-    # the order itself; an input-order chromosome then fails to reproduce its
-    # own layout and every child bred from the champion inherits a genome that
-    # nests worse than the parent it came from.
-    gene_map = {p.shape.id: getattr(p.shape, '_angle', 0.0) for s in sheets for p in s.parts}
-    gene_ids = {p.id for p in shapes if not getattr(p, 'fill_sheet', False)}
-    angles = {p.id: getattr(p, '_angle', 0.0) for p in shapes}
-    ordered = [pid for pid in getattr(nester, 'last_consumption_order', [])
-               if pid in gene_ids]
-    seen_ids = set(ordered)
-    ordered += [p.id for p in shapes if p.id in gene_ids and p.id not in seen_ids]
-    genes = tuple((pid, gene_map.get(pid, angles.get(pid, 0.0))) for pid in ordered)
 
     unplaced_ids = tuple(p.id for p in unplaced)
     elapsed = time.perf_counter() - t0
@@ -233,7 +194,6 @@ def nest_from_snapshot(task: MemberTask, placement_sink=None) -> MemberResult:
         sheet_count=len(sheets),
         placements=tuple(placements),
         unplaced_ids=unplaced_ids,
-        genes=genes,
         elapsed=elapsed,
         sheet_specs=tuple(s.spec_index for s in sheets),
     )
@@ -291,4 +251,3 @@ def apply_result(layout, result: MemberResult, ui_params: dict):
     layout.unplaced = [p for p in layout.parts if p.id in result.unplaced_ids]
     layout.fitness = result.fitness
     layout.efficiency = result.efficiency
-    layout.genes = list(result.genes)

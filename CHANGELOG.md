@@ -7,8 +7,16 @@ Releases are named by month and year (e.g. 9-26); the manifest version is year.m
 
 ## [Unreleased]
 
+## [10-26] - 2026-10-29
+
+Version 2026.10.0.
+
 ### Changed
 - The genetic algorithm now starts one worker process per physical CPU core instead of per logical processor, with no fixed limit of 8, and workers no longer start idle math-library threads. The Minkowski settings' Advanced section has a GA worker processes setting that shows the count Auto will use.
+- Requires FreeCAD 26.3 or later. FreeCAD 1.1 is no longer supported. The CAM job dialog lists only post-processors a job accepts and finds templates in FreeCAD's versioned CAM folder.
+
+### Removed
+- The Physics nesting algorithm. Choose Beam Search or Genetic Algorithm. A layout saved with Physics reopens on the panel's current algorithm, and the Report view says so.
 
 ### Fixed
 - On Linux, GA worker processes died on start-up and every run silently fell back to one layout at a time. Workers are now started fresh on every platform instead of forked from FreeCAD.
@@ -16,6 +24,7 @@ Releases are named by month and year (e.g. 9-26); the manifest version is year.m
 - Warnings raised inside GA worker processes now appear in the Report view and the log file.
 - The genetic algorithm no longer builds and deletes a full set of FreeCAD objects for every population member, which made a 10×4 run about 3.25× faster.
 - Runs that stop early or are cancelled no longer leave `Layout_GA_*` groups in the document.
+- Cancelling a genetic-algorithm run no longer draws the best layout's sheets before throwing them away, and the panel then says "Nesting cancelled." instead of "Please wait". A nesting run that fails with Simulate on no longer leaves its preview objects in the document.
 - Part labels are built about 6× faster, which takes about 2 s off the end of a genetic-algorithm run with 80 labelled parts.
 
 ## [9-26] - 2026-09-25

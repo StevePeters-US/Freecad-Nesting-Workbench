@@ -2,7 +2,7 @@
 import FreeCAD
 import FreeCADGui
 from freecad.nestingworkbench.Tools.Stacker import stacker
-from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
 from freecad.nestingworkbench.freecad_helpers import is_layout_group
 
 class StackSheetsCommand:
@@ -11,7 +11,7 @@ class StackSheetsCommand:
         return {
             'Pixmap': 'Nesting_Stack_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('StackSheetsCommand', 'Stack/Unstack Sheets'),
-            'ToolTip': QT_TRANSLATE_NOOP('StackSheetsCommand', 'Toggles sheet layout between stacked and unstacked.')
+            'ToolTip': rich_tooltip('StackSheetsCommand', QT_TRANSLATE_NOOP('StackSheetsCommand', 'Toggles the selected layout between stacked at the origin and laid out side by side.\nSelect a Layout group first.'))
         }
 
     def Activated(self):

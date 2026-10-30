@@ -13,7 +13,7 @@ Supports:
 import FreeCAD
 import FreeCADGui
 from freecad.nestingworkbench import nw_logger
-from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
 
 
 class CreateSilhouetteCommand:
@@ -24,7 +24,10 @@ class CreateSilhouetteCommand:
         return {
             'Pixmap': 'Nesting_Silhouette_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('CreateSilhouetteCommand', 'Create Silhouette'),
-            'ToolTip': QT_TRANSLATE_NOOP('CreateSilhouetteCommand', 'Creates a 2D silhouette (outline) from the selected 3D object(s).')
+            'ToolTip': rich_tooltip(
+                'CreateSilhouetteCommand',
+                QT_TRANSLATE_NOOP('CreateSilhouetteCommand', 'Creates a 2D outline from the selected 3D parts, nested containers or Layout group.\nSelect one or more objects first.'),
+            ),
         }
     
     def Activated(self):

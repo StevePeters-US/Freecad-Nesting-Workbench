@@ -8,7 +8,8 @@ UI helper functions and shared layout constants for the Nesting Workbench.
 import os
 import re
 
-from PySide import QtCore, QtWidgets
+import FreeCADGui
+from PySide import QtCore, QtGui, QtWidgets
 
 from freecad.nestingworkbench import nw_logger
 
@@ -100,6 +101,26 @@ def rich_tooltip(context, text, image=None):
         match.group(1), "".join(parts))
 
 
+def set_status_tips(command_ids):
+    """Give each command with a rich ToolTip a plain status-bar tip: its first line.
+
+    FreeCAD copies ToolTip into the status bar and shows HTML there as raw tags, and it
+    ignores a Python command's StatusTip key. Call from Workbench.Activated(), after the
+    toolbars exist.
+    """
+    for cmd_id in command_ids:
+        command = FreeCADGui.Command.get(cmd_id)
+        tip = command.getInfo()["toolTip"]
+        if not tip.startswith(("<p", "<table")):
+            continue
+        document = QtGui.QTextDocument()
+        document.setHtml(tip)
+        # A table starts the plain text with an empty line.
+        first_line = next(line for line in document.toPlainText().split("\n") if line.strip())
+        for action in command.getAction():
+            action.setStatusTip(first_line)
+
+
 # Zero margins for nested composite layouts
 MARGINS_NONE = (0, 0, 0, 0)
 
@@ -125,6 +146,158 @@ def make_double_spinbox(value, minimum, maximum, step=None, decimals=None, suffi
     if tooltip:
         spin.setToolTip(tooltip)
     return spin
+
+
+LENGTH_DECIMALS = 3  # owner standard: every displayed length, in whatever unit is shown
+
+
+def _user_length_unit(mm, unit=None):
+    """Return (unit string, mm per unit) that the current FreeCAD schema shows for this length.
+
+    `unit` is a FreeCAD unit (None means Length); `mm` is then in that unit's base (mm or mm²).
+    """
+    import FreeCAD
+    if unit is None:
+        unit = FreeCAD.Units.Length
+    _text, factor, shown = FreeCAD.Units.Quantity(float(mm), unit).getUserPreferred()
+    return shown, float(factor)
+
+
+def length_to_text(mm, decimals=LENGTH_DECIMALS, unit=None):
+    """Format a length in mm (or an area in mm² with `unit` = Area) in the user's unit system.
+
+    `decimals` places are shown in the shown unit. `unit` None means FreeCAD.Units.Length.
+    """
+    import FreeCAD
+    if unit is None:
+        unit = FreeCAD.Units.Length
+    quantity = FreeCAD.Units.Quantity(float(mm), unit)
+    fmt = quantity.Format
+    fmt["Precision"] = int(decimals)
+    quantity.Format = fmt  # Format is a copy (probe P8); the write-back is what applies it
+    return quantity.UserString
+
+
+def text_to_length(text, current_mm, unit=None):
+    """Parse typed text to mm (or mm² for `unit` = Area). A bare number is read in the unit the box
+    currently shows. `unit` None means FreeCAD.Units.Length.
+
+    Raises ValueError for text of the wrong kind (e.g. "3 kg", or "3 mm" for an area) or that doesn't parse.
+    """
+    import FreeCAD
+    if unit is None:
+        unit = FreeCAD.Units.Length
+    kind = "an area" if unit == FreeCAD.Units.Area else "a length"
+    quantity = FreeCAD.Units.Quantity(text.strip())
+    if quantity.Unit == FreeCAD.Units.Unit():
+        _shown, factor = _user_length_unit(current_mm, unit)
+        return quantity.Value * factor
+    if quantity.Unit != unit:
+        raise ValueError(f"not {kind}: {text!r}")
+    return quantity.Value
+
+
+class LengthSpinBox(QtWidgets.QDoubleSpinBox):
+    """QDoubleSpinBox holding mm that shows and accepts the user's FreeCAD unit system.
+
+    value()/setValue()/valueChanged stay plain floats in mm, so callers treat it exactly
+    like a QDoubleSpinBox. The display refreshes on the next value change, not when the
+    unit preference changes while the box is open.
+    """
+
+    _INTERNAL_DECIMALS = 6  # mm resolution kept by the box; display places are separate
+    _UNIT = "Length"  # attribute name on FreeCAD.Units for the quantity this box holds
+    _FALLBACK = "mm"  # suffix shown when FreeCAD.Units is unusable (headless)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._display_decimals = LENGTH_DECIMALS
+        self.setDecimals(self._INTERNAL_DECIMALS)
+
+    def setDisplayDecimals(self, decimals):
+        self._display_decimals = int(decimals)
+
+    def _unit(self):
+        """The FreeCAD unit this box holds. Needs FreeCAD; callers catch its absence."""
+        import FreeCAD
+        return getattr(FreeCAD.Units, self._UNIT)
+
+    def textFromValue(self, mm):
+        try:
+            return length_to_text(mm, self._display_decimals, unit=self._unit())
+        except Exception:
+            # FreeCAD.Units unusable (headless): plain base units are still a correct display.
+            return f"{mm:.{self._display_decimals}f} {self._FALLBACK}"
+
+    def valueFromText(self, text):
+        # Re-reading the box's own rounded display must not move the value
+        # (2440 mm shows as "96.063 in", which parses back to 2440.0002).
+        if text == self.textFromValue(self.value()):
+            return self.value()
+        try:
+            return text_to_length(text, self.value(), unit=self._unit())
+        except Exception:
+            try:
+                return float(text.replace(self._FALLBACK, "").strip())
+            except ValueError:
+                return self.value()
+
+    def validate(self, text, pos):
+        try:
+            mm = text_to_length(text, self.value(), unit=self._unit())
+        except Exception:
+            return (QtGui.QValidator.Intermediate, text, pos)
+        if self.minimum() <= mm <= self.maximum():
+            return (QtGui.QValidator.Acceptable, text, pos)
+        return (QtGui.QValidator.Intermediate, text, pos)
+
+
+class AreaSpinBox(LengthSpinBox):
+    """QDoubleSpinBox holding mm² that shows and accepts the user's FreeCAD area units.
+
+    Same contract as LengthSpinBox: value() is a plain float in mm², and a bare number is read
+    in the shown unit.
+    """
+
+    _UNIT = "Area"
+    _FALLBACK = "mm²"
+
+
+def make_quantity_spinbox(value, minimum, maximum, step=None, decimals=None, tooltip=None):
+    """Factory creating a LengthSpinBox: a length in mm shown in the user's unit system."""
+    spin = LengthSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setValue(value)
+    if step is not None:
+        spin.setSingleStep(step)
+    if decimals is not None:
+        spin.setDisplayDecimals(decimals)
+    if tooltip:
+        spin.setToolTip(tooltip)
+    return spin
+
+
+def make_area_spinbox(value, minimum, maximum, step=None, decimals=None, tooltip=None):
+    """Factory creating an AreaSpinBox: an area in mm² shown in the user's unit system."""
+    spin = AreaSpinBox()
+    spin.setRange(minimum, maximum)
+    spin.setValue(value)
+    if step is not None:
+        spin.setSingleStep(step)
+    if decimals is not None:
+        spin.setDisplayDecimals(decimals)
+    if tooltip:
+        spin.setToolTip(tooltip)
+    return spin
+
+
+def format_length(mm):
+    """Format a length given in mm for display in the user's FreeCAD unit system."""
+    try:
+        return length_to_text(mm, LENGTH_DECIMALS)
+    except Exception:
+        # FreeCAD.Units unusable (headless): plain mm is still a correct display.
+        return f"{float(mm):.{LENGTH_DECIMALS}f} mm"
 
 
 def make_int_spinbox(value, minimum, maximum, step=None, tooltip=None):
@@ -158,7 +331,7 @@ class LinkedSliderSpinBox(QtWidgets.QWidget):
         layout = QtWidgets.QHBoxLayout(self)
         layout.setContentsMargins(*MARGINS_NONE)
 
-        self.slider = make_slider(minimum, maximum, value)
+        self.slider = make_slider(minimum, maximum, value, tooltip=tooltip)
 
         self.spinbox = QtWidgets.QSpinBox()
         self.spinbox.setRange(minimum, maximum)
@@ -178,6 +351,151 @@ class LinkedSliderSpinBox(QtWidgets.QWidget):
 
     def setValue(self, v):
         self.spinbox.setValue(v)
+
+
+class LinkedSliderDoubleSpinBox(QtWidgets.QWidget):
+    """A QSlider and QDoubleSpinBox two-way bound to the same float value.
+
+    The slider counts in steps of 10**-decimals: 0.0-10.0 at one decimal is 0-100.
+    valueChanged is emitted from the spinbox only, once per change, whichever was moved.
+    """
+
+    valueChanged = QtCore.Signal(float)
+
+    def __init__(self, value, minimum, maximum, decimals=1, tooltip=None, parent=None):
+        super().__init__(parent)
+        self._scale = 10 ** decimals
+        layout = QtWidgets.QHBoxLayout(self)
+        layout.setContentsMargins(*MARGINS_NONE)
+
+        self.slider = make_slider(round(minimum * self._scale), round(maximum * self._scale),
+                                  round(value * self._scale))
+        self.spinbox = make_double_spinbox(value, minimum, maximum, step=1.0 / self._scale,
+                                           decimals=decimals, tooltip=tooltip)
+        if tooltip:
+            self.slider.setToolTip(tooltip)
+
+        layout.addWidget(self.slider)
+        layout.addWidget(self.spinbox)
+
+        self.slider.valueChanged.connect(self._on_slider)
+        self.spinbox.valueChanged.connect(self._on_spinbox)
+
+    def _on_slider(self, units):
+        # The spinbox echoes back through _on_spinbox; equal values stop the loop.
+        if round(self.spinbox.value() * self._scale) != units:
+            self.spinbox.setValue(units / self._scale)
+
+    def _on_spinbox(self, value):
+        units = round(value * self._scale)
+        if self.slider.value() != units:
+            self.slider.setValue(units)
+        self.valueChanged.emit(value)
+
+    def value(self):
+        return self.spinbox.value()
+
+    def setValue(self, v):
+        self.spinbox.setValue(v)
+
+
+class WeightSliders(QtWidgets.QWidget):
+    """Percent rows that always sum to 100, each with a lock toggle (NLA ruling 25).
+
+    Moving one row spreads the difference over the unlocked other rows in proportion to their
+    values (evenly when they are all 0), rounded by largest remainder so the sum stays exactly
+    100. A locked row keeps its value and its slider is disabled; a row can't rise above 100
+    minus the locked rows, and with no unlocked row to give way it can't move at all.
+    valuesChanged(dict) is emitted once per change, after every row is updated.
+    """
+
+    valuesChanged = QtCore.Signal(dict)
+
+    def __init__(self, rows, parent=None):
+        """rows: [(key, label, value, tooltip)] in display order; values should sum to 100."""
+        super().__init__(parent)
+        self._order = [key for key, *_ in rows]
+        self._values = {key: int(round(value)) for key, _l, value, _t in rows}
+        self._locked = {key: False for key in self._order}
+        self._updating = False
+        grid = QtWidgets.QGridLayout(self)
+        grid.setContentsMargins(*MARGINS_NONE)
+        self._sliders, self._locks = {}, {}
+        for r, (key, label, value, tooltip) in enumerate(rows):
+            slider = LinkedSliderDoubleSpinBox(value, 0.0, 100.0, decimals=0, tooltip=tooltip)
+            slider.spinbox.setSuffix("%")
+            lock = QtWidgets.QToolButton()
+            lock.setCheckable(True)
+            lock.setText("🔓")
+            lock.setToolTip(rich_tooltip(
+                "NestingPanel",
+                QT_TRANSLATE_NOOP("NestingPanel", "Locks this weight so moving the others leaves it unchanged.")))
+            lock.toggled.connect(lambda on, k=key: self.setLocked(k, on))
+            slider.valueChanged.connect(lambda v, k=key: self._on_row(k, v))
+            grid.addWidget(QtWidgets.QLabel(label), r, 0)
+            grid.addWidget(slider, r, 1)
+            grid.addWidget(lock, r, 2)
+            self._sliders[key], self._locks[key] = slider, lock
+
+    def values(self):
+        return dict(self._values)
+
+    def setValues(self, values):
+        """Sets every row. Values that don't sum to 100 are scaled to 100 (all zero: the first
+        row takes 100). Locks are kept. Emits valuesChanged."""
+        raw = [max(0.0, float(values.get(k, 0.0))) for k in self._order]
+        total = sum(raw)
+        shares = [100.0 * v / total for v in raw] if total > 0 else [100.0] + [0.0] * (len(raw) - 1)
+        for k, v in zip(self._order, _largest_remainder(shares, 100)):
+            self._values[k] = v
+        self._push()
+
+    def isLocked(self, key):
+        return self._locked[key]
+
+    def setLocked(self, key, locked):
+        self._locked[key] = bool(locked)
+        lock = self._locks[key]
+        if lock.isChecked() != bool(locked):
+            lock.setChecked(bool(locked))
+        lock.setText("🔒" if locked else "🔓")
+        self._sliders[key].setEnabled(not locked)
+
+    def _on_row(self, key, value):
+        if self._updating:
+            return
+        others = [k for k in self._order if k != key]
+        free = [k for k in others if not self._locked[k]]
+        cap = 100 - sum(self._values[k] for k in others if self._locked[k])
+        new = self._values[key] if not free else max(0, min(int(round(value)), cap))
+        current = [self._values[k] for k in free]
+        rest = cap - new
+        total = sum(current)
+        shares = ([rest * c / total for c in current] if total > 0
+                  else [rest / len(free)] * len(free)) if free else []
+        self._values[key] = new
+        for k, v in zip(free, _largest_remainder(shares, rest)):
+            self._values[k] = v
+        self._push()
+
+    def _push(self):
+        self._updating = True
+        try:
+            for k in self._order:
+                self._sliders[k].setValue(self._values[k])
+        finally:
+            self._updating = False
+        self.valuesChanged.emit(self.values())
+
+
+def _largest_remainder(shares, total):
+    """Whole numbers summing to total, each the floor of its share plus one for the largest
+    remainders (ties to the earlier row)."""
+    floors = [int(s) for s in shares]
+    order = sorted(range(len(shares)), key=lambda i: (-(shares[i] - floors[i]), i))
+    for i in order[:max(0, total - sum(floors))]:
+        floors[i] += 1
+    return floors
 
 
 class DirectionDial(QtWidgets.QWidget):
@@ -201,18 +519,18 @@ class DirectionDial(QtWidgets.QWidget):
         self.dial.setRange(0, _DIAL_MAX_UNITS)
         self.dial.setWrapping(True)
         self.dial.setNotchesVisible(True)
-        self.dial.setToolTip(rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Drag to set the direction; snaps to the Snap step.")))
+        self.dial.setToolTip(rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the target direction; snaps to the Snap step.")))
 
         self.angle_input = make_double_spinbox(
             0.0, 0.0, 359.5, step=1.0, decimals=1, suffix="°",
             tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP(
-                "NestingPanel", "Type an exact direction in degrees (0 = Right, 90 = Up, 180 = Left, 270 = Down).")))
+                "NestingPanel", "Sets the exact direction in ° (0° = Right, 90° = Up, 180° = Left, 270° = Down).")))
         self.angle_input.setWrapping(True)
         self.angle_input.setKeyboardTracking(False)
 
         self.step_slider = make_slider(
             0, len(DIRECTION_DETENT_STEPS) - 1, 0, ticks=True,
-            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Detent step: Off, 5, 15, 30 or 45 degrees.")))
+            tooltip=rich_tooltip("NestingPanel", QT_TRANSLATE_NOOP("NestingPanel", "Sets the Detent step: Off, 5°, 15°, 30° or 45°.\n<b>Default:</b> 15°.")))
         self.step_label = QtWidgets.QLabel()
         self.step_label.setAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
         self.step_label.setFixedWidth(self.step_label.fontMetrics().horizontalAdvance("45°") + 6)

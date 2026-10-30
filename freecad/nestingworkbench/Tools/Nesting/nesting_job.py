@@ -2,13 +2,17 @@
 import FreeCAD
 from ...freecad_helpers import recursive_delete
 from ...constants import (
-    PROP_ADD_LABELS, PROP_ALGORITHM, PROP_BOOL, PROP_CANDIDATE_SPACING, PROP_DEFLECTION_ANGLE, PROP_FILE, PROP_FLOAT,
+    PROP_ADD_LABELS, PROP_ALGORITHM, PROP_BEAM_ITERATIVE, PROP_BEAM_WIDTH, PROP_BEAM_WIDTH_DECAY, PROP_BOOL, PROP_CANDIDATE_SPACING, PROP_DEFLECTION_ANGLE, PROP_FILE, PROP_FLOAT, PROP_FITNESS_MIN_OFFCUT, WEIGHT_PROPS, PROP_PART_DIRECTION,
     PROP_FONT_FILE, PROP_GENERATIONS, PROP_GLOBAL_ROTATION_STEPS, PROP_INTEGER, PROP_LABEL_HEIGHT, PROP_LABEL_SIZE,
-    PROP_LENGTH, PROP_NESTING_DIRECTION, PROP_PART_SPACING, PROP_POPULATION_SIZE, PROP_SHEET_HEIGHT,
-    PROP_SHEET_SEQUENCE, PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH, PROP_SHOW_BOUNDS, PROP_SIMPLIFICATION, PROP_STRING,
+    PROP_LENGTH, PROP_MAX_PART_BRANCHES, PROP_MAX_ROT_BRANCHES, PROP_NESTING_DIRECTION, PROP_PART_SPACING, PROP_POPULATION_SIZE, PROP_GA_WINNERS, PROP_MUTATION_RATE, PROP_SHEET_HEIGHT,
+    PROP_SHEET_SEQUENCE, PROP_SHEET_THICKNESS, PROP_SHEET_WIDTH, PROP_SHOW_BOUNDS, PROP_SHOW_OFFCUTS, PROP_SIMPLIFICATION, PROP_STRING,
+    ALGO_GREEDY,
 )
 from freecad.nestingworkbench import nw_logger
 from .algorithms import sheet_sequence
+
+# Defaults for a layout saved before the four Scoring weights were added (NLA ruling 25).
+_WEIGHT_DEFAULTS = {"gravity": 50.0, "contact": 0.0, "direction": 0.0, "offcut": 50.0}
 from .algorithms.minkowski_engine import DEFAULT_CANDIDATE_SPACING
 
 class NestingJob:
@@ -108,20 +112,32 @@ class NestingJob:
         self._set_prop(target_layout, PROP_LENGTH, PROP_PART_SPACING, p['spacing'])
         self._set_prop(target_layout, PROP_LENGTH, PROP_SHEET_THICKNESS, p['sheet_thickness'])
         self._set_prop(target_layout, PROP_FLOAT, PROP_DEFLECTION_ANGLE, p.get('deflection_angle', 30))
-        self._set_prop(target_layout, PROP_FLOAT, PROP_SIMPLIFICATION, p.get('simplification', 1.0))
+        self._set_prop(target_layout, PROP_LENGTH, PROP_SIMPLIFICATION, p.get('simplification', 1.0))
         self._set_prop(target_layout, PROP_FILE, PROP_FONT_FILE, p['font_path'])
         self._set_prop(target_layout, PROP_BOOL, PROP_SHOW_BOUNDS, p['show_bounds'])
+        self._set_prop(target_layout, PROP_BOOL, PROP_SHOW_OFFCUTS, p.get('show_offcuts', True))
         self._set_prop(target_layout, PROP_BOOL, PROP_ADD_LABELS, p['add_labels'])
         self._set_prop(target_layout, PROP_LENGTH, PROP_LABEL_HEIGHT, p['label_height'])
-        self._set_prop(target_layout, PROP_FLOAT, PROP_LABEL_SIZE, p['label_size'])
+        self._set_prop(target_layout, PROP_LENGTH, PROP_LABEL_SIZE, p['label_size'])
         self._set_prop(target_layout, PROP_INTEGER, PROP_GLOBAL_ROTATION_STEPS, p['rotation_steps'])
         self._set_prop(target_layout, PROP_INTEGER, PROP_GENERATIONS, p.get('generations', 1))
         self._set_prop(target_layout, PROP_INTEGER, PROP_POPULATION_SIZE, p.get('population_size', 1))
-        self._set_prop(target_layout, PROP_FLOAT, PROP_CANDIDATE_SPACING,
+        self._set_prop(target_layout, PROP_INTEGER, PROP_GA_WINNERS, p.get('ga_winners', 2))
+        self._set_prop(target_layout, PROP_FLOAT, PROP_MUTATION_RATE, float(p.get('mutation_rate', 0.1)))
+        for prop, key in WEIGHT_PROPS:
+            self._set_prop(target_layout, PROP_FLOAT, prop, float(p.get(f"{key}_weight", _WEIGHT_DEFAULTS[key])))
+        self._set_prop(target_layout, PROP_FLOAT, PROP_FITNESS_MIN_OFFCUT, float(p.get('min_offcut', 100000.0)))
+        self._set_prop(target_layout, PROP_INTEGER, PROP_BEAM_WIDTH, p.get('beam_width', 1))
+        self._set_prop(target_layout, PROP_INTEGER, PROP_MAX_PART_BRANCHES, p.get('max_part_branches', 2))
+        self._set_prop(target_layout, PROP_INTEGER, PROP_MAX_ROT_BRANCHES, p.get('max_rot_branches', 3))
+        self._set_prop(target_layout, PROP_BOOL, PROP_BEAM_ITERATIVE, p.get('beam_iterative', False))
+        self._set_prop(target_layout, PROP_FLOAT, PROP_BEAM_WIDTH_DECAY, float(p.get('beam_width_decay', 1.0)))
+        self._set_prop(target_layout, PROP_LENGTH, PROP_CANDIDATE_SPACING,
                        p.get('candidate_spacing', DEFAULT_CANDIDATE_SPACING))
         self._set_prop(target_layout, PROP_STRING, PROP_ALGORITHM,
-                       str(p.get('algorithm', 'Minkowski')))
+                       str(p.get('algorithm', ALGO_GREEDY)))
         self._set_prop(target_layout, PROP_FLOAT, PROP_NESTING_DIRECTION, float(p.get('nesting_direction', 270.0)))
+        self._set_prop(target_layout, PROP_FLOAT, PROP_PART_DIRECTION, float(p.get('part_direction', 0.0)))
 
     def _set_prop(self, obj, type_str, name, val):
         if not hasattr(obj, name):

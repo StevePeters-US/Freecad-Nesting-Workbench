@@ -6,19 +6,22 @@ import Part
 import copy
 
 from .algorithms import nesting_strategy
-from .algorithms import physics_nester
+from .algorithms import beam_nester
 from .algorithms import sheet_sequence
 from .visualization_manager import VisualizationManager
 from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.ui_helpers import show_warning_dialog
+from .algorithms.placers import make_placer
+from .algorithms.fitness import FitnessWeights, MIN_OFFCUT_DEFAULT
+from freecad.nestingworkbench.constants import ALGO_GREEDY
 
 class _MainThreadRelay(QtCore.QObject):
     """QObject that lives on the main thread.
     Callables posted from worker threads run on the main thread, in order.
 
     The relay keeps its own FIFO and never runs one callable inside another.
-    Simulation callbacks call FreeCADGui.updateGui(), which processes pending
-    events — with a plain queued signal per callable, that ran the next posted
+    Before NLA-059 the simulation callbacks called FreeCADGui.updateGui(), which processes
+    pending events. With a plain queued signal per callable, that ran the next posted
     callable *inside* the current one, which called updateGui() again, and so
     on. A worker posting faster than the main thread drew (a warm NFP cache on
     a re-nest) nested one level per queued callable until the main thread's
@@ -36,6 +39,12 @@ class _MainThreadRelay(QtCore.QObject):
         self._kick.connect(self._drain, QtCore.Qt.QueuedConnection)
 
     def _drain(self):
+        """Run queued callables on the main thread until the queue is empty.
+
+        Sim callbacks no longer call updateGui(). The re-entry guard stays for the
+        other main-thread code that still calls updateGui() (ga_coordinator, the
+        controller's draw handler), which can otherwise re-enter this drain.
+        """
         if self._draining:
             return  # Re-entered from updateGui(); the outer drain continues the queue
         self._draining = True
@@ -82,6 +91,32 @@ def _main_thread_wrapper(fn):
             _main_thread_relay.post(lambda: fn(*args, **kwargs))
     return wrapper
 
+def _blocking_main_thread_call(fn, cancel_check=None):
+    """Run *fn* on the main thread and wait until it has run (NLA-B02).
+
+    From the main thread, or headless, it runs inline. From a worker thread it is posted
+    through the relay, so it keeps FIFO order with every earlier sim callback, and the
+    worker waits. A cancel stops the wait; the posted call still runs.
+    """
+    app = QtWidgets.QApplication.instance()
+    from unittest.mock import Mock
+    if not app or isinstance(app, Mock) or QtCore.QThread.currentThread() == app.thread():
+        fn()
+        return
+    import threading
+    done = threading.Event()
+
+    def run():
+        try:
+            fn()
+        finally:
+            done.set()
+
+    _main_thread_relay.post(run)
+    while not done.wait(0.1):
+        if cancel_check is not None and cancel_check():
+            return
+
 def _latest_only_main_thread_wrapper(fn):
     """Like _main_thread_wrapper, but at most one call is ever queued.
 
@@ -92,7 +127,8 @@ def _latest_only_main_thread_wrapper(fn):
     """
     import threading
     lock = threading.Lock()
-    state = {'args': None, 'queued': False}
+    # posted: off-thread calls. dropped: calls that found a drain already queued (NLA-060).
+    state = {'args': None, 'queued': False, 'posted': 0, 'dropped': 0}
 
     def drain():
         with lock:
@@ -108,11 +144,14 @@ def _latest_only_main_thread_wrapper(fn):
             fn(*args, **kwargs)
             return
         with lock:
+            state['posted'] += 1
             state['args'] = (args, kwargs)
             if state['queued']:
+                state['dropped'] += 1
                 return
             state['queued'] = True
         _main_thread_relay.post(drain)
+    wrapper.stats = state
     return wrapper
 
 class NestingDependencyError(Exception):
@@ -148,34 +187,48 @@ def _sheet_origin_xy(sheet):
         return origin.x, origin.y
     return origin[0], origin[1]
 
-def _visualize_trial_placement(part, angle, x, y, sheet, viz_manager):
-# ... (rest of function)
-    if not viz_manager: return
+class _SimFailures:
+    """Counts simulate-draw failures in one run (NLA-B02); recorded from the worker or the
+    main thread, and reported once at teardown, after the last queued draw."""
+    def __init__(self):
+        self.count = 0
+        self.first = None
+
+    def record(self, error):
+        self.count += 1
+        if self.first is None:
+            self.first = f"{type(error).__name__}: {error}"
+
+    def report(self):
+        if self.count:
+            nw_logger.warn(f"Simulation: {self.count} preview draw(s) failed; "
+                           f"first: {self.first}")
+
+def _snapshot_trial(part, angle, x, y, sheet):
+    """World XY coordinates of *part*'s outline at a trial pose, computed on the calling
+    (worker) thread, so the main-thread draw never reads the live Shape (NLA-B02). None when
+    the part has no polygon."""
+    poly = getattr(part, 'polygon', None)
+    if poly is None or poly.is_empty:
+        return None
+    rotated = rotate(poly, angle, origin='centroid')
+    # x/y are sheet-local: offset by the sheet origin so the preview sits over that sheet.
+    ox, oy = _sheet_origin_xy(sheet)
+    moved = translate(rotated, xoff=x - rotated.centroid.x + ox, yoff=y - rotated.centroid.y + oy)
+    return tuple(moved.exterior.coords)
+
+
+def _draw_trial_coords(coords, viz_manager, failures):
+    """Main thread: draw a snapshot from _snapshot_trial."""
     doc = FreeCAD.ActiveDocument
-    if not doc or not FreeCAD.GuiUp:
+    if not viz_manager or not doc or not FreeCAD.GuiUp:
         return
-    
     try:
-        # Get the boundary polygon from the part
-        if hasattr(part, 'polygon') and part.polygon:
-            # Rotate and translate the polygon to the trial position.
-            # x,y is the target centroid position; translate by the delta from current centroid.
-            rotated_poly = rotate(part.polygon, angle, origin='centroid')
-            cx, cy = rotated_poly.centroid.x, rotated_poly.centroid.y
-            # x/y are sheet-local — offset by the sheet origin so the preview is
-            # drawn over the sheet being packed, not always over sheet 1.
-            ox, oy = _sheet_origin_xy(sheet)
-            translated_poly = translate(rotated_poly, xoff=x - cx + ox, yoff=y - cy + oy)
-            
-            # Convert shapely polygon to FreeCAD wire
-            coords = list(translated_poly.exterior.coords)
-            points = [FreeCAD.Vector(c[0], c[1], 0) for c in coords]
-            wire = Part.makePolygon(points)
-            
-            # Use the visualization manager to draw
-            viz_manager.draw_trial_placement(doc, wire)
+        wire = Part.makePolygon([FreeCAD.Vector(cx, cy, 0) for cx, cy, *_ in coords])
+        viz_manager.draw_trial_placement(doc, wire)
     except Exception as e:
-        nw_logger.warn(f"[nesting_logic] Draw failed: {e}")
+        failures.record(e)
+
 
 def _cleanup_trial_viz(viz_manager):
 # ... (rest of function)
@@ -220,48 +273,82 @@ def _hide_sim_outlines(parts):
         if view_object is not None:
             view_object.Visibility = False
 
-def _bind_sim_callbacks(kwargs, viz_manager):
-    """Attach trial/part-start/part-end callbacks; returns the viz_manager to use."""
+def _bind_sim_callbacks(kwargs, viz_manager, failures):
+    """Attach trial/part-start/part-end callbacks; returns (viz_manager, trial_stats).
+
+    The trial callback snapshots the outline on the worker thread and posts only its
+    coordinates, so the main-thread draw never reads the live Shape (NLA-B02).
+    trial_stats is the coalescing wrapper's counters ({'posted', 'dropped'}), read at teardown.
+    """
     if viz_manager is None:
         viz_manager = VisualizationManager()
-    kwargs['trial_callback'] = _latest_only_main_thread_wrapper(
-        lambda p, a, x, y, sheet: _visualize_trial_placement(p, a, x, y, sheet, viz_manager)
+    draw = _latest_only_main_thread_wrapper(
+        lambda coords: _draw_trial_coords(coords, viz_manager, failures)
     )
+
+    def trial_callback(p, a, x, y, sheet):
+        try:
+            coords = _snapshot_trial(p, a, x, y, sheet)
+        except Exception as e:
+            failures.record(e)
+            return
+        if coords is not None:
+            draw(coords)
+
+    kwargs['trial_callback'] = trial_callback
     kwargs['part_start_callback'] = _main_thread_wrapper(
         lambda p: _on_part_start(p, viz_manager)
     )
     kwargs['part_end_callback'] = lambda p, pl: _on_part_end(p, pl, viz_manager)
-    return viz_manager
+    return viz_manager, draw.stats
 
-def _bind_sim_update(nester):
-    """Attach the per-placement redraw callback."""
+
+def _bind_sim_update(nester, failures):
+    """Attach the per-placement redraw callback.
+
+    The worker waits until the sheet is drawn, so the sheet can't change under the draw
+    (NLA-058). A failed draw is recorded, not raised into the placer.
+    """
     def update_sim_view(part, sheet):
         doc = FreeCAD.ActiveDocument
-        if doc:
+        if not doc:
+            return
+        try:
             sheet.draw(doc, {}, transient_part=part)
             doc.recompute()
-        FreeCADGui.updateGui()
-    nester.update_callback = _main_thread_wrapper(update_sim_view)
+        except Exception as e:
+            failures.record(e)
 
-def _teardown_sim(viz_manager, parts):
-    """Main-thread cleanup of trial viz, highlighting and sim outlines.
+    nester.update_callback = lambda part, sheet: _blocking_main_thread_call(
+        lambda: update_sim_view(part, sheet), getattr(nester, 'cancel_callback', None))
 
-    These access FreeCAD doc objects and ViewObject — must run on main thread.
+def _report_sim(failures, trial_stats, verbose):
+    """Main thread: the run's one aggregated draw-failure warning, and the verbose frame count."""
+    failures.report()
+    if verbose:
+        dropped = trial_stats['dropped']
+        nw_logger.info(f"Simulation: {trial_stats['posted'] - dropped} trial frames drawn, "
+                       f"{dropped} skipped")
+
+def _teardown_sim(viz_manager, parts, failures, trial_stats, verbose):
+    """Main-thread cleanup of trial viz, highlighting and sim outlines, then the run's report.
+
+    These access FreeCAD doc objects and ViewObject — must run on main thread. The report is
+    posted last, so on the relay FIFO it runs after every queued draw (NLA-060).
     """
     _main_thread_wrapper(lambda: _cleanup_trial_viz(viz_manager))()
     _main_thread_wrapper(lambda: _cleanup_highlighting(viz_manager))()
     _main_thread_wrapper(lambda: _hide_sim_outlines(parts))()
+    _main_thread_wrapper(lambda: _report_sim(failures, trial_stats, verbose))()
 
-def nest(parts, sheet_sizes, rotation_steps=1, simulate=False, algorithm='Minkowski', viz_manager=None, **kwargs):
+def nest(parts, sheet_sizes, rotation_steps=1, simulate=False, algorithm=ALGO_GREEDY, viz_manager=None, **kwargs):
     """
     Convenience function to run the nesting algorithm.
+
+    *algorithm* picks the placer (ALGO_GREEDY or ALGO_BEAM); an unknown value
+    raises ValueError. The caller passes only the chosen placer's kwargs.
     """
 
-    sort = kwargs.pop('sort', True)
-    # Optional out-param: a list the nester's consumption order is
-    # appended to, so the GA can record a chromosome that reproduces
-    # the layout it describes without re-deriving the nester's sort.
-    order_out = kwargs.pop('order_out', None)
     parts_to_process = parts if simulate else copy.deepcopy(parts)
 
     steps = 0
@@ -273,33 +360,35 @@ def nest(parts, sheet_sizes, rotation_steps=1, simulate=False, algorithm='Minkow
         raise NestingDependencyError("The selected algorithm requires the 'Shapely' library.")
 
     # If simulation is enabled, ensure we have a viz_manager and bind callbacks
+    failures = trial_stats = None
     if simulate:
-        viz_manager = _bind_sim_callbacks(kwargs, viz_manager)
+        failures = _SimFailures()
+        viz_manager, trial_stats = _bind_sim_callbacks(kwargs, viz_manager, failures)
 
-    if algorithm == 'Physics':
-        nester = physics_nester.PhysicsNester(sheet_sizes, rotation_steps, **kwargs)
-    else:
-        nester = nesting_strategy.Nester(sheet_sizes, rotation_steps, **kwargs)
+    nester = make_placer(algorithm, sheet_sizes, rotation_steps, **kwargs)
 
     if simulate:
-        _bind_sim_update(nester)
+        _bind_sim_update(nester, failures)
 
     import time
     start_time = time.monotonic()
-    result = nester.nest(parts_to_process, sort=sort)
-    elapsed = time.monotonic() - start_time
-    if order_out is not None:
-        order_out.extend(getattr(nester, 'last_consumption_order', []))
-    
-    if simulate:
-        _teardown_sim(viz_manager, parts_to_process)
-    
+    try:
+        result = nester.nest(parts_to_process)
+        elapsed = time.monotonic() - start_time
+    finally:
+        # A raising nester must not strand TrialBounds, the master
+        # highlight or the sim outlines in the document.
+        if simulate:
+            _teardown_sim(viz_manager, parts_to_process, failures, trial_stats,
+                          kwargs.get('verbose', False))
+
     if len(result) == 3:
         sheets, unplaced, steps = result
     else:
         sheets, unplaced = result
 
-    _calculate_efficiency(sheets, verbose=kwargs.get('verbose', False))
+    _calculate_efficiency(sheets, verbose=kwargs.get('verbose', False),
+                          min_offcut=(kwargs.get('fitness_weights') or FitnessWeights()).min_offcut)
 
     return sheets, unplaced, steps, elapsed
 
@@ -321,38 +410,45 @@ def fill_existing_sheets(sheets, fill_parts, sheet_sizes, rotation_steps=1,
         raise NestingDependencyError("The selected algorithm requires the 'Shapely' library.")
 
     kwargs.pop('sort', None)
+    failures = trial_stats = None
     if simulate:
-        viz_manager = _bind_sim_callbacks(kwargs, viz_manager)
+        failures = _SimFailures()
+        viz_manager, trial_stats = _bind_sim_callbacks(kwargs, viz_manager, failures)
 
     nester = nesting_strategy.Nester(sheet_sizes, rotation_steps, **kwargs)
 
     if simulate:
-        _bind_sim_update(nester)
+        _bind_sim_update(nester, failures)
 
     import time
     start_time = time.monotonic()
     ordered_fill = sorted(fill_parts, key=lambda p: p.area, reverse=True)
     unplaced = []
-    nester._nest_fill_parts(sheets, ordered_fill, unplaced,
-                            quiet=kwargs.get('quiet', False))
-    sheets[:] = sheet_sequence.compact_sheets(sheets)
-    for sheet in sheets:
-        for placed_part in sheet.parts:
-            placed_part.shape.placement = placed_part.shape.get_final_placement(sheet.get_origin())
-    elapsed = time.monotonic() - start_time
-
-    if simulate:
-        _teardown_sim(viz_manager, ordered_fill)
+    try:
+        nester._nest_fill_parts(sheets, ordered_fill, unplaced,
+                                quiet=kwargs.get('quiet', False))
+        sheets[:] = sheet_sequence.compact_sheets(sheets)
+        for sheet in sheets:
+            for placed_part in sheet.parts:
+                placed_part.shape.placement = placed_part.shape.get_final_placement(sheet.get_origin())
+        elapsed = time.monotonic() - start_time
+    finally:
+        # A raising fill must not strand TrialBounds, the master highlight
+        # or the sim outlines in the document.
+        if simulate:
+            _teardown_sim(viz_manager, ordered_fill, failures, trial_stats,
+                          kwargs.get('verbose', False))
 
     return unplaced, elapsed
 
-def _calculate_efficiency(sheets, verbose=False):
-    """Calculates and displays sheet packing efficiency."""
+def _calculate_efficiency(sheets, verbose=False, min_offcut=MIN_OFFCUT_DEFAULT):
+    """Calculates and displays sheet packing efficiency. The verbose per-sheet line lists the
+    sheet's offcuts: its free pieces of at least min_offcut mm²."""
     if not sheets:
         return
-    
-    from .layout_manager import largest_open_area
-    
+
+    from .algorithms.offcuts import free_rectangles
+
     total_parts_area = 0
     total_sheet_area = 0
     
@@ -368,8 +464,10 @@ def _calculate_efficiency(sheets, verbose=False):
         
         if verbose and sheet_area > 0:
             efficiency = (parts_area / sheet_area) * 100
-            largest_open = largest_open_area(sheet.parts, sheet.width, sheet.height)
-            nw_logger.info(f"  Sheet {i+1}: {efficiency:.1f}% ({parts_area:.0f} / {sheet_area:.0f} mm²), Compactness: {largest_open:.0f} mm² largest open")
+            pieces = free_rectangles(sheet.parts, sheet.width, sheet.height, min_offcut)
+            largest = max(((x1 - x0) * (y1 - y0) for x0, y0, x1, y1 in pieces), default=0.0)
+            nw_logger.info(f"  Sheet {i+1}: {efficiency:.1f}% ({parts_area:.0f} / {sheet_area:.0f} mm²), "
+                           f"Offcuts: {len(pieces)} ≥ {min_offcut:.0f} mm², largest {largest:.0f} mm²")
     
     if total_sheet_area > 0:
         overall_efficiency = (total_parts_area / total_sheet_area) * 100

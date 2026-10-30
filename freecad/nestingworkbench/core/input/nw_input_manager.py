@@ -96,6 +96,7 @@ class NWInputManager(QtCore.QObject):
         super().__init__(parent)
         self._is_initialized = False
         self._active_handler = None
+        self._active_target = None
         self._shift_down = False
         self._control_down = False
         self._left_mouse_down = False
@@ -104,22 +105,26 @@ class NWInputManager(QtCore.QObject):
         self._last_qt_pos = (0, 0)
         self._cached_viewport = None
 
-    def _reset_state(self):
-        """Forget all tracked input state — nothing is held while we're not filtering."""
+    def _release_held_input(self):
+        """Forget held keys and buttons; their release may happen while we can't see it."""
         self._shift_down = False
         self._control_down = False
         self._left_mouse_down = False
         self._middle_mouse_down = False
         self._right_mouse_down = False
+
+    def _reset_state(self):
+        """Forget all tracked input state — nothing is held while we're not filtering."""
+        self._release_held_input()
         self._cached_viewport = None
 
     # Lifecycle
 
     def initialize(self):
-        """Install global event filter on QApplication."""
+        """Install global event filter on QApplication. Idempotent: a second call keeps tracked input."""
         try:
-            self._reset_state()
             if not self._is_initialized:
+                self._reset_state()
                 app = QtWidgets.QApplication.instance()
                 if app:
                     app.installEventFilter(self)
@@ -141,13 +146,15 @@ class NWInputManager(QtCore.QObject):
 
     # Handler Registration
 
-    def set_active_handler(self, handler):
-        """Set the active interactive tool handler."""
+    def set_active_handler(self, handler, target=None):
+        """Set the active tool handler. *target*: widget whose mouse events it gets; None = the 3D view."""
         self._active_handler = handler
+        self._active_target = target
 
     def clear_active_handler(self):
-        """Clear the active interactive tool handler."""
+        """Clear the active interactive tool handler and its target widget."""
         self._active_handler = None
+        self._active_target = None
 
     def get_active_handler(self):
         """Return the current active interactive tool handler."""
@@ -182,6 +189,10 @@ class NWInputManager(QtCore.QObject):
     def eventFilter(self, obj, event):
         """Intercept and dispatch Qt events."""
         try:
+            if event.type() == QtCore.QEvent.ApplicationDeactivate:
+                self._release_held_input()
+                return False
+
             is_key_event = event.type() in (
                 QtCore.QEvent.KeyPress,
                 QtCore.QEvent.KeyRelease,
@@ -227,37 +238,41 @@ class NWInputManager(QtCore.QObject):
                 if _is_text_input(focus_w) or _is_text_input(obj):
                     return False
 
-            # Viewport Detection
-            if self._cached_viewport is not None and not _qt_alive(self._cached_viewport):
-                self._cached_viewport = None
+            # Viewport Detection: a registered target widget replaces the 3D view.
+            if self._active_target is not None:
+                target = self._active_target if _qt_alive(self._active_target) else None
+            else:
+                if self._cached_viewport is not None and not _qt_alive(self._cached_viewport):
+                    self._cached_viewport = None
 
-            if self._cached_viewport is None and FreeCADGui is not None:
-                try:
-                    av = FreeCADGui.activeView()
-                    if av and hasattr(av, "getWidget"):
-                        self._cached_viewport = av.getWidget()
-                    elif av and hasattr(av, "graphicsView"):
-                        gv = av.graphicsView()
-                        if gv and hasattr(gv, "viewport"):
-                            self._cached_viewport = gv.viewport()
+                if self._cached_viewport is None and FreeCADGui is not None:
+                    try:
+                        av = FreeCADGui.activeView()
+                        if av and hasattr(av, "getWidget"):
+                            self._cached_viewport = av.getWidget()
+                        elif av and hasattr(av, "graphicsView"):
+                            gv = av.graphicsView()
+                            if gv and hasattr(gv, "viewport"):
+                                self._cached_viewport = gv.viewport()
 
-                    obj_cls = obj.metaObject().className() if hasattr(obj, "metaObject") else ""
-                    if "OpenGL" in obj_cls or "Quarter" in obj_cls:
-                        vp_cls = ""
-                        if self._cached_viewport and hasattr(self._cached_viewport, "metaObject"):
-                            vp_cls = self._cached_viewport.metaObject().className()
-                        if not self._cached_viewport or "View3D" in vp_cls:
-                            self._cached_viewport = obj
-                except Exception as e:
-                    nw_logger.log(f"[NWInputManager] Viewport detection: {e}")
+                        obj_cls = obj.metaObject().className() if hasattr(obj, "metaObject") else ""
+                        if "OpenGL" in obj_cls or "Quarter" in obj_cls:
+                            vp_cls = ""
+                            if self._cached_viewport and hasattr(self._cached_viewport, "metaObject"):
+                                vp_cls = self._cached_viewport.metaObject().className()
+                            if not self._cached_viewport or "View3D" in vp_cls:
+                                self._cached_viewport = obj
+                    except Exception as e:
+                        nw_logger.log(f"[NWInputManager] Viewport detection: {e}")
+                target = self._cached_viewport
 
             is_viewport_event = False
-            if self._cached_viewport:
-                if obj == self._cached_viewport:
+            if target:
+                if obj == target:
                     is_viewport_event = True
-                elif hasattr(self._cached_viewport, "isAncestorOf"):
+                elif hasattr(target, "isAncestorOf"):
                     try:
-                        is_viewport_event = self._cached_viewport.isAncestorOf(obj)
+                        is_viewport_event = target.isAncestorOf(obj)
                     except Exception as e:
                         nw_logger.log(f"[NWInputManager] isAncestorOf check: {e}")
 
@@ -269,8 +284,8 @@ class NWInputManager(QtCore.QObject):
                     else:
                         global_pos = event.pos()
 
-                    if self._cached_viewport and hasattr(self._cached_viewport, "mapFromGlobal"):
-                        local_pos = self._cached_viewport.mapFromGlobal(global_pos)
+                    if target and hasattr(target, "mapFromGlobal"):
+                        local_pos = target.mapFromGlobal(global_pos)
                     else:
                         local_pos = event.pos()
 
@@ -382,6 +397,7 @@ class NWInputManager(QtCore.QObject):
                             else QtCore.Qt.NoModifier
                         ),
                         "Position": self._last_qt_pos,
+                        "DoubleClick": event.type() == QtCore.QEvent.MouseButtonDblClick,
                     }
 
                     if event.type() == QtCore.QEvent.MouseMove:

@@ -12,7 +12,7 @@ import FreeCADGui
 from PySide import QtCore, QtWidgets
 
 from freecad.nestingworkbench import ADDON_DIR, nw_logger
-from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
 
 PATREON_URL = "https://www.patreon.com/cw/AttackPotato"
 
@@ -41,7 +41,10 @@ class AboutCommand:
         return {
             'Pixmap': 'Nesting_Workbench.svg',
             'MenuText': QT_TRANSLATE_NOOP('AboutCommand', 'About Nesting Workbench'),
-            'ToolTip': QT_TRANSLATE_NOOP('AboutCommand', 'Shows the workbench version and a link to support development.')
+            'ToolTip': rich_tooltip(
+                'AboutCommand',
+                QT_TRANSLATE_NOOP('AboutCommand', 'Shows the installed workbench version and a link to support development.'),
+            ),
         }
 
     def Activated(self):

@@ -2,7 +2,7 @@
 import FreeCAD
 import FreeCADGui
 from freecad.nestingworkbench.Tools.ManualNester import manual_nester_panel_manager
-from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
 from freecad.nestingworkbench.freecad_helpers import is_layout_group
 
 MANUAL_NESTER_DISABLED = True
@@ -15,7 +15,10 @@ class ManualNesterCommand:
         return {
             'Pixmap': 'Nesting_Transform_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('ManualNesterCommand', 'Manual Nester'),
-            'ToolTip': QT_TRANSLATE_NOOP('ManualNesterCommand', 'Activates a tool to manually nest parts in the selected layout.')
+            'ToolTip': rich_tooltip(
+                'ManualNesterCommand',
+                QT_TRANSLATE_NOOP('ManualNesterCommand', 'Moves and rotates placed parts by hand in the selected layout (experimental; currently disabled).\nSelect a Layout group first.'),
+            ),
         }
 
     def Activated(self):

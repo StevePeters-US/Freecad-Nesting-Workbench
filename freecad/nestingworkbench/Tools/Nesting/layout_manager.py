@@ -12,18 +12,12 @@ Separates layout management from the nesting algorithm for cleaner architecture.
 """
 
 import copy
-import random
-import math
 from .shape_preparer import ShapePreparer
 from ...datatypes.shape import Shape
 from ...freecad_helpers import recursive_delete
 from freecad.nestingworkbench import nw_logger
-from .algorithms.genetic_utils import (
-    largest_open_area,
-    compute_layout_fitness,
-    set_warning_logger,
-    SHAPELY_AVAILABLE,
-)
+from .algorithms.genetic_utils import set_warning_logger
+from .algorithms.fitness import FitnessWeights, score_layout
 
 set_warning_logger(nw_logger.warn)
 
@@ -34,8 +28,8 @@ class Layout:
     Contains references to the FreeCAD objects and the parts list.
     
     Attributes:
-        genes: List of (part_id, angle) tuples representing the ordering and rotation
-               of parts. Can be used to recreate the exact same layout.
+        genome: search_genome.Genome holding the placer parameters this member
+                nests with. Every member nests the same parts.
     """
     def __init__(self, layout_group, parts_group, parts, master_shapes_group=None, label=None):
         self.layout_group = layout_group  # The Layout_xxx group object
@@ -46,8 +40,7 @@ class Layout:
         self.unplaced = []                # Parts nesting could not place
         self.fitness = float('inf')
         self.efficiency = 0.0
-        self.genes = []                   # (part_id, angle) tuples - the "DNA" of this layout
-        self.direction = None             # (dx, dy) unit vector; None = use global search_direction
+        self.genome = None                # search_genome.Genome; set by create_ga_population / breeding
         self.label = label                # name when the layout owns no document group
     
     @property
@@ -62,11 +55,10 @@ class LayoutManager:
     Acts as a factory for Layout objects used in nesting.
     """
     
-    def __init__(self, doc, processed_shape_cache=None, rng=None):
+    def __init__(self, doc, processed_shape_cache=None):
         self.doc = doc
         self.processed_shape_cache = processed_shape_cache or {}
         self._layout_counter = 0
-        self.rng = rng or random
         self._template = None
 
     def _ensure_template(self, master_shapes_map, quantities, ui_params):
@@ -105,7 +97,7 @@ class LayoutManager:
         return self._template
 
     def create_layout(self, name, master_shapes_map, quantities, ui_params, 
-                      chromosome_ordering=None, member_idx: int = 0) -> Layout:
+                      genome=None, member_idx: int = 0) -> Layout:
         """Creates a population member: its own Shape objects, sharing the run's document objects.
         
         Args:
@@ -113,7 +105,7 @@ class LayoutManager:
             master_shapes_map: Dict mapping labels to FreeCAD shape objects
             quantities: Dict mapping labels to (quantity, rotation_steps)
             ui_params: UI parameters dict
-            chromosome_ordering: Optional list of (part_id, angle) tuples for ordering
+            genome: Optional search_genome.Genome this member nests with
             member_idx: Index of layout within population for deterministic tracking
             
         Returns:
@@ -129,52 +121,12 @@ class LayoutManager:
         for part in parts:
             part.fc_object = doc_objects.get(part.id)
 
-        if chromosome_ordering and parts:
-            parts = self._apply_ordering(parts, chromosome_ordering)
-
         self._layout_counter += 1
 
         layout = Layout(None, None, parts, None, label=name)
         layout.member_idx = member_idx
-        if chromosome_ordering and parts:
-            # Genotype drives nesting: only genes for parts that actually exist,
-            # and never for fill parts (they are placed greedily after the genome)
-            layout.genes = [(p.id, getattr(p, '_angle', 0)) for p in parts
-                            if getattr(p, 'fill_sheet', False) is not True]
+        layout.genome = genome
         return layout
-    
-    def _apply_ordering(self, parts, chromosome_ordering):
-        """
-        Reorders and rotates parts according to a chromosome.
-        
-        Args:
-            parts: List of Shape objects
-            chromosome_ordering: List of (part_id, angle) tuples
-            
-        Returns:
-            Reordered list of Shape objects with rotations applied
-        """
-        if not chromosome_ordering:
-            return parts
-        
-        # Build a map of part id -> part
-        parts_map = {p.id: p for p in parts}
-        
-        ordered_parts = []
-        for part_id, angle in chromosome_ordering:
-            if part_id in parts_map:
-                part = parts_map[part_id]
-                if angle is not None:
-                    part.set_rotation(angle)
-                    part.gene_angle = angle
-                ordered_parts.append(part)
-        
-        # Parts not in the chromosome (fill parts) tag along at the end in
-        # their original relative order; the nester's fill phase handles them.
-        ordered_ids = {p.id for p in ordered_parts}
-        ordered_parts.extend(p for p in parts if p.id not in ordered_ids)
-        
-        return ordered_parts
     
     def delete_layout(self, layout, verbose=False):
         """
@@ -240,22 +192,21 @@ class LayoutManager:
         if template is not None and template.layout_group is not None:
             recursive_delete(self.doc, template.layout_group)
 
-    def calculate_efficiency(self, layout, compactness_weight=0.0) -> tuple:
-        """
-        Calculates the packing efficiency of a layout.
-        
+    def calculate_efficiency(self, layout, weights=None, n_unplaced=0, sheet_sizes=()) -> tuple:
+        """Scores *layout* with the fitness model and stores fitness and efficiency on it.
+
         Args:
             layout: Layout object with sheets populated
-            compactness_weight: 0 disables the open-area term (default); higher
-                                values weight the largest-open-area deficit into the last-sheet
-                                tie-break as a blend that never exceeds one sheet's area
-            
+            weights: FitnessWeights; None takes the defaults (bounding box only)
+            n_unplaced: unplaced regular parts, each charged the unplaced penalty
+            sheet_sizes: the run's (w, h) sizes; read only when n_unplaced > 0
+
         Returns:
             (fitness, efficiency_percent) tuple
         """
-        fitness, efficiency = compute_layout_fitness(
-            layout.sheets, compactness_weight=compactness_weight
-        )
+        fitness, efficiency = score_layout(
+            layout.sheets, n_unplaced, sheet_sizes,
+            weights if weights is not None else FitnessWeights())
         layout.fitness = fitness
         layout.efficiency = efficiency
         return fitness, efficiency
@@ -270,10 +221,10 @@ class LayoutManager:
             quantities: Dict mapping labels to (quantity, rotation_steps)
             ui_params: UI parameters dict
             population_size: Number of layouts to create
-            rotation_steps: Number of rotation steps for random rotations
+            rotation_steps: Unused; kept for call compatibility
             
         Returns:
-            List of Layout objects
+            List of Layout objects with genome None; the coordinator assigns genomes.
         """
         population = []
         
@@ -281,36 +232,8 @@ class LayoutManager:
             name = f"Layout_GA_{i+1}"
             
             # Create the layout
-            layout = self.create_layout(name, master_shapes_map, quantities, ui_params, member_idx=i)
-            
-            if layout.parts and i > 0:  # First layout keeps original ordering
-                regular = [p for p in layout.parts if getattr(p, 'fill_sheet', False) is not True]
-                fill = [p for p in layout.parts if getattr(p, 'fill_sheet', False) is True]
-
-                # Shuffle the regular parts order; fill parts stay at the tail
-                self.rng.shuffle(regular)
-                layout.parts = regular + fill
-
-                # Apply random rotations (regular parts only — fill parts keep
-                # their full rotation sweep and never get a gene_angle pin)
-                if rotation_steps > 1:
-                    for part in regular:
-                        angle = self.rng.randrange(rotation_steps) * (360.0 / rotation_steps)
-                        part.set_rotation(angle)
-                        part.gene_angle = angle
-                else:
-                    for part in regular:
-                        part.gene_angle = 0.0
-
-                # Record genotype so nest() runs with sort=False and this ordering survives
-                layout.genes = [(p.id, getattr(p, '_angle', 0)) for p in regular]
-
-                # Per-layout search direction
-                if ui_params.get('use_random_direction', False):
-                    angle_rad = self.rng.uniform(0, 2 * math.pi)
-                    layout.direction = (math.cos(angle_rad), math.sin(angle_rad))
-                else:
-                    layout.direction = None
+            layout = self.create_layout(name, master_shapes_map, quantities, ui_params,
+                                        genome=None, member_idx=i)
             
             population.append(layout)
             if verbose:

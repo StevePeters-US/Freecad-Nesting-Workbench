@@ -2,13 +2,6 @@
 import random
 import copy
 
-try:
-    from shapely.geometry import Polygon
-    from shapely.ops import unary_union
-    SHAPELY_AVAILABLE = True
-except ImportError:
-    SHAPELY_AVAILABLE = False
-
 
 # This module runs inside worker processes and must import no FreeCAD.
 # layout_manager installs the real sink at import time; workers fall back
@@ -29,46 +22,6 @@ def _warn(msg):
         warnings.warn(msg, RuntimeWarning)
 
 
-def largest_open_area(parts, sheet_width, sheet_height):
-    """
-    Area of the largest contiguous free region on a sheet.
-
-    Computed with Shapely: bin polygon minus the union of the placed
-    part polygons (sheet-local coordinates); the largest resulting polygon's
-    area is returned. Falls back to full sheet area when Shapely is unavailable
-    or geometry is degenerate.
-    """
-    sheet_area = sheet_width * sheet_height
-    if not SHAPELY_AVAILABLE:
-        return sheet_area
-
-    polygons = []
-    for p in parts:
-        try:
-            poly = p.shape.polygon
-            if poly is not None and not poly.is_empty:
-                polygons.append(poly.buffer(0))
-        except Exception as e:
-            part_id = getattr(getattr(p, 'shape', None), 'id', 'unknown')
-            _warn(f"[largest_open_area] Failed to extract polygon for part '{part_id}': {e}")
-            continue
-    if not polygons:
-        return sheet_area
-
-    bin_polygon = Polygon([(0, 0), (sheet_width, 0),
-                           (sheet_width, sheet_height), (0, sheet_height)])
-    try:
-        free_space = bin_polygon.difference(unary_union(polygons))
-    except Exception as e:
-        _warn(f"[largest_open_area] Failed difference computation: {e}")
-        return sheet_area
-
-    if free_space.is_empty:
-        return 0.0
-    regions = getattr(free_space, 'geoms', [free_space])
-    return max(region.area for region in regions)
-
-
 UNPLACED_PENALTY_FACTOR = 10.0  # each unplaced part costs 10 sheet-areas of fitness
 
 
@@ -81,10 +34,15 @@ def unplaced_penalty(count, sheet_sizes):
     return count * max(w * h for w, h in sheet_sizes) * UNPLACED_PENALTY_FACTOR
 
 
-def compute_layout_fitness(sheets, compactness_weight=0.0) -> tuple:
+def compute_layout_fitness(sheets, weights=None) -> tuple:
     """
     Calculates (fitness, efficiency_percent) for a placed layout's sheets.
+    weights is a FitnessWeights; None takes FitnessWeights().
     """
+    # Local import: fitness.py imports this module.
+    from .fitness import FitnessWeights
+    if weights is None:
+        weights = FitnessWeights()
     if not sheets:
         return float('inf'), 0.0
 
@@ -119,104 +77,24 @@ def compute_layout_fitness(sheets, compactness_weight=0.0) -> tuple:
 
         if found_valid:
             bbox_area = (max_x - min_x) * (max_y - min_y)
-            tie_break = bbox_area
-            if compactness_weight > 0:
-                last_sheet_area = last_sheet.width * last_sheet.height
-                open_deficit = (last_sheet_area
-                                - largest_open_area(last_sheet.parts,
-                                                    last_sheet.width, last_sheet.height))
-                tie_break = ((bbox_area + compactness_weight * open_deficit)
-                             / (1.0 + compactness_weight))
+            w = weights
+            total_w = w.gravity + w.contact + w.direction + w.offcut
+            tie_break = 0.0
+            if total_w > 0:
+                largest_sheet_area = max(s.width * s.height for s in sheets)
+                # Fractions first: 0.5 * a + 0.5 * b equals the old (a + b) / 2 exactly.
+                if w.gravity > 0:
+                    tie_break += (w.gravity / total_w) * bbox_area
+                if w.offcut > 0:
+                    # Local imports: offcuts/contact need numpy and shapely, which this module does not import.
+                    from .offcuts import offcut_value
+                    tie_break += (w.offcut / total_w) * (largest_sheet_area - offcut_value(sheets, w.min_offcut))
+                if w.contact > 0:
+                    from .contact import layout_contact_fraction
+                    tie_break += (w.contact / total_w) * largest_sheet_area * (1.0 - layout_contact_fraction(sheets))
+                if w.direction > 0:
+                    from .contact import layout_direction_deviation
+                    tie_break += (w.direction / total_w) * largest_sheet_area * layout_direction_deviation(sheets, w.part_direction_deg)
             fitness += tie_break
 
     return fitness, efficiency
-
-def tournament_selection(ranked_population, k=3, rng=None):
-    """
-    Selects a parent from the ranked population using tournament selection.
-    ranked_population: list of (fitness, chromosome) tuples.
-    """
-    if rng is None:
-        rng = random
-    # Ensure ranking is sorted (best/lowest fitness first)
-    # We select k random individuals
-    if len(ranked_population) < k:
-        k = len(ranked_population)
-    
-    participants = rng.sample(ranked_population, k)
-    # The one with the lowest fitness score wins
-    participants.sort(key=lambda x: x[0])
-    return participants[0][1]
-
-def crossover_genes(parent1_genes, parent2_genes, rng=None):
-    """
-    OX1 crossover on (part_id, angle) gene tuples.
-    Copies a random slice from parent1 (preserving angles), fills remaining
-    positions from parent2 in order. Returns a new list of tuples.
-    """
-    if rng is None:
-        rng = random
-    size = len(parent1_genes)
-    if size == 0:
-        return []
-    if size == 1:
-        return list(parent1_genes)
-
-    child = [None] * size
-    start, end = sorted(rng.sample(range(size), 2))
-
-    child[start:end] = parent1_genes[start:end]
-    child_ids = {gene[0] for gene in child if gene is not None}
-
-    p2_idx = 0
-    for i in range(size):
-        if child[i] is None:
-            while parent2_genes[p2_idx][0] in child_ids:
-                p2_idx += 1
-            child[i] = parent2_genes[p2_idx]
-            child_ids.add(parent2_genes[p2_idx][0])
-            p2_idx += 1
-
-    return child
-
-def mutate_genes(genes, mutation_rate, rotation_steps, rng=None):
-    """
-    Mutation on (part_id, angle) gene tuples. Returns a new list (not in-place).
-
-    Operators:
-    - Swap: exchange two random genes
-    - Segment reversal: reverse a sub-sequence
-    - Adjacent swap: swap two neighboring genes
-    - Rotation: per gene, replace its angle with a random valid rotation step
-    """
-    if rng is None:
-        rng = random
-    if len(genes) < 1:
-        return list(genes)
-
-    genes = list(genes)
-
-    if len(genes) >= 2:
-        if rng.random() < mutation_rate:
-            i, j = rng.sample(range(len(genes)), 2)
-            genes[i], genes[j] = genes[j], genes[i]
-
-        if rng.random() < mutation_rate * 0.5:
-            start = rng.randint(0, len(genes) - 2)
-            end = rng.randint(start + 1, len(genes))
-            genes[start:end] = list(reversed(genes[start:end]))
-
-        if rng.random() < mutation_rate * 0.3:
-            i = rng.randint(0, len(genes) - 2)
-            genes[i], genes[i + 1] = genes[i + 1], genes[i]
-
-    if rotation_steps > 1:
-        # Per gene, not once per chromosome. A single draw per child changes
-        # exactly one angle whether the job has 5 parts or 500, which is far
-        # too little angular diversity to search a real rotation space.
-        step = 360.0 / rotation_steps
-        for idx, (part_id, _angle) in enumerate(genes):
-            if rng.random() < mutation_rate:
-                genes[idx] = (part_id, rng.randrange(rotation_steps) * step)
-
-    return genes

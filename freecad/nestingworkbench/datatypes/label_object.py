@@ -23,10 +23,12 @@ from freecad.nestingworkbench import nw_logger
 _FONT_SUFFIXES = (".ttc", ".ttf", ".otf", ".pfb")
 
 # Label glyph geometry, keyed by (font_path, font file mtime, size). Each entry is
-# {"fill": bool, "cap_height": float, "glyphs": {char: (shapes, x_min)}}. Only
-# Sheet.draw uses it, on the main thread, so it has no lock. It lives for the session
-# and is bounded by fonts × sizes × distinct characters. A font file rewritten in place
-# gets a new mtime, and therefore a new entry.
+# {"fill": bool, "cap_height": float, "glyphs": {char: (shapes, x_min, left)}}: the
+# character's shapes already scaled to the label size, the unscaled XMin of its wires
+# where it was first built, and the scaled shapes' optimal XMin (None when it has no
+# shapes). Only Sheet.draw uses it, on the main thread, so it has no lock. It lives for
+# the session and is bounded by fonts × sizes × distinct characters. A font file
+# rewritten in place gets a new mtime, and therefore a new entry.
 _glyph_cache = {}
 
 class LabelObject:
@@ -55,7 +57,7 @@ class ViewProviderLabel:
 
 def _make_faces(wires):
     """Faces for one character's wires. Same face makers, order and orientation fix as
-    Draft's ShapeString.make_faces (FreeCAD 1.1), so labels keep Draft's geometry."""
+    Draft's ShapeString.make_faces (FreeCAD 26.3), so labels keep Draft's geometry."""
     wirelist = []
     for wire in wires:
         connected = Part.Compound(wire.Edges).connectEdgesToWires()
@@ -64,13 +66,18 @@ def _make_faces(wires):
     if not wirelist:
         nw_logger.warn("Label: face creation failed for one character")
         return []
-    for maker in ("Part::FaceMakerBullseye", "Part::FaceMakerCheese", "Part::FaceMakerSimple"):
+    for maker in (
+        "Part::FaceMakerBullseye",
+        "Part::FaceMakerCheese",
+        "Part::FaceMakerSimple",
+        "Part::FaceMakerUnified",
+    ):
         try:
             faces = Part.makeFace(wirelist, maker).Faces
             for face in faces:
                 face.validate()
             break
-        except Part.OCCError:
+        except (Part.OCCError, ValueError):
             continue
     else:
         nw_logger.warn("Label: face creation failed for one character")
@@ -111,43 +118,27 @@ def _font_entry(font_path, size):
     return entry
 
 
-def build_label_shape(text, font_path, size):
-    """The label for `text` as a Part compound: faces, or wires for a stick font.
+def _scaled_glyph(shapes, x_min, scale):
+    """A glyph-cache value: copies of `shapes` scaled by `scale` about the origin, the
+    unscaled XMin of the character's wires, and the copies' optimal XMin (None when the
+    character has no shapes)."""
+    scaled = []
+    for shape in shapes:
+        copy = shape.copy()
+        copy.scale(scale)
+        scaled.append(copy)
+    left = min(copy.optimalBoundingBox().XMin for copy in scaled) if scaled else None
+    return scaled, x_min, left
 
-    Equal to the Shape of a Draft ShapeString with default properties (Bottom-Left,
-    Cap Height reference, ScaleToSize, no tracking, no fuse), without creating a
-    document object. Each character is built once per font and size; later uses copy
-    it and shift the copy to the x position Part.makeWireString gives. Returns an empty
-    Part.Shape() when the font is unusable or no character has geometry, as Draft did.
-    """
-    entry = _font_entry(font_path, size)
-    if entry is None:
-        nw_logger.error(f"Label font not usable: {font_path}")
-        return Part.Shape()
-    chars = Part.makeWireString(text, font_path, size, 0)
-    # makeWireString returns one wire list per character of `text`. If that ever
-    # doesn't hold, characters can't be keyed, so build this label uncached.
-    cacheable = len(chars) == len(text)
+
+def _build_uncached(chars, entry, size):
+    """The label built without the glyph cache, for a makeWireString result that doesn't
+    hold one wire list per character: the whole compound scaled, then shifted so its
+    optimal XMin is 0. Returns an empty Part.Shape() when no character has geometry."""
     shapes = []
-    for i, wires in enumerate(chars):
-        if not wires:
-            continue
-        if not cacheable:
+    for wires in chars:
+        if wires:
             shapes.extend(_make_faces(wires) if entry["fill"] else wires)
-            continue
-        x_min = Part.Compound(wires).BoundBox.XMin
-        glyph = entry["glyphs"].get(text[i])
-        if glyph is None:
-            glyph_shapes = _make_faces(wires) if entry["fill"] else list(wires)
-            glyph = entry["glyphs"][text[i]] = (glyph_shapes, x_min)
-        glyph_shapes, glyph_x = glyph
-        # Single-line text: characters differ only in x. Copies, because translate()
-        # works in place and the cached shapes must not move.
-        offset = FreeCAD.Vector(x_min - glyph_x, 0, 0)
-        for glyph_shape in glyph_shapes:
-            placed = glyph_shape.copy()
-            placed.translate(offset)
-            shapes.append(placed)
     if not shapes:
         return Part.Shape()
     compound = Part.Compound(shapes)
@@ -159,9 +150,54 @@ def build_label_shape(text, font_path, size):
     return Part.Compound(sub_shapes)
 
 
-def create_label_object(name="Label"):
-    """Helper function to create a new LabelObject in the active document."""
-    doc = FreeCAD.ActiveDocument
+def build_label_shape(text, font_path, size):
+    """The label for `text` as a Part compound: faces, or wires for a stick font.
+
+    Equal to the Shape of a Draft ShapeString with default properties (Bottom-Left,
+    Cap Height reference, ScaleToSize, no tracking, no fuse), without creating a
+    document object. Each character is built and scaled once per font and size; later
+    uses place the cached shapes with translated(), which shares their geometry, at the
+    x position Part.makeWireString gives, shifted so the label's optimal XMin is 0.
+    Returns an empty Part.Shape() when the font is unusable or no character has
+    geometry, as Draft did.
+    """
+    entry = _font_entry(font_path, size)
+    if entry is None:
+        nw_logger.error(f"Label font not usable: {font_path}")
+        return Part.Shape()
+    chars = Part.makeWireString(text, font_path, size, 0)
+    # makeWireString returns one wire list per character of `text`. If that ever
+    # doesn't hold, characters can't be keyed, so build this label uncached.
+    if len(chars) != len(text):
+        return _build_uncached(chars, entry, size)
+    scale = size / entry["cap_height"]
+    placed = []
+    for char, wires in zip(text, chars):
+        if not wires:
+            continue
+        x_min = Part.Compound(wires).BoundBox.XMin
+        glyph = entry["glyphs"].get(char)
+        if glyph is None:
+            shapes = _make_faces(wires) if entry["fill"] else list(wires)
+            glyph = entry["glyphs"][char] = _scaled_glyph(shapes, x_min, scale)
+        glyph_shapes, glyph_x, glyph_left = glyph
+        if not glyph_shapes:
+            continue
+        # Single-line text: characters differ only in x, scaled with everything else.
+        placed.append((glyph_shapes, scale * (x_min - glyph_x), glyph_left))
+    if not placed:
+        return Part.Shape()
+    left_margin = -min(offset + left for _, offset, left in placed)
+    shapes = []
+    for glyph_shapes, offset, _ in placed:
+        move = FreeCAD.Vector(offset + left_margin, 0, 0)
+        # translated() returns a moved copy and leaves the cached shape where it is.
+        shapes.extend(shape.translated(move) for shape in glyph_shapes)
+    return Part.Compound(shapes)
+
+
+def create_label_object(doc, name="Label"):
+    """Helper function to create a new LabelObject in doc."""
     obj = doc.addObject("Part::FeaturePython", name)
     LabelObject(obj)
     if FreeCAD.GuiUp:

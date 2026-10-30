@@ -11,11 +11,73 @@ import numpy as np
 import shapely
 from shapely.geometry import Polygon
 from shapely.ops import triangulate
-from shapely.affinity import rotate, scale, translate
+from shapely.affinity import interpret_origin, rotate, translate
 
 from ....datatypes.shape import Shape
 
 _decomposition_lock = threading.Lock()
+
+def outer_boundary(polygon):
+    """The polygon with its holes filled: what the convex cover needs for an NFP
+    exterior or an inner fit.
+
+    The exterior of A + (-B) depends only on the outer boundaries of A and B, and a
+    part fits in a hole by its outline. Decomposing the holes only multiplies the
+    pieces: 24 bolt holes took one plate from 1 piece to 795. Holes reach the NFP
+    through compute_and_cache_nfp's per-hole loop instead. Callers keep the holed
+    polygon's centroid as the transform origin, so the pieces stay in the part's frame.
+    """
+    if polygon.geom_type == 'Polygon':
+        return Polygon(polygon.exterior) if polygon.interiors else polygon
+    if polygon.geom_type == 'MultiPolygon':
+        return shapely.MultiPolygon([Polygon(p.exterior) for p in polygon.geoms])
+    return polygon
+
+def _outline_pieces(polygon, logger):
+    """(pieces, coords) for *polygon*'s outer boundary: decompose_if_needed(outer_boundary(...))
+    and each piece's exterior vertices without the closing one, as float64 arrays.
+
+    Cached by identity: every instance of a part type shares its master's polygon object, so
+    after the first NFP a lookup is one dict hit instead of an outline, a validity check and a
+    WKT key (ARS round 4). The entry holds the polygon, so its id can't be reused while cached;
+    Shape.clear_caches() empties it.
+    """
+    entry = Shape.outline_cache.get(id(polygon))
+    if entry is not None and entry[0] is polygon:
+        return entry[1], entry[2]
+    pieces = decompose_if_needed(outer_boundary(polygon), logger)
+    coords = [np.asarray(p.exterior.coords[:-1], dtype=np.float64) for p in pieces]
+    Shape.outline_cache[id(polygon)] = (polygon, pieces, coords)
+    return pieces, coords
+
+
+def _transformed_coords(coords, angle, origin, reflect, reflect_origin):
+    """Each piece's vertices rotated by *angle* degrees about *origin* and, when *reflect*,
+    reflected through *reflect_origin*.
+
+    The same operations in the same order as shapely.affinity.rotate then scale(-1, -1)
+    (affine_transform's 2D path: xp = a*x + b*y + xoff), so the doubles are identical to
+    transforming each piece polygon with them, without building any polygons.
+    """
+    rad = angle * math.pi / 180.0
+    cosp, sinp = math.cos(rad), math.sin(rad)
+    if abs(cosp) < 2.5e-16:
+        cosp = 0.0
+    if abs(sinp) < 2.5e-16:
+        sinp = 0.0
+    x0, y0 = origin
+    xoff, yoff = x0 - x0 * cosp + y0 * sinp, y0 - x0 * sinp - y0 * cosp
+    rx0, ry0 = reflect_origin
+    rxoff, ryoff = rx0 - rx0 * -1.0, ry0 - ry0 * -1.0
+    out = []
+    for xy in coords:
+        x, y = xy[:, 0], xy[:, 1]
+        xp = cosp * x + -sinp * y + xoff
+        yp = sinp * x + cosp * y + yoff
+        if reflect:
+            xp, yp = -1.0 * xp + 0.0 * yp + rxoff, 0.0 * xp + -1.0 * yp + ryoff
+        out.append(np.stack([xp, yp]).T)
+    return out
 
 def _merge_convex_parts(parts):
     """Greedily merge convex pieces whose union is still convex (Hertel-Mehlhorn).
@@ -191,8 +253,9 @@ def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logg
     # Rotate about the part's centroid, then put that centroid at the origin.
     # Every piece keeps its offset from the centroid; recentring pieces
     # individually shifts each piece's constraint and lets parts escape.
+    # The part's outline only (outer_boundary); c2 stays the holed centroid.
     pieces = [translate(rotate(p, angle2, origin=c2), -c2.x, -c2.y)
-              for p in decompose_if_needed(master_poly2, logger)]
+              for p in _outline_pieces(master_poly2, logger)[0]]
 
     hole_xy = np.asarray(hole.exterior.coords, dtype=np.float64)
     edges = np.stack([hole_xy[:-1], hole_xy[1:]], axis=1)
@@ -219,50 +282,43 @@ def calculate_inner_fit_polygon(master_poly1, angle1, master_poly2, angle2, logg
         return None
     return polys[0] if len(polys) == 1 else shapely.MultiPolygon(polys)
 
+def _rotation_origin(master_poly, centroid, rot_origin):
+    """minkowski_sum's rotation origin as (x, y): the master's centroid by default, or an
+    explicit Point / (x, y). 'center' is refused: it used to mean each piece's own bbox centre,
+    which scatters the pieces, and nothing passes it."""
+    if rot_origin is None or rot_origin == 'centroid':
+        return (centroid.x, centroid.y)
+    if rot_origin == 'center':
+        raise ValueError("minkowski_sum: rot_origin='center' is not supported")
+    return tuple(interpret_origin(master_poly, rot_origin, 2))
+
 def minkowski_sum(master_poly1, angle1, reflect1, master_poly2, angle2, reflect2, logger, rot_origin1=None, rot_origin2=None):
     """
-    Computes the Minkowski sum of two polygons.
-    It uses the pre-cached decomposition of the master polygons and rotates
-    the individual convex parts before summing them.
+    Computes the Minkowski sum of two polygons' outlines.
+    It uses the cached convex cover of each master's outer boundary
+    (outer_boundary) and rotates the pieces about the holed master's centroid.
+    The result's exterior is the NFP exterior; it carries none of the masters'
+    holes, and compute_and_cache_nfp reads only its exterior.
     """
     if master_poly1.is_empty or master_poly2.is_empty:
         return master_poly1.buffer(0) if master_poly2.is_empty else master_poly2.buffer(0)
 
-    # Get the pre-decomposed convex parts from the cache.
-    poly1_convex_parts = decompose_if_needed(master_poly1, logger)
-    poly2_convex_parts = decompose_if_needed(master_poly2, logger)
+    # Outlines only: holes never move the exterior and multiply the pieces.
+    # c1/c2 below stay the holed masters' centroids (the part's frame).
+    _pieces1, piece_coords1 = _outline_pieces(master_poly1, logger)
+    _pieces2, piece_coords2 = _outline_pieces(master_poly2, logger)
 
     # CRITICAL: Use the MASTER polygon's centroid for all transformations
     # to keep the decomposed convex parts in their correct relative positions.
     c1 = master_poly1.centroid
     c2 = master_poly2.centroid
+    origin1 = _rotation_origin(master_poly1, c1, rot_origin1)
+    origin2 = _rotation_origin(master_poly2, c2, rot_origin2)
 
-    poly1_convex_transformed = []
-    for p in poly1_convex_parts:
-        # Use master centroid for rotation to preserve relative positions of parts
-        use_origin = c1 if (rot_origin1 is None or rot_origin1 == 'centroid') else rot_origin1
-        p_new = rotate(p, angle1, origin=use_origin)
-        if reflect1:
-            # CRITICAL FIX: Reflect around the MASTER centroid, not (0,0)
-            # This keeps all convex parts in correct relative positions after reflection
-            p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(c1.x, c1.y))
-        poly1_convex_transformed.append(p_new)
-
-    poly2_convex_transformed = []
-    for p in poly2_convex_parts:
-        # Use master centroid for rotation to preserve relative positions of parts
-        use_origin = c2 if (rot_origin2 is None or rot_origin2 == 'centroid') else rot_origin2
-        p_new = rotate(p, angle2, origin=use_origin)
-        if reflect2:
-            # CRITICAL FIX: Reflect around the MASTER centroid, not (0,0)
-            # This keeps all convex parts in correct relative positions after reflection
-            p_new = scale(p_new, xfact=-1.0, yfact=-1.0, origin=(c2.x, c2.y))
-        poly2_convex_transformed.append(p_new)
-
-    coords1 = [np.asarray(p.exterior.coords[:-1], dtype=np.float64)
-               for p in poly1_convex_transformed]
-    coords2 = [np.asarray(p.exterior.coords[:-1], dtype=np.float64)
-               for p in poly2_convex_transformed]
+    # Reflect around the MASTER centroid, not (0,0), so the pieces keep their
+    # relative positions.
+    coords1 = _transformed_coords(piece_coords1, angle1, origin1, reflect1, (c1.x, c1.y))
+    coords2 = _transformed_coords(piece_coords2, angle2, origin2, reflect2, (c2.x, c2.y))
     clouds = [_summed_point_cloud(a, b) for a in coords1 for b in coords2]
     if not clouds:
         return Polygon()

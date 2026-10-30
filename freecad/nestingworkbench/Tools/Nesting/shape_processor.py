@@ -25,6 +25,28 @@ def _require_area(poly, obj, up_vector):
         )
 
 
+def _sketch_wires_to_polygon(obj, wires):
+    """A sketch's wires as one polygon: the largest loop is the outline, the rest are holes.
+
+    Wire order in sketch.Shape is not outline-first, and reading Wires[0] alone dropped
+    every hole (ISK-001). A loop outside the outline means the sketch holds several
+    parts, which nest as one only by accident, so it is refused by name.
+    """
+    from shapely.geometry import Polygon as ShapelyPolygon
+    rings = [r for r in (discretize_ring(w, 0.01) for w in wires) if r]
+    if not rings:
+        raise ValueError(f"Sketch '{obj.Label}' contains no usable wires.")
+    rings.sort(key=lambda r: ShapelyPolygon(r).area, reverse=True)
+    outline = ShapelyPolygon(rings[0])
+    strays = [r for r in rings[1:] if not outline.contains(ShapelyPolygon(r).representative_point())]
+    if strays and outline.area > 0:
+        raise ValueError(
+            f"Sketch '{obj.Label}' holds {len(strays) + 1} separate outlines; "
+            f"nesting needs one part per sketch."
+        )
+    return ShapelyPolygon(rings[0], rings[1:])
+
+
 def get_2d_profile_from_obj(obj, up_vector=None, tessellation_quality=0.1, simplification=1.0, verbose=False):
     """
     Extracts a usable 2D profile from a FreeCAD object by projecting it onto the XY plane.
@@ -67,26 +89,12 @@ def get_2d_profile_from_obj(obj, up_vector=None, tessellation_quality=0.1, simpl
     )
     shape.translate(translation)
 
-    # Special case for sketches - already 2D
+    # Special case for sketches - already 2D. Every closed loop counts: the
+    # largest is the outline, the others its holes (ISK-001).
     if obj.isDerivedFrom("Sketcher::SketchObject"):
-        if shape.Wires:
-            try:
-                # Discretize sketch wire to points
-                w = shape.Wires[0]
-                # Default deflection for sketches?
-                pts = [(v.x, v.y) for v in w.discretize(Deflection=0.01)] 
-                if len(pts) > 2:
-                     from shapely.geometry import Polygon as ShapelyPolygon
-                     if pts[0] != pts[-1]: pts.append(pts[0])
-                     poly = ShapelyPolygon(pts)
-                     _require_area(poly, obj, up_vector)
-                     return poly
-            except EdgeOnProfileError:
-                raise
-            except Exception as e:
-                nw_logger.warn(f"Could not convert sketch '{obj.Label}' to polygon: {e}")
-        
-        raise ValueError(f"Sketch '{obj.Label}' contains no usable wires.")
+        poly = _sketch_wires_to_polygon(obj, shape.Wires)
+        _require_area(poly, obj, up_vector)
+        return poly
 
     # Special case for Draft/2D objects - use wire discretization directly
     # Draft Wire, Draft Rectangle, etc. are Part::Part2DObject derivatives.
@@ -251,6 +259,13 @@ def get_2d_profile_from_obj(obj, up_vector=None, tessellation_quality=0.1, simpl
     # If nothing worked
     raise ValueError(f"Unsupported object '{obj.Label}' or no valid 2D geometry found.")
 
+# The version of the outline create_single_nesting_part builds. Bump it whenever that
+# function gives a different outline for the same inputs. Layouts saved earlier then
+# rebuild their outlines on re-nest (shape_preparer, ROS-003) and ignore their stored
+# NFPs (nfp_store, ROS-004).
+OUTLINE_VERSION = 1
+
+
 def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection=0.05, simplification=1.0, up_vector=None, verbose=False):
     """
     Processes a FreeCAD object to generate a shapely-based boundary and populates
@@ -363,7 +378,7 @@ def create_single_nesting_part(shape_to_populate, shape_obj, spacing, deflection
 RING_DEDUP_TOLERANCE = 1e-6  # mm; points closer than this are one vertex
 
 
-def _discretize_ring(wire, deflection):
+def discretize_ring(wire, deflection):
     """Discretizes one closed wire into ring coordinates with no repeated points.
 
     A discretized closed wire usually ends a float-hair away from where it
@@ -397,10 +412,10 @@ def discretize_wires_to_polygon(wires, deflection):
     from shapely.validation import make_valid
     if not wires:
         return None
-    outer = _discretize_ring(wires[0], deflection)
+    outer = discretize_ring(wires[0], deflection)
     if not outer:
         return None
-    holes = [h for h in (_discretize_ring(w, deflection) for w in wires[1:]) if h]
+    holes = [h for h in (discretize_ring(w, deflection) for w in wires[1:]) if h]
     poly = Polygon(outer, holes)
     if not poly.is_valid:
         poly = make_valid(poly)

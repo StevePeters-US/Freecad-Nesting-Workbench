@@ -53,7 +53,7 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         self.silhouettes_checkbox = make_checkbox(
             tr("CAMOptionsDialog", _SILHOUETTES_LABEL),
             checked=False,
-            tooltip=rich_tooltip("CAMOptionsDialog", QT_TRANSLATE_NOOP("CAMOptionsDialog", "Adds each part's silhouette outline as a toolpath."))
+            tooltip=rich_tooltip("CAMOptionsDialog", QT_TRANSLATE_NOOP("CAMOptionsDialog", "Adds each part's silhouette outline to the job's model."))
         )
         layout.addWidget(self.silhouettes_checkbox)
         
@@ -69,10 +69,12 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         self.template_combo.addItem(tr("CAMOptionsDialog", _NO_TEMPLATE_TEXT), None)
         self.template_combo.setSizePolicy(QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Fixed)
         self.template_combo.setToolTip(rich_tooltip("CAMOptionsDialog", QT_TRANSLATE_NOOP(
-            "CAMOptionsDialog", "Optional CAM job template to take operations and tools from.")))
+            "CAMOptionsDialog", "Optional CAM job template to take tool controllers and setup-sheet defaults from.")))
         self._populate_templates()
         
         self.browse_button = QtWidgets.QPushButton(tr("CAMOptionsDialog", _BROWSE_TEXT))
+        self.browse_button.setToolTip(rich_tooltip("CAMOptionsDialog", QT_TRANSLATE_NOOP(
+            "CAMOptionsDialog", "Browses for a CAM job template JSON file on disk.")))
         self.browse_button.clicked.connect(self.browse_template)
         
         template_layout.addWidget(self.template_combo)
@@ -105,30 +107,21 @@ class CAMOptionsDialog(QtWidgets.QDialog):
     def _populate_templates(self):
         """Finds and populates CAM templates."""
         
-        # Standard paths for CAM templates
-        # Check both User AppData and Installation Data directories
         paths = [
             os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "CAM", "Templates"),
-            os.path.join(FreeCAD.getUserAppDataDir(), "Mod", "Path", "Templates"),
             os.path.join(FreeCAD.getHomePath(), "Mod", "CAM", "Templates"),
-            os.path.join(FreeCAD.getHomePath(), "Mod", "Path", "Templates"),
             os.path.join(FreeCAD.getHomePath(), "data", "Mod", "CAM", "Templates"),
-            os.path.join(FreeCAD.getHomePath(), "data", "Mod", "Path", "Templates"),
         ]
-        
-        # Add custom template path if configured in preferences
-        custom_path = FreeCAD.ParamGet("User parameter:BaseApp/Preferences/Path/Job").GetString("Template", "")
-        if custom_path and os.path.isdir(custom_path):
-             paths.insert(0, custom_path)
-
-        # FreeCAD 1.1 CamAssets locations: directly under the user app data
-        # dir on Linux, under a versioned subdir on Windows.
-        for candidate in (
-            os.path.join(FreeCAD.getUserAppDataDir(), "CamAssets", "Templates"),
-            os.path.join(FreeCAD.getUserAppDataDir(), "v1-1", "CamAssets", "Templates"),
-        ):
-            if os.path.isdir(candidate):
-                paths.insert(0, candidate)
+        try:
+            import Path.Preferences
+            # CAM's own template dir under its (versioned) asset path, and the
+            # directory of the user's default job template, if one is set.
+            paths.insert(0, str(Path.Preferences.getTemplateDirectory()))
+            default_template = Path.Preferences.defaultJobTemplate()
+            if default_template:
+                paths.insert(0, os.path.dirname(default_template))
+        except Exception as e:
+            nw_logger.debug(f"[CAMOptionsDialog] CAM template path lookup failed: {e}")
                 
         found_templates = set()
         
@@ -137,7 +130,7 @@ class CAMOptionsDialog(QtWidgets.QDialog):
                 try:
                     files = [f for f in os.listdir(p) if f.lower().endswith(".json")]
                     for f in files:
-                        full_path = os.path.join(p, f)
+                        full_path = os.path.normpath(os.path.join(p, f))
                         # Avoid duplicates
                         if full_path not in found_templates:
                             self.template_combo.addItem(f, full_path)
@@ -155,6 +148,7 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         )
         
         if filename:
+            filename = os.path.normpath(filename)
             # Check if already in combo
             index = self.template_combo.findData(filename)
             if index == -1:
@@ -169,7 +163,8 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         processors = []
         try:
             import Path.Preferences
-            processors = sorted(Path.Preferences.allEnabledPostProcessors())
+            # A Job's PostProcessor accepts legacy posts only; machine posts raise.
+            processors = sorted(Path.Preferences.allEnabledLegacyPostProcessors())
         except Exception as e:
             nw_logger.debug(f"[CAMOptionsDialog] Path.Preferences access failed: {e}")
         for p in processors:
@@ -190,11 +185,12 @@ class CAMOptionsDialog(QtWidgets.QDialog):
         last_template = prefs.GetString("LastCAMTemplate", "")
         
         if last_template and os.path.exists(last_template):
+            normalized_last = os.path.normpath(last_template)
             # Check if it's already in the list
-            index = self.template_combo.findData(last_template)
+            index = self.template_combo.findData(normalized_last)
             if index == -1:
                  # Add it if not found in standard paths
-                 self.template_combo.addItem(os.path.basename(last_template), last_template)
+                 self.template_combo.addItem(os.path.basename(normalized_last), normalized_last)
                  index = self.template_combo.count() - 1
             
             self.template_combo.setCurrentIndex(index)
@@ -230,7 +226,10 @@ class CreateCAMJobCommand:
         return {
             'Pixmap': 'Nesting_CNC_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Create CAM Job'),
-            'ToolTip': QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Creates a CAM job from the selected layout.')
+            'ToolTip': rich_tooltip(
+                'CreateCAMJobCommand',
+                QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Creates a CAM job from the selected layout.\nSelect a Layout group first.'),
+            ),
         }
 
     def Activated(self):

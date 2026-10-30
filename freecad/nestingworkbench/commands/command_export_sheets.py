@@ -21,7 +21,10 @@ class ExportSheetsCommand:
         return {
             'Pixmap': 'Nesting_DXF_Icon.svg',
             'MenuText': QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Export Sheets as DXF'),
-            'ToolTip': QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Exports each sheet in the layout to a separate DXF file.')
+            'ToolTip': rich_tooltip(
+                'ExportSheetsCommand',
+                QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Exports each sheet in the selected layout to its own DXF file.\nSelect a Layout group first.'),
+            ),
         }
 
     def Activated(self):

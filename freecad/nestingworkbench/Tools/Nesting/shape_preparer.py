@@ -28,7 +28,8 @@ def write_master_metadata(container, part_params):
     (re-nest of an existing layout). NestingJob.commit() deletes the old
     MasterShapes group and promotes the reload path's containers in its
     place (nesting_job.py:47-61), so a property written on only one path
-    is silently lost the first time a layout is re-nested.
+    is silently lost the first time a layout is re-nested. The outline stamp
+    (write_outline_stamp) follows the same both-paths rule.
 
     part_params is one value from the `quantities` dict built by
     NestingController._collect_job_parameters. The legacy tuple form is
@@ -57,6 +58,57 @@ def write_master_metadata(container, part_params):
         setattr(container, name, value)
 
 
+OUTLINE_STAMP_PROPS = ("OutlineVersion", "OutlineSpacing", "OutlineDeflection", "OutlineSimplification")
+
+
+def write_outline_stamp(container, spacing, deflection, simplification):
+    """Records what built a master's outline: the outline code version and the
+    Spacing, Curve Angle (deflection) and Simplification in mm, exactly as they were
+    passed to create_single_nesting_part. The properties are read-only in the editor.
+    """
+    specs = (
+        ("App::PropertyInteger", "OutlineVersion",
+         "Outline code version that built this outline", int(shape_processor.OUTLINE_VERSION)),
+        ("App::PropertyFloat", "OutlineSpacing",
+         "Spacing the outline was built at (mm)", float(spacing)),
+        ("App::PropertyFloat", "OutlineDeflection",
+         "Curve deflection the outline was built at (mm)", float(deflection)),
+        ("App::PropertyFloat", "OutlineSimplification",
+         "Simplification the outline was built at (mm)", float(simplification)),
+    )
+    for type_str, name, doc, value in specs:
+        if not hasattr(container, name):
+            container.addProperty(type_str, name, "Nesting", doc)
+        container.setEditorMode(name, 1)
+        setattr(container, name, value)
+
+
+def outline_stamp_mismatch(container, spacing, deflection, simplification):
+    """Why a saved outline cannot be reused, or None when it can.
+
+    Returns "no stamp" when a stamp property is missing (or container is None),
+    "outline version N" when the stored version N is not OUTLINE_VERSION, and
+    "settings changed" when a stored setting differs by more than 1e-9 mm.
+    """
+    if container is None or not all(hasattr(container, n) for n in OUTLINE_STAMP_PROPS):
+        return "no stamp"
+    stored = int(container.OutlineVersion)
+    if stored != shape_processor.OUTLINE_VERSION:
+        return f"outline version {stored}"
+    current = (("OutlineSpacing", spacing), ("OutlineDeflection", deflection),
+               ("OutlineSimplification", simplification))
+    for name, value in current:
+        if abs(float(getattr(container, name)) - float(value)) > 1e-9:
+            return "settings changed"
+    return None
+
+
+def outline_is_current(container, spacing, deflection, simplification):
+    """True when the container's stamp shows its outline was built by the current
+    OUTLINE_VERSION at exactly these settings. See outline_stamp_mismatch."""
+    return outline_stamp_mismatch(container, spacing, deflection, simplification) is None
+
+
 class ShapePreparer:
     """
     Handles the preparation of shapes for nesting.
@@ -67,6 +119,8 @@ class ShapePreparer:
     def __init__(self, doc, processed_shape_cache):
         self.doc = doc
         self.processed_shape_cache = processed_shape_cache
+        # (master label, reason) for each saved outline rebuilt by the current prepare_parts call.
+        self._rebuilt_outlines = []
 
     def prepare_parts(self, ui_global_settings, quantities, master_shapes_map, layout_obj, parts_group):
         """
@@ -86,6 +140,7 @@ class ShapePreparer:
         deflection = ui_global_settings.get('deflection', 0.05)
         simplification = ui_global_settings.get('simplification', 0.1)
         verbose = ui_global_settings.get('verbose', False)
+        self._rebuilt_outlines = []
         
         master_shapes_group = self._get_or_create_master_group(layout_obj)
 
@@ -137,7 +192,17 @@ class ShapePreparer:
             ui_global_settings,
             parts_group
         )
-        
+
+        if self._rebuilt_outlines:
+            reasons = {}
+            for _, reason in self._rebuilt_outlines:
+                reasons[reason] = reasons.get(reason, 0) + 1
+            summary = ", ".join(f"{reason}: {count}" for reason, count in reasons.items())
+            names = ", ".join(name for name, _ in self._rebuilt_outlines)
+            nw_logger.info(
+                f"Rebuilt {len(self._rebuilt_outlines)} saved part outlines at the current "
+                f"Spacing / Curve Angle / Simplification ({summary}): {names}")
+
         return parts_to_nest
 
     @staticmethod
@@ -190,6 +255,11 @@ class ShapePreparer:
                     original_container = parent
                     break
         
+        # A saved outline is reused only when its stamp shows the current outline version
+        # and settings (ROS-003). Otherwise it is rebuilt from the saved master solid.
+        mismatch = outline_stamp_mismatch(original_container, spacing, deflection, simplification)
+        stale = mismatch is not None
+
         temp_container = self.doc.addObject("App::Part", f"temp_master_{original_label}")
         master_shapes_group.addObject(temp_container)
         
@@ -241,11 +311,15 @@ class ShapePreparer:
         write_master_metadata(temp_container, part_params)
 
         temp_shape_wrapper = None
-        if hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
+        if not stale and hasattr(temp_master_obj, "BoundaryObject") and temp_master_obj.BoundaryObject:
             try:
                 bound_shape = temp_master_obj.BoundaryObject.Shape
                 wires = bound_shape.Wires
-                wires.sort(key=lambda w: w.Length, reverse=True)
+                # Enclosed extent, not perimeter: a hole is inside the exterior ring, so its
+                # bbox is too, but a convoluted hole can be longer than a smooth outline. A
+                # perimeter sort would hand discretize_wires_to_polygon the hole as the
+                # exterior and rebuild the part inside out (RLF-001).
+                wires.sort(key=lambda w: w.BoundBox.XLength * w.BoundBox.YLength, reverse=True)
                 
                 final_poly = shape_processor.discretize_wires_to_polygon(wires, deflection)
                 if final_poly:
@@ -265,7 +339,10 @@ class ShapePreparer:
                 nw_logger.warn(f"Shape reload failed for '{label}': {e}\n{traceback.format_exc()}. Recalculating.")
                 temp_shape_wrapper = None
         
-        if not temp_shape_wrapper:
+        # A stale outline skips this fallback: the reproject below builds the wrapper itself.
+        # Running both would build the outline twice and overwrite temp_container.SourceCentroid
+        # before the reproject adds its delta to it.
+        if not temp_shape_wrapper and not stale:
             temp_shape_wrapper = Shape(temp_master_obj)
             shape_processor.create_single_nesting_part(temp_shape_wrapper, temp_master_obj, spacing, deflection, simplification, verbose=verbose)
             # Update the container's SourceCentroid with the recalculated value
@@ -279,11 +356,15 @@ class ShapePreparer:
         new_up = (FreeCAD.Vector(0, 0, 1) if isinstance(part_params, tuple)
                   else FreeCAD.Vector(part_params.get('up_vector', FreeCAD.Vector(0, 0, 1))))
         saved_up = FreeCAD.Vector(getattr(original_container, "UpVector", FreeCAD.Vector(0, 0, 1)))
-        if (new_up - saved_up).Length > 1e-9:
+        if (new_up - saved_up).Length > 1e-9 or stale:
             temp_shape_wrapper = self._reproject_reloaded_master(
                 temp_master_obj, temp_container, new_up, spacing, deflection, simplification,
                 verbose=verbose)
             self.processed_shape_cache[cache_key] = copy.deepcopy(temp_shape_wrapper)
+
+        if stale:
+            self._rebuilt_outlines.append((original_label, mismatch))
+        write_outline_stamp(temp_container, spacing, deflection, simplification)
 
         return temp_master_obj, temp_shape_wrapper
 
@@ -349,7 +430,9 @@ class ShapePreparer:
             source_centroid = FreeCAD.Vector((bb.XMin + bb.XMax) / 2, (bb.YMin + bb.YMax) / 2, (bb.ZMin + bb.ZMax) / 2)
 
         master_container, up_vector = self._create_master_container(label, quantities, source_centroid)
-        
+        # The outline built above (here or from processed_shape_cache, same settings in the key).
+        write_outline_stamp(master_container, spacing, deflection, simplification)
+
         original_shape = world_shape(master_obj)
         if verbose:
             nw_logger.info(f"  -> Creating master for '{label}' (type: {master_obj.TypeId}) with up_vector='{up_vector}'")
@@ -400,46 +483,37 @@ class ShapePreparer:
         return master_container, up_vector
 
     def _rebuild_2d_shape(self, master_obj, original_shape, center_point, plc, offset, verbose, label):
-        """Rebuilds 2D shape by transforming each edge's curve parameters to preserve smooth curves."""
+        """Rebuilds a 2D shape as one face with its holes, every curve kept exact.
+
+        Each edge is copied and moved rather than re-derived from its endpoints, so a
+        B-spline, Bezier or ellipse arc stays that curve (a straight chord before
+        ISK-002). The edges are chained into loops and the bullseye face maker nests
+        them, so holes survive; one Part.Wire of all edges failed for any sketch with
+        a hole and fell back to the first wire alone.
+        """
         try:
-            new_edges = []
+            edges = []
             for edge in original_shape.Edges:
-                curve = edge.Curve
-                if hasattr(curve, 'Radius') and hasattr(curve, 'Center'):
-                    # Circle or Arc: transform center, preserve radius and smoothness
-                    world_center = plc.multVec(curve.Center)
-                    new_center = world_center - offset
-                    new_axis = plc.Rotation.multVec(curve.Axis)
-                    if edge.isClosed():
-                        new_edges.append(Part.makeCircle(curve.Radius, new_center, new_axis))
-                    else:
-                        c = Part.Circle(new_center, new_axis, curve.Radius)
-                        new_edges.append(c.toShape(edge.FirstParameter, edge.LastParameter))
-                elif len(edge.Vertexes) >= 2:
-                    # Line: transform endpoints
-                    p1 = plc.multVec(edge.Vertexes[0].Point) - offset
-                    p2 = plc.multVec(edge.Vertexes[1].Point) - offset
-                    new_edges.append(Part.makeLine(p1, p2))
-                else:
-                    # Fallback: discretize unknown curve types
-                    pts = edge.discretize(Number=72)
-                    transformed = [plc.multVec(p) - offset for p in pts]
-                    for i in range(len(transformed) - 1):
-                        new_edges.append(Part.makeLine(transformed[i], transformed[i + 1]))
-            
-            if new_edges:
-                wire = Part.Wire(new_edges)
-                try:
-                    rebuilt_shape = Part.Face(wire)
-                except Exception as e:
-                    nw_logger.debug(f"[ShapePreparer] Face creation failed, falling back to Compound wire: {e}")
-                    rebuilt_shape = Part.Compound([wire])
+                moved = edge.copy()
+                moved.transformShape(plc.Matrix)
+                moved.translate(offset.negative())
+                edges.append(moved)
+            groups = Part.sortEdges(edges, 0.01)
+            for group in groups:
+                for e in group:
+                    e.fixTolerance(0.01)
+            wires = [Part.Wire(group) for group in groups]
+            closed = [w for w in wires if w.isClosed()]
+            if closed:
+                rebuilt_shape = Part.makeFace(closed, "Part::FaceMakerBullseye")
                 if verbose:
-                    nw_logger.info("     Rebuilt 2D shape with smooth curves")
+                    nw_logger.info(f"     Rebuilt 2D shape: {len(closed)} loop(s), curves kept")
                 return rebuilt_shape
+            if wires:
+                nw_logger.warn(f"     '{label}' has no closed loop; using its open wires as-is.")
+                return Part.Compound(wires)
         except Exception as e:
             nw_logger.warn(f"     Curve preservation unsuccessful for '{label}': {e}. Using polygon approximation.")
-            # Fallback: discretize to polygon
             new_wires = []
             for wire in original_shape.Wires:
                 pts = wire.discretize(Number=72)
@@ -450,11 +524,12 @@ class ShapePreparer:
                     new_wires.append(Part.makePolygon(transformed))
             if new_wires:
                 try:
-                    return Part.Face(new_wires[0])
+                    return Part.makeFace(new_wires, "Part::FaceMakerBullseye")
                 except Exception as e:
                     nw_logger.debug(f"[ShapePreparer] Face creation failed, falling back to Compound wires: {e}")
                     return Part.Compound(new_wires)
         return original_shape
+
 
     def _center_3d_shape(self, master_obj, original_shape, center_point):
         """Bakes the source's world placement and the centring into the geometry.

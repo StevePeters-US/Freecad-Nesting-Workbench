@@ -16,15 +16,15 @@ _TITLE = QT_TRANSLATE_NOOP(_CTX, "Nesting Settings")
 _GROUP_DIAG = QT_TRANSLATE_NOOP(_CTX, "Diagnostics")
 _CRASH_LABEL = QT_TRANSLATE_NOOP(_CTX, "Enable crash logs")
 _CRASH_TIP = QT_TRANSLATE_NOOP(
-    _CTX, "Write every log message to Nesting.log in FreeCAD's user data folder. "
+    _CTX, "Writes every log message to Nesting.log in FreeCAD's user data folder. "
           "Errors are always written, even when this is off.")
 _DEBUG_LABEL = QT_TRANSLATE_NOOP(_CTX, "Enable debug logging")
 _DEBUG_TIP = QT_TRANSLATE_NOOP(
-    _CTX, "Print detailed diagnostic messages to the Report view. Leave off unless "
-          "you are investigating a problem.")
+    _CTX, "Prints detailed diagnostic messages to the Report view. Leave off unless "
+          "investigating a problem.")
 _CURRENCY_LABEL = QT_TRANSLATE_NOOP(_CTX, "Currency symbol")
 _CURRENCY_TIP = QT_TRANSLATE_NOOP(
-    _CTX, "Prefix symbol for cost display (e.g. $, €, £).")
+    _CTX, "Sets the prefix symbol for sheet prices (for example $, € or £).")
 
 
 class SettingsDialog(QtWidgets.QDialog):
@@ -36,9 +36,9 @@ class SettingsDialog(QtWidgets.QDialog):
         self.setWindowTitle(tr(_CTX, _TITLE))
 
         self.crash_check = make_checkbox(
-            tr(_CTX, _CRASH_LABEL), nw_logger.get_enable_crash_log(), tr(_CTX, _CRASH_TIP))
+            tr(_CTX, _CRASH_LABEL), nw_logger.get_enable_crash_log(), rich_tooltip(_CTX, _CRASH_TIP))
         self.debug_check = make_checkbox(
-            tr(_CTX, _DEBUG_LABEL), nw_logger.get_enable_debug_log(), tr(_CTX, _DEBUG_TIP))
+            tr(_CTX, _DEBUG_LABEL), nw_logger.get_enable_debug_log(), rich_tooltip(_CTX, _DEBUG_TIP))
 
         curr = ""
         try:
@@ -82,7 +82,10 @@ class SettingsCommand:
         return {
             'Pixmap': 'preferences-system',
             'MenuText': QT_TRANSLATE_NOOP(_CTX, 'Nesting Settings'),
-            'ToolTip': QT_TRANSLATE_NOOP(_CTX, 'Configure Nesting Workbench settings such as logging.'),
+            'ToolTip': rich_tooltip(
+                _CTX,
+                QT_TRANSLATE_NOOP(_CTX, 'Sets the currency symbol and diagnostic logging options for the workbench.'),
+            ),
         }
 
     def Activated(self):

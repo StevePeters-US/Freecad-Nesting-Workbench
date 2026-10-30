@@ -20,3 +20,6 @@ venv/
 # Editor / OS cruft
 .DS_Store
 *.swp
+
+# Generated numpy caches
+*.npz

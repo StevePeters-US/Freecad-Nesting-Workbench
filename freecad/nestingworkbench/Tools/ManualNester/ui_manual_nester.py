@@ -7,7 +7,7 @@ for the manual nester tool task panel.
 """
 
 from PySide import QtCore, QtWidgets
-from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, make_double_spinbox, rich_tooltip
+from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, make_double_spinbox, make_quantity_spinbox, rich_tooltip
 from .physics_engine import RADIUS_DEFAULT_MM, RADIUS_MIN_MM, RADIUS_MAX_MM
 
 class ManualNesterToolUI(QtWidgets.QWidget):
@@ -36,14 +36,23 @@ class ManualNesterToolUI(QtWidgets.QWidget):
         mode_layout = QtWidgets.QVBoxLayout()
 
         self.radio_physics = QtWidgets.QRadioButton(tr("ManualNesterToolUI", "Push parts (Physics)"))
-        self.radio_physics.setToolTip(tr("ManualNesterToolUI", "Dragging a part pushes nearby parts out of the way."))
+        self.radio_physics.setToolTip(rich_tooltip(
+            "ManualNesterToolUI",
+            QT_TRANSLATE_NOOP("ManualNesterToolUI", "Pushes nearby parts out of the way while dragging a part."),
+        ))
         self.radio_physics.setChecked(True)
 
         self.radio_valid = QtWidgets.QRadioButton(tr("ManualNesterToolUI", "Valid placement only"))
-        self.radio_valid.setToolTip(tr("ManualNesterToolUI", "The dragged part only moves to positions that don't overlap other parts."))
+        self.radio_valid.setToolTip(rich_tooltip(
+            "ManualNesterToolUI",
+            QT_TRANSLATE_NOOP("ManualNesterToolUI", "Moves the dragged part only to positions that do not overlap other parts."),
+        ))
 
         self.radio_autorotate = QtWidgets.QRadioButton(tr("ManualNesterToolUI", "Auto-rotate to fit"))
-        self.radio_autorotate.setToolTip(tr("ManualNesterToolUI", "Pushes nearby parts and also rotates the dragged part for tighter fitment."))
+        self.radio_autorotate.setToolTip(rich_tooltip(
+            "ManualNesterToolUI",
+            QT_TRANSLATE_NOOP("ManualNesterToolUI", "Pushes nearby parts and rotates the dragged part for a tighter fit."),
+        ))
 
         mode_layout.addWidget(self.radio_physics)
         mode_layout.addWidget(self.radio_valid)
@@ -55,11 +64,11 @@ class ManualNesterToolUI(QtWidgets.QWidget):
         self.physics_group = QtWidgets.QGroupBox(tr("ManualNesterToolUI", "Physics Settings"))
         physics_layout = QtWidgets.QFormLayout()
 
-        self.radius_spin = make_double_spinbox(
+        self.radius_spin = make_quantity_spinbox(
             RADIUS_DEFAULT_MM, RADIUS_MIN_MM, RADIUS_MAX_MM, step=10,
-            tooltip=rich_tooltip("ManualNesterToolUI", QT_TRANSLATE_NOOP("ManualNesterToolUI", "Distance (mm) within which dragged parts push surrounding parts."))
+            tooltip=rich_tooltip("ManualNesterToolUI", QT_TRANSLATE_NOOP("ManualNesterToolUI", "Sets the distance within which a dragged part pushes surrounding parts.\n<b>Lower:</b> affects only immediate neighbours. <b>Higher:</b> pushes parts across a wider area.\n<b>Default:</b> 50 mm."))
         )
-        physics_layout.addRow(tr("ManualNesterToolUI", "Influence Radius (mm):"), self.radius_spin)
+        physics_layout.addRow(tr("ManualNesterToolUI", "Influence Radius:"), self.radius_spin)
 
         self.curve_dropdown = QtWidgets.QComboBox()
         self.curve_dropdown.addItems([
@@ -68,12 +77,15 @@ class ManualNesterToolUI(QtWidgets.QWidget):
             tr("ManualNesterToolUI", "Sharp"),
         ])
         self.curve_dropdown.setCurrentIndex(1)
-        self.curve_dropdown.setToolTip(tr("ManualNesterToolUI", "Force falloff profile over distance (Linear, Smooth cubic, or Sharp exponential)."))
+        self.curve_dropdown.setToolTip(rich_tooltip(
+            "ManualNesterToolUI",
+            QT_TRANSLATE_NOOP("ManualNesterToolUI", "Selects the repulsion falloff profile over distance (Linear, Smooth cubic or Sharp exponential).\n<b>Default:</b> Smooth."),
+        ))
         physics_layout.addRow(tr("ManualNesterToolUI", "Falloff Curve:"), self.curve_dropdown)
 
         self.strength_spin = make_double_spinbox(
             1.0, 0.1, 2.0, step=0.1,
-            tooltip=rich_tooltip("ManualNesterToolUI", QT_TRANSLATE_NOOP("ManualNesterToolUI", "Multiplier scaling the repulsion displacement force applied to neighboring parts."))
+            tooltip=rich_tooltip("ManualNesterToolUI", QT_TRANSLATE_NOOP("ManualNesterToolUI", "Scales the repulsion force applied to neighbouring parts.\n<b>Lower:</b> gentler push. <b>Higher:</b> stronger displacement.\n<b>Default:</b> 1.0. <b>Typical:</b> 0.5–1.5."))
         )
         physics_layout.addRow(tr("ManualNesterToolUI", "Strength:"), self.strength_spin)
 
