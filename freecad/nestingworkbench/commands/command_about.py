@@ -38,9 +38,10 @@ class AboutCommand:
     """Shows version information and a Patreon link for the workbench."""
 
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_Workbench.svg',
-            'MenuText': QT_TRANSLATE_NOOP('AboutCommand', 'About Nesting Workbench'),
+            'MenuText': tr('AboutCommand', 'About Nesting Workbench'),
             'ToolTip': rich_tooltip(
                 'AboutCommand',
                 QT_TRANSLATE_NOOP('AboutCommand', 'Shows the installed workbench version and a link to support development.'),

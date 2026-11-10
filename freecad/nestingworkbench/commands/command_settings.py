@@ -225,9 +225,10 @@ class SettingsCommand:
     """Opens the Nesting Workbench settings dialog."""
 
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'preferences-system',
-            'MenuText': QT_TRANSLATE_NOOP(_CTX, 'Nesting Settings'),
+            'MenuText': tr(_CTX, 'Nesting Settings'),
             'ToolTip': rich_tooltip(
                 _CTX,
                 QT_TRANSLATE_NOOP(_CTX, 'Configure the Nesting Workbench: currency symbol, completion sound, colors and logging.'),

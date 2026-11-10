@@ -22,6 +22,8 @@ _COMMANDS = (
     'Nesting_About',
 )
 
+_MENU_NAME = QT_TRANSLATE_NOOP("Workbench", "Nesting")
+
 
 class NestingWorkbench(FreeCADGui.Workbench):
     """
@@ -44,6 +46,8 @@ class NestingWorkbench(FreeCADGui.Workbench):
         FreeCADGui.addIconPath(ICONS_DIR)
         if hasattr(FreeCADGui, "addLanguagePath") and os.path.isdir(TRANSLATIONS_DIR):
             FreeCADGui.addLanguagePath(TRANSLATIONS_DIR)
+            if hasattr(FreeCADGui, "updateLocale"):
+                FreeCADGui.updateLocale()
         # Import the command modules. This executes the FreeCADGui.addCommand()
         # in each file, making the commands available to FreeCAD.
         from freecad.nestingworkbench.commands import command_nest

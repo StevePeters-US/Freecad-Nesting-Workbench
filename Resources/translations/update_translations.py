@@ -169,10 +169,13 @@ def generate_ts_xml(extracted_data, existing_translations, language=None):
         for source_text in sorted(messages.keys()):
             msg_elem = ET.SubElement(context_elem, "message")
 
-            # Add locations
+            # Add locations relative to Resources/translations/ with forward slashes
             for rel_path, lineno in messages[source_text]:
                 loc_elem = ET.SubElement(msg_elem, "location")
-                loc_elem.set("filename", rel_path)
+                norm_rel = rel_path.replace("\\", "/")
+                if not norm_rel.startswith("../"):
+                    norm_rel = f"../../{norm_rel}"
+                loc_elem.set("filename", norm_rel)
                 loc_elem.set("line", str(lineno))
 
             src_elem = ET.SubElement(msg_elem, "source")
@@ -195,15 +198,26 @@ def generate_ts_xml(extracted_data, existing_translations, language=None):
     return parsed.toprettyxml(indent="    ", encoding="utf-8").decode("utf-8")
 
 
+def _find_lrelease():
+    """Finds an lrelease binary on PATH or in standard Qt/Conda locations."""
+    for name in ("lrelease", "lrelease-qt6", "lrelease-qt5", "pyside6-lrelease", "pyside2-lrelease"):
+        found = shutil.which(name)
+        if found:
+            return found
+    for candidate in (
+        os.path.expanduser("~/anaconda3/Library/bin/lrelease.exe"),
+        os.path.expanduser("~/miniconda3/Library/bin/lrelease.exe"),
+        "C:/ProgramData/anaconda3/Library/bin/lrelease.exe",
+        "C:/ProgramData/miniconda3/Library/bin/lrelease.exe",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def compile_ts_to_qm(ts_path, qm_path):
     """Compiles a .ts file to .qm using lrelease if available."""
-    lrelease_bin = (
-        shutil.which("lrelease")
-        or shutil.which("lrelease-qt5")
-        or shutil.which("lrelease-qt6")
-        or shutil.which("pyside6-lrelease")
-        or shutil.which("pyside2-lrelease")
-    )
+    lrelease_bin = _find_lrelease()
     if not lrelease_bin:
         print(f"Notice: lrelease not found in PATH; cannot compile {os.path.basename(ts_path)} to .qm.")
         return False
@@ -244,7 +258,7 @@ def main():
     print(f"Wrote master template: {ts_path}")
 
     # Process all .ts files in translations dir
-    for fname in os.listdir(translations_dir):
+    for fname in sorted(os.listdir(translations_dir)):
         if fname.endswith(".ts") and fname != ts_filename:
             path = os.path.join(translations_dir, fname)
             lang_existing = load_existing_ts(path)
@@ -255,8 +269,8 @@ def main():
             print(f"Updated language file: {path}")
 
     if args.compile:
-        for fname in os.listdir(translations_dir):
-            if fname.endswith(".ts"):
+        for fname in sorted(os.listdir(translations_dir)):
+            if fname.endswith(".ts") and fname != ts_filename:
                 qm_fname = fname[:-3] + ".qm"
                 ts_file = os.path.join(translations_dir, fname)
                 qm_file = os.path.join(translations_dir, qm_fname)

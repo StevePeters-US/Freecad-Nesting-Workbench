@@ -4,7 +4,7 @@
 A scorer takes (pts, valid, ctx) and returns (best_idx, metric), or (None, inf) when no
 candidate is valid; lower metric is better, and ties take the first candidate (ruling 19).
 With no Contact and no Direction weight it is MinkowskiEngine.score_gravity unchanged.
-FreeCAD-free. Never union placed parts or their NFPs here (AGENTS.md).
+FreeCAD-free. Never union placed parts or their NFPs here.
 """
 from dataclasses import dataclass
 

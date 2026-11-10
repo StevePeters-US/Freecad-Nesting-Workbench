@@ -24,9 +24,10 @@ _INCLUDE_BOUNDS_TOOLTIP = QT_TRANSLATE_NOOP(
 class ExportSheetsCommand:
     """The command to export each sheet as a DXF file."""
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_DXF_Icon.svg',
-            'MenuText': QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Export Sheets as DXF'),
+            'MenuText': tr('ExportSheetsCommand', 'Export Sheets as DXF'),
             'ToolTip': rich_tooltip(
                 'ExportSheetsCommand',
                 QT_TRANSLATE_NOOP('ExportSheetsCommand', 'Exports each sheet in the selected layout to its own DXF file.\nSelect a Layout group first.\nInkscape: tick "Gcodetools compatible point import" in its DXF import options, or some edges are missing.'),

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 import FreeCAD
 import FreeCADGui
+from PySide import QtWidgets
 from freecad.nestingworkbench.Tools.ManualNester import manual_nester_panel_manager
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
 from freecad.nestingworkbench.freecad_helpers import is_layout_group
@@ -12,9 +13,10 @@ class ManualNesterCommand:
     _task_panel = None
     
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_Transform_Icon_Disabled.svg' if MANUAL_NESTER_DISABLED else 'Nesting_Transform_Icon.svg',
-            'MenuText': QT_TRANSLATE_NOOP('ManualNesterCommand', 'Manual Nester'),
+            'MenuText': tr('ManualNesterCommand', 'Manual Nester'),
             'ToolTip': rich_tooltip(
                 'ManualNesterCommand',
                 QT_TRANSLATE_NOOP('ManualNesterCommand', 'Moves and rotates placed parts by hand in the selected layout (experimental; currently disabled).\nSelect a Layout group first.'),

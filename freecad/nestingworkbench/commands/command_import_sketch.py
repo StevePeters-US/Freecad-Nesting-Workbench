@@ -16,14 +16,20 @@ from freecad.nestingworkbench import nw_logger
 from freecad.nestingworkbench.constants import PREFS_PATH
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
 
+_IMPORT_DIALOG_TITLE = QT_TRANSLATE_NOOP("ImportSketchCommand", "Import DXF / SVG as Sketches")
+_IMPORT_DIALOG_FILTER = QT_TRANSLATE_NOOP(
+    "ImportSketchCommand", "Drawings (*.dxf *.svg);;DXF (*.dxf);;SVG (*.svg)"
+)
+
 
 class ImportSketchCommand:
     """Command to import DXF/SVG files as one sketch per part (ISK-009)."""
 
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_ImportSketch_Icon.svg',
-            'MenuText': QT_TRANSLATE_NOOP('ImportSketchCommand', 'Import as Sketches...'),
+            'MenuText': tr('ImportSketchCommand', 'Import as Sketches...'),
             'ToolTip': rich_tooltip(
                 'ImportSketchCommand',
                 QT_TRANSLATE_NOOP(
@@ -42,11 +48,12 @@ class ImportSketchCommand:
         param_grp = FreeCAD.ParamGet(PREFS_PATH)
         default_dir = param_grp.GetString("SketchImportDir", "")
 
+        tr = QtWidgets.QApplication.translate
         files, _selected_filter = QtWidgets.QFileDialog.getOpenFileNames(
             None,
-            "Import DXF / SVG as Sketches",
+            tr("ImportSketchCommand", _IMPORT_DIALOG_TITLE),
             default_dir,
-            "Drawings (*.dxf *.svg);;DXF (*.dxf);;SVG (*.svg)"
+            tr("ImportSketchCommand", _IMPORT_DIALOG_FILTER)
         )
 
         if not files:

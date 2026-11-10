@@ -18,6 +18,8 @@ _TEMPLATE_LABEL = QT_TRANSLATE_NOOP("CAMOptionsDialog", "CAM Template (Optional)
 _NO_TEMPLATE_TEXT = QT_TRANSLATE_NOOP("CAMOptionsDialog", "None")
 _BROWSE_TEXT = QT_TRANSLATE_NOOP("CAMOptionsDialog", "Browse...")
 _POST_LABEL = QT_TRANSLATE_NOOP("CAMOptionsDialog", "Post Processor:")
+_SELECT_TEMPLATE_TITLE = QT_TRANSLATE_NOOP("CAMOptionsDialog", "Select CAM Job Template")
+_TEMPLATE_FILTER = QT_TRANSLATE_NOOP("CAMOptionsDialog", "JSON Files (*.json);;All Files (*)")
 
 
 class CAMOptionsDialog(QtWidgets.QDialog):
@@ -140,11 +142,12 @@ class CAMOptionsDialog(QtWidgets.QDialog):
     
     def browse_template(self):
         """Opens a file dialog to select a template."""
+        tr = QtWidgets.QApplication.translate
         filename, _ = QtWidgets.QFileDialog.getOpenFileName(
             self,
-            "Select CAM Job Template",
+            tr("CAMOptionsDialog", _SELECT_TEMPLATE_TITLE),
             FreeCAD.getUserAppDataDir(),
-            "JSON Files (*.json);;All Files (*)"
+            tr("CAMOptionsDialog", _TEMPLATE_FILTER)
         )
         
         if filename:
@@ -223,9 +226,10 @@ class CAMOptionsDialog(QtWidgets.QDialog):
 class CreateCAMJobCommand:
     """The command to create a CAM job from a layout."""
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_CNC_Icon.svg',
-            'MenuText': QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Create CAM Job'),
+            'MenuText': tr('CreateCAMJobCommand', 'Create CAM Job'),
             'ToolTip': rich_tooltip(
                 'CreateCAMJobCommand',
                 QT_TRANSLATE_NOOP('CreateCAMJobCommand', 'Creates a CAM job from the selected layout.\nSelect a Layout group first.'),

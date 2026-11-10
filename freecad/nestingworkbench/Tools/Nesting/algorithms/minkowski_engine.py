@@ -393,7 +393,7 @@ class MinkowskiEngine:
 
     def candidate_nfps(self, part_to_place, angle, sheet):
         """The translated, prepared NFPs of *sheet*'s placed parts against *part_to_place* at
-        *angle*: one polygon per placed part, never unioned (AGENTS.md). Read-only; valid after
+        *angle*: one polygon per placed part, never unioned. Read-only; valid after
         get_incremental_candidates for the same (part, angle, sheet). Empty when it hasn't run."""
         cache = sheet.__dict__.get('_cand_cache', {})
         entry = cache.get(self.candidate_cache_key(part_to_place, angle))

@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-"""The workbench's only logging entry point — see .claude/skills/logging/SKILL.md."""
+"""The workbench's only logging entry point."""
 import logging
 import logging.handlers
 import multiprocessing

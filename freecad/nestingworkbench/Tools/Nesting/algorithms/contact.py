@@ -3,7 +3,7 @@
 
 Contact is the length of a part's spaced outline that lies within CONTACT_TOL of a placed part's
 outline or a sheet edge, as a fraction of its perimeter. Each placed part is tested on its own;
-nothing is unioned (AGENTS.md). FreeCAD-free; runs in worker processes.
+nothing is unioned. FreeCAD-free; runs in worker processes.
 """
 import numpy as np
 import shapely

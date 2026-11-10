@@ -6,7 +6,7 @@ FreeCAD.
 Grid lines are the sheet edges plus every part's bounding-box edges, so the measure is
 conservative: a cell a part's polygon overlaps at all counts as used, and the space around a
 round part's corners is lost. Extraction is greedy, largest rectangle first. No union of parts
-(AGENTS.md): each part is tested only against the cells inside its own bounding box.
+(never unioned): each part is tested only against the cells inside its own bounding box.
 """
 import numpy as np
 import shapely

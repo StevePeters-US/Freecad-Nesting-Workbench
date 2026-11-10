@@ -55,9 +55,10 @@ class NestingCommand:
 
     def GetResources(self):
         """Defines the command's appearance in FreeCAD."""
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_Nest_Icon.svg',
-            'MenuText': QT_TRANSLATE_NOOP('NestingCommand', 'Run Nesting Tool'),
+            'MenuText': tr('NestingCommand', 'Run Nesting Tool'),
             'ToolTip': rich_tooltip(
                 'NestingCommand',
                 QT_TRANSLATE_NOOP('NestingCommand', 'Opens the 2D nesting task panel.\nOpen a document first.')),

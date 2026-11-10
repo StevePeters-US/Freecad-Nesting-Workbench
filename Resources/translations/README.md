@@ -21,6 +21,21 @@ python3 Resources/translations/update_translations.py
 ```
 This updates `NestingWorkbench.ts` and synchronizes any existing locale files (e.g., `NestingWorkbench_de.ts`, `NestingWorkbench_fr.ts`), preserving existing translations.
 
+### Adding a New Language
+`NestingWorkbench.ts` is only the source-string template (every entry is
+`unfinished`); FreeCAD never loads it. To add a language:
+
+1. Copy it to `NestingWorkbench_<lang>.ts` (e.g. `NestingWorkbench_de.ts`) and set
+   `<TS version="2.1" language="de">`.
+2. Fill in the `<translation>` entries (Qt Linguist works well) and remove
+   `type="unfinished"` from each finished one.
+3. Compile it to `NestingWorkbench_<lang>.qm` in this same folder (step 3 below).
+4. Set FreeCAD's language to match and restart FreeCAD.
+
+Only the `.qm` is loaded, and only once the workbench has been activated, so the
+workbench's own name in the selector is not translated. Contributors without
+`lrelease` can send the finished `.ts` and a maintainer compiles it.
+
 ### 3. Compiling Binary `.qm` Catalogs
 When Qt Linguist tools (`lrelease`) are installed, compile `.ts` files to binary `.qm` catalogs:
 ```bash

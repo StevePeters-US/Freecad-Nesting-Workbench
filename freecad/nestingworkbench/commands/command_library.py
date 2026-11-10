@@ -3,6 +3,7 @@
 
 import FreeCAD
 import FreeCADGui
+from PySide import QtWidgets
 
 from freecad.nestingworkbench.Tools.Library.ui_library import LibraryDialog
 from freecad.nestingworkbench.ui_helpers import QT_TRANSLATE_NOOP, rich_tooltip
@@ -14,9 +15,10 @@ class LibraryCommand:
     """Opens the Nesting Workbench library management window."""
 
     def GetResources(self):
+        tr = QtWidgets.QApplication.translate
         return {
             'Pixmap': 'Nesting_Library',
-            'MenuText': QT_TRANSLATE_NOOP(_CTX, 'Library'),
+            'MenuText': tr(_CTX, 'Library'),
             'ToolTip': rich_tooltip(
                 _CTX,
                 QT_TRANSLATE_NOOP(
